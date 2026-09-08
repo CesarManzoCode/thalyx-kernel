@@ -1,0 +1,10 @@
+# Both the kernel and the user programs are static ET_EXEC images placed by a
+# linker script at a fixed virtual address. The default relocation model for
+# x86_64-unknown-none is PIC; a position-independent image would need a
+# relocation pass that neither the boot loader nor the kernel's bounded ELF
+# loader performs, so the model is fixed to `static` here instead.
+[target.x86_64-unknown-none]
+rustflags = ["-C", "relocation-model=static"]
+
+[build]
+target-dir = "build/cargo"
