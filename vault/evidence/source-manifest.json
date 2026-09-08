@@ -1,0 +1,987 @@
+{
+  "schema_version": 1,
+  "consulted_on": "2026-09-08",
+  "repository": {
+    "name": "CesarManzoCode/thalyx",
+    "commit": "0492f72e487e2463b0d7b938365a8b3383364cb9",
+    "reachable_commits": 407,
+    "source_worktree_unchanged": true
+  },
+  "method": "Full tree/history inventory and targeted static reading of foundational notes, evolution, critical implementation paths and tests; no Thalyx tests/build/hardware executed in this task. Inventory is not a claim that every line was read.",
+  "files": [
+    {
+      "path": "CLAUDE.md",
+      "bytes": 18895,
+      "sha256": "2db00d4514dc982228eb0b80d114158a774847e7cd5c903b19b45fb263993f64",
+      "git_blob": "b7f1a6c2a21fb71079358bdaf91c5afa271e7d50",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/CLAUDE.md",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "Cargo.lock",
+      "bytes": 36639,
+      "sha256": "d6462e7ed317749f6ea636361db7d914a04c5f44e47e0982f04ea6c55c9fd9e5",
+      "git_blob": "27866d478fe76b35e8582f3c97ef729706db10f7",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/Cargo.lock",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "Cargo.toml",
+      "bytes": 4162,
+      "sha256": "0a9167e50eef828d4fa1b90b9b24ac4271083c16716f763035bcbbeb1ab6589a",
+      "git_blob": "0e6967789797f6069652084e61824df44743bc8d",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/Cargo.toml",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-abi/src/lib.rs",
+      "bytes": 18282,
+      "sha256": "864f36d34b819144403a4538a05e5b28a1f365fc676cc3bcb9b28df2806faa34",
+      "git_blob": "acfe0788b39dae7526e78c502d3e0ee5f4de04af",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-abi/src/lib.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-agent/src/lib.rs",
+      "bytes": 11955,
+      "sha256": "a4aad4ecd1838863f36842d7fb247dd47dff70cf2a6e23b19f4cc68048ff4f13",
+      "git_blob": "b64e84ffc731b6e8528d864ea6c84e7a661ef8ef",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-agent/src/lib.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-bpf/src/lib.rs",
+      "bytes": 22858,
+      "sha256": "71070c4ca3c8559e9c4dded7f793f5b3ffcde61d95572620aaa1b6c26f154808",
+      "git_blob": "84feb3e1779376d03313e097294fbdb52730969a",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-bpf/src/lib.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-bridge/src/lib.rs",
+      "bytes": 15261,
+      "sha256": "bc2a11ac0af0ce498da1f2af59cfb8c8fd8ba63425ad7cf31a065c8528cca503",
+      "git_blob": "2b18088256c0b9fd19d6a5f90f45169d2e2b5ed4",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-bridge/src/lib.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-cli/src/exec.rs",
+      "bytes": 183171,
+      "sha256": "0178d7448c24bac4f0135cfd34d41fa72efc93cc94633e793a86ad997a7f8246",
+      "git_blob": "919e1bc0cf424cefe1f22e5fc6bbcd32d5fef586",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-cli/src/exec.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-core/src/api.rs",
+      "bytes": 37053,
+      "sha256": "350f0600deed256e7f607b0437c81a19f630549974cbb4db1bab16714ee95745",
+      "git_blob": "69e6133960ce49a023258c71f1874805e93b95f7",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-core/src/api.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-core/src/attempt.rs",
+      "bytes": 49603,
+      "sha256": "4d5287e99169c4a1fff9cef3f5efb9a4917ff02911c07f89c0adc9d0b0fe1865",
+      "git_blob": "f4d0d3a44e2ebbb81b0656e6d20044f4008b6213",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-core/src/attempt.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-core/src/commit.rs",
+      "bytes": 7872,
+      "sha256": "9f20d63bf21742c15dbd1c93e7c54f0098ef9224bc34acbc3f023156654cb3e3",
+      "git_blob": "ab06fd32de4e53899b32f319001f84d24ab719be",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-core/src/commit.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-core/src/foreign.rs",
+      "bytes": 27726,
+      "sha256": "4021460054e24448d17e33daaa30e0f7b8bb0daa17765baf43cf34b1ee6ce0c0",
+      "git_blob": "dfc9f3fb473df3be495ccca7b03b16b2078e9e75",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-core/src/foreign.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-core/src/lib.rs",
+      "bytes": 15308,
+      "sha256": "ca0cbf8be9e0f57d6dacb838001302bb6ba89294388796858b58619bae8f995e",
+      "git_blob": "c2b7c69ce312d1c3b876411c91232956782ebf02",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-core/src/lib.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-core/src/permissions.rs",
+      "bytes": 17955,
+      "sha256": "6cdd0930620065f91e726bc7e176cca18be49a11a403f99fe51c422ffd5bc826",
+      "git_blob": "7d6e49a3abdcca48d49ac6d68b791c0fdf8fe54c",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-core/src/permissions.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-core/src/reconcile.rs",
+      "bytes": 9497,
+      "sha256": "ff0a513603414ef7efec312f6821c3a431d02be021f2922e3306921cb7270cb0",
+      "git_blob": "4d376c99562c4c57acfa5b369ee3abff135d51f7",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-core/src/reconcile.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-core/src/run.rs",
+      "bytes": 40995,
+      "sha256": "c0bc83212caa220073f6b6a1976cd2e69700ab412f1867e11fc4bc5f78bcefd7",
+      "git_blob": "cd739aafb768d9138204d01d39b421a4c7423ba3",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-core/src/run.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-core/src/store.rs",
+      "bytes": 20408,
+      "sha256": "ab0da9c55bf54677c5b7e737d30ba35e771980f1b201c3534e27d89b0fae860c",
+      "git_blob": "e9319dc44b1c6c88c4637dd146c72b6600a9f89e",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-core/src/store.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-core/src/trusted_path.rs",
+      "bytes": 32354,
+      "sha256": "c982b6acea520955f7cdc0406be0d461472a7c1d595416f5b578dd459781bc30",
+      "git_blob": "bced707ae0f6c17821f179b37fee8683dbc27121",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-core/src/trusted_path.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-graph/src/lib.rs",
+      "bytes": 71211,
+      "sha256": "3a74b29ae19ba9aa2f46dfb9906da48c5005efc2f7d3eacd41489b39a9610cbc",
+      "git_blob": "c199121fb5a74fdea14d91fb5f6936114e25cb9b",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-graph/src/lib.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-journal/src/lib.rs",
+      "bytes": 14499,
+      "sha256": "645ac1d553edcb7c5edb4e1f59b383ef0d004b3e87b9fc409dd2ee5879306d2c",
+      "git_blob": "af36b891e2e165a1041cdc7bdaf9e90c7af2904a",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-journal/src/lib.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-know/src/lib.rs",
+      "bytes": 10398,
+      "sha256": "ba0487f79d01bd3c5aa017e3b0ac64dbba07452dd4561387a3d5e00e1a5c6150",
+      "git_blob": "512340a59b7c77e10ed91302858181cd3731956f",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-know/src/lib.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-know/src/witness.rs",
+      "bytes": 9284,
+      "sha256": "5d4610b1d5cace8ea39b537f2de34b0d1648f40459fe372dfa8599ed935e31b2",
+      "git_blob": "b865d2c58ab6f61ed4b8c4fdc72260a8dcde8796",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-know/src/witness.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-memory/src/lib.rs",
+      "bytes": 13753,
+      "sha256": "18d991d2a3b89c5d55eecac63cfc48f5f3ac2d91a409d3b996abec16638fe186",
+      "git_blob": "46abf78704ac9167ee354800f29250f7fc72da95",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-memory/src/lib.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-permd/src/lib.rs",
+      "bytes": 17039,
+      "sha256": "fd6965c1c80ffe121555488ee841502c5aaa7f1d66e6764086ef5c9fbeee81e8",
+      "git_blob": "1167d73a134c4fde1c0837ed37c735711bff61b2",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-permd/src/lib.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-program/src/lib.rs",
+      "bytes": 46234,
+      "sha256": "f0348b54d63b6c2cf975afbca69ec26653af5501bbaf2dabae309fbc563c2215",
+      "git_blob": "8be46a572909dd1f03a22dc78a10262a0e12219f",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-program/src/lib.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-rust/src/lib.rs",
+      "bytes": 42660,
+      "sha256": "b391bf04582cd40c8298bfe8b44b591d299452657557aa1419ae4cbee1fe767d",
+      "git_blob": "659f657b0abcba6f2b3468373169d1293d62006d",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-rust/src/lib.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-sandbox/src/cgroup.rs",
+      "bytes": 17989,
+      "sha256": "2b712411ff41dcd801c0625007b9f728b258678ec72d608b2283eb2d87699d67",
+      "git_blob": "358dc88fa017cef810659352eb5649b3b1f81eb7",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-sandbox/src/cgroup.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-sandbox/src/idmap.rs",
+      "bytes": 10090,
+      "sha256": "f00c0423c258fcf93115794be1bed503173bb91ce3c28c00b7cb62303d223fa3",
+      "git_blob": "c8924d2c42d002bd9800a69b4875457c82c5198f",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-sandbox/src/idmap.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-sandbox/src/launch.rs",
+      "bytes": 32527,
+      "sha256": "28a4ad350b4fe28cc6bbcd066bee642c8727acefeef073a78a74baf9c9e13bd5",
+      "git_blob": "db979c5d8a737a1602e82db43ef9b9763ae8f063",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-sandbox/src/launch.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-sandbox/src/lib.rs",
+      "bytes": 41727,
+      "sha256": "2e82ec5413e2b707d622b8cf2e4c4910701d84812d985f49141f8f658298724b",
+      "git_blob": "6334468fc56e47e4634eb198935041fb6c6e91c1",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-sandbox/src/lib.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-sandbox/src/limits.rs",
+      "bytes": 10235,
+      "sha256": "1954bb1643579b26d9057c063f71979082389fc4358f056b677b265966a004b2",
+      "git_blob": "448c6905f81b106cdb12652425cc4b4a3f69c287",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-sandbox/src/limits.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-sandbox/src/rootfs.rs",
+      "bytes": 31674,
+      "sha256": "e7d5e83e1c57e9424cc52b542c1e60eab6120b14757a5d2cbf96c4bce1d28ec3",
+      "git_blob": "1edaed377d8e523f44504c866d682dc7452b6b6f",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-sandbox/src/rootfs.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-sandbox/src/seccomp.rs",
+      "bytes": 54921,
+      "sha256": "e36985ebcc2b77d99fccb6197b103c9bb05ef4640a107140843e687327b401d6",
+      "git_blob": "09e24a07021e19ac201eac645e511ef3dda09949",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-sandbox/src/seccomp.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-snapshot/src/lib.rs",
+      "bytes": 53070,
+      "sha256": "7611d1181377cb48add6a7689b9716ff39a30dc37c197f0767d66b947f4209c3",
+      "git_blob": "7129743afb6dcd4c1b3371fca90906f82ae3a905",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-snapshot/src/lib.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-syscall/src/lib.rs",
+      "bytes": 137582,
+      "sha256": "062a50808045720e5fb8e7fae6c31b596cd11ee65a913ae3e586d0ad6bc273f6",
+      "git_blob": "31e847fe74f1e2c21ba97df9a4ec247c1d4f0508",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-syscall/src/lib.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "crates/thalyx-watch/src/lib.rs",
+      "bytes": 32616,
+      "sha256": "de848a182ac49ddb646a6cd79124a336a3942f8bba7260ea83aa94e9ffcbeadb",
+      "git_blob": "44dd5b089a2c061f0a5335143b98d5a6e5de804f",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/crates/thalyx-watch/src/lib.rs",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "image/Makefile",
+      "bytes": 84897,
+      "sha256": "134397a18d094b05d7e0f9f00606b6ca87b2c418d05c61f09dc168bcd9d7a907",
+      "git_blob": "9bd14fe62685bb975a333d97c55cce5fede2d5b4",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/image/Makefile",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    },
+    {
+      "path": "lsm/thalyx_lsm.bpf.c",
+      "bytes": 6909,
+      "sha256": "4c552d9673aade29d6a4db6fac15cc42fcc68beadd433ebac3249628ce4e5f81",
+      "git_blob": "907a2bc807b845f85849a515142e97015fd5afef",
+      "url": "https://github.com/CesarManzoCode/thalyx/blob/0492f72e487e2463b0d7b938365a8b3383364cb9/lsm/thalyx_lsm.bpf.c",
+      "scope": "evidence_path_targeted_static_inspection_not_full_execution"
+    }
+  ],
+  "history": [
+    {
+      "commit": "f11130662a22a2a811d5f537649e149fa66c2842",
+      "date": "2026-08-01",
+      "subject": "docs: import design vault as project foundation",
+      "url": "https://github.com/CesarManzoCode/thalyx/commit/f11130662a22a2a811d5f537649e149fa66c2842"
+    },
+    {
+      "commit": "7acde1777ee3cb82dc54cc2b2a16a714cfdc547c",
+      "date": "2026-08-01",
+      "subject": "docs(vault): resolve the six contradictions between decreed notes",
+      "url": "https://github.com/CesarManzoCode/thalyx/commit/7acde1777ee3cb82dc54cc2b2a16a714cfdc547c"
+    },
+    {
+      "commit": "210ef3e59fc26dfd57777b4eb3026d46eb55a6aa",
+      "date": "2026-08-01",
+      "subject": "docs(vault): add threat model and close the trust and verification gaps",
+      "url": "https://github.com/CesarManzoCode/thalyx/commit/210ef3e59fc26dfd57777b4eb3026d46eb55a6aa"
+    },
+    {
+      "commit": "7200f691f08ef9474eb84692b334e84220c94ae9",
+      "date": "2026-08-01",
+      "subject": "feat(core): record commit intent so an interrupted install is never silent",
+      "url": "https://github.com/CesarManzoCode/thalyx/commit/7200f691f08ef9474eb84692b334e84220c94ae9"
+    },
+    {
+      "commit": "8ae190da1cfaa52d7f9f9024457d273d4e2f7eec",
+      "date": "2026-08-04",
+      "subject": "fix(core): serialise contracts, and tie every grant to the version it was for",
+      "url": "https://github.com/CesarManzoCode/thalyx/commit/8ae190da1cfaa52d7f9f9024457d273d4e2f7eec"
+    },
+    {
+      "commit": "087b2f0ebf8fc29db67d1aeeed189ba0bf93b011",
+      "date": "2026-08-26",
+      "subject": "fix(launch): armar el confinamiento antes de ponérselo, no después",
+      "url": "https://github.com/CesarManzoCode/thalyx/commit/087b2f0ebf8fc29db67d1aeeed189ba0bf93b011"
+    },
+    {
+      "commit": "bab9408a3bda8974909badd9d12e865abf078e1e",
+      "date": "2026-08-28",
+      "subject": "fix(intento): comprobar que no hay otro intento abierto no es impedir que lo haya",
+      "url": "https://github.com/CesarManzoCode/thalyx/commit/bab9408a3bda8974909badd9d12e865abf078e1e"
+    },
+    {
+      "commit": "def0bee687ed6df410cf001f681965270e97877a",
+      "date": "2026-08-29",
+      "subject": "fix(estado): un testigo que necesita el reloj no es un testigo, y un rechazo que no llega no es un rechazo",
+      "url": "https://github.com/CesarManzoCode/thalyx/commit/def0bee687ed6df410cf001f681965270e97877a"
+    },
+    {
+      "commit": "adc9ed80a0384241a93c89cfa9cd8872fe9c5f84",
+      "date": "2026-08-28",
+      "subject": "feat(motor): el motor carga los pesos una vez y se queda vivo",
+      "url": "https://github.com/CesarManzoCode/thalyx/commit/adc9ed80a0384241a93c89cfa9cd8872fe9c5f84"
+    },
+    {
+      "commit": "17c042a643b728eef59d549139aa0ecb8be2f2bd",
+      "date": "2026-08-30",
+      "subject": "feat(hacer): the P in TPV — a program whose control flow continues locally",
+      "url": "https://github.com/CesarManzoCode/thalyx/commit/17c042a643b728eef59d549139aa0ecb8be2f2bd"
+    },
+    {
+      "commit": "08172a3f9e115b40280b4b53a902ac173eaee1fa",
+      "date": "2026-08-30",
+      "subject": "feat(semantica): rust-analyzer runs Cargo, so it runs where a guest runs",
+      "url": "https://github.com/CesarManzoCode/thalyx/commit/08172a3f9e115b40280b4b53a902ac173eaee1fa"
+    },
+    {
+      "commit": "cf58fbec4ccd851444b5a808bf5b13fac4a0850d",
+      "date": "2026-09-05",
+      "subject": "fix: let a semantic provider fork, which is how musl spawns",
+      "url": "https://github.com/CesarManzoCode/thalyx/commit/cf58fbec4ccd851444b5a808bf5b13fac4a0850d"
+    },
+    {
+      "commit": "29cae8a122e913464ea88d0afabb72f86e4ad28a",
+      "date": "2026-09-05",
+      "subject": "fix(context): a hover that runs out of ceiling no longer unresolves the name",
+      "url": "https://github.com/CesarManzoCode/thalyx/commit/29cae8a122e913464ea88d0afabb72f86e4ad28a"
+    },
+    {
+      "commit": "a563999839470f182ecc8378c1d8287a82538236",
+      "date": "2026-09-05",
+      "subject": "fix(exec): a check is remembered under the tree it left, not the one it found",
+      "url": "https://github.com/CesarManzoCode/thalyx/commit/a563999839470f182ecc8378c1d8287a82538236"
+    },
+    {
+      "commit": "0492f72e487e2463b0d7b938365a8b3383364cb9",
+      "date": "2026-09-05",
+      "subject": "merge: el cache de validación archiva bajo el árbol que Cargo dejó",
+      "url": "https://github.com/CesarManzoCode/thalyx/commit/0492f72e487e2463b0d7b938365a8b3383364cb9"
+    }
+  ],
+  "vault_inventory": [
+    {
+      "path": "vault/.obsidian/app.json",
+      "bytes": 185,
+      "sha256": "8dd2abff128f28ae68568962071e79397ff81d527e502c950450ceb380a2ff4f",
+      "git_blob": "c6036bdc6381076d8e20624a55d0c72366560e4a"
+    },
+    {
+      "path": "vault/.obsidian/community-plugins.json",
+      "bytes": 13,
+      "sha256": "7f8dda7a62e97c9ff0918b9d6e00dce480aad6f6650de05d7222f7771b55bb76",
+      "git_blob": "42b048d360a6b8983c958e1e88857dae26dcb887"
+    },
+    {
+      "path": "vault/.obsidian/core-plugins.json",
+      "bytes": 266,
+      "sha256": "97fa121c140ce737b78d26bbd230c0bec152832c8dd3e3efa4ddf0ad5133a82b",
+      "git_blob": "eecaf919e29dae5858258ecd207746c750603c0f"
+    },
+    {
+      "path": "vault/.obsidian/templates.json",
+      "bytes": 59,
+      "sha256": "ca88d7879b534baaad8b01bf55738062a9e13d33fdb7b0969c8f2a186d00c7c2",
+      "git_blob": "d1c73afc4d3a76d226cb5c7e6f083e58deb13855"
+    },
+    {
+      "path": "vault/00-Indice/Indice-Principal.md",
+      "bytes": 11148,
+      "sha256": "69b9fe218ae8ca329b91c8abdaa3f5711cd794d4b2522b917c6b9572b8cede66",
+      "git_blob": "59f785276e08aacab2e7139415d36b2f099c6b80"
+    },
+    {
+      "path": "vault/01-Filosofia/Filosofia-Fundacional.md",
+      "bytes": 15281,
+      "sha256": "ee089efc53bfb52d20d3d7237b30559512855cd67b0e689a9f5524a5fa8cfa6b",
+      "git_blob": "8f6770cbd22b1b4141b1898c1bfed7b25fce101d"
+    },
+    {
+      "path": "vault/01-Filosofia/Principio-Doble-Ruta.md",
+      "bytes": 2525,
+      "sha256": "a7487f6a0cd7e048865825d04a694658e588ea45421b6fcc0eb24602a27b43c9",
+      "git_blob": "e05d78f0ff3d5d6fb666376a91006f188498cf20"
+    },
+    {
+      "path": "vault/02-Arquitectura/API-Interna-de-Modulos.md",
+      "bytes": 7793,
+      "sha256": "aecaf5cb6df090aca467f280f38c0fe9e5ad9e68c637223eb95994c8ec4ba7dd",
+      "git_blob": "4793539f7aeb4bfaadcc533291977c21466de228"
+    },
+    {
+      "path": "vault/02-Arquitectura/Agente-Conversacional.md",
+      "bytes": 6653,
+      "sha256": "e588db7e057ae35e01e2c17aba23e00778455b2b39ed1dbbab2fef7f2c84181c",
+      "git_blob": "a224e92e4dd15a49e77247539e7e9175e2cf19d4"
+    },
+    {
+      "path": "vault/02-Arquitectura/Arquitectura-Asimetrica.md",
+      "bytes": 1385,
+      "sha256": "f1eb90da2310acc3b3600a67bf61f670c4df81c06f53c820f1635da68f6e6e44",
+      "git_blob": "92dd956ec00a6906efd90bed6d09263f449c502e"
+    },
+    {
+      "path": "vault/02-Arquitectura/Busqueda.md",
+      "bytes": 8566,
+      "sha256": "0440f86ba510d50e4d0c3a51f793c3087a1d8c3bb1c3923546dc2e8270dd94f5",
+      "git_blob": "2bc8a9aebce9d2124f08eb869674031bfab66bcb"
+    },
+    {
+      "path": "vault/02-Arquitectura/Contexto-Progresivo.md",
+      "bytes": 4824,
+      "sha256": "3a6f6690df0ac7c80e72c23e3acbb9957dbf26ae280c9076e289e1f49f8b3cfc",
+      "git_blob": "528bf043b6de3e14efb4040403b583f142c57347"
+    },
+    {
+      "path": "vault/02-Arquitectura/Core-Nucleo.md",
+      "bytes": 4979,
+      "sha256": "2160f7deb9d1bdc5d514d75d83d602211e2a8e68c8415f0e51aa95ac2025a9d2",
+      "git_blob": "737ba98644299c503421a93af5b287e2b445c8c4"
+    },
+    {
+      "path": "vault/02-Arquitectura/Core.md",
+      "bytes": 3862,
+      "sha256": "f1e0bad9189e3b7ea29877eaaaacbb08fc6c97b971137fbfab65e75a68452152",
+      "git_blob": "09f3f2a731632bf0e727e5873e73b02558c00e6b"
+    },
+    {
+      "path": "vault/02-Arquitectura/Criterio-de-Inclusion-de-Primitivas.md",
+      "bytes": 2787,
+      "sha256": "63f4e626dea9e5a46ff48df1f50df822edab4edd28258b07107fbd80fad1e671",
+      "git_blob": "a1a9f43369f6f2995c7456330bfd9912f96670a0"
+    },
+    {
+      "path": "vault/02-Arquitectura/Decision-Kernel-vs-Userspace.md",
+      "bytes": 4344,
+      "sha256": "119bc063ceebaf06031b9cf86f62f10f96bc1752db3677ececa4dd627c3f4907",
+      "git_blob": "143488599e6a18d1f1598f657ceb6b892ac2f889"
+    },
+    {
+      "path": "vault/02-Arquitectura/Editor-de-Texto.md",
+      "bytes": 7673,
+      "sha256": "945199783cbbe537bfe90cb496fe3b8eaf7f3403bb15ad64de0b7dce0e753c16",
+      "git_blob": "e72075584055e2feb5b7aeec4a4d4f0798929870"
+    },
+    {
+      "path": "vault/02-Arquitectura/Formato-Manifiesto-Thmod.md",
+      "bytes": 3021,
+      "sha256": "772ab898a5b448e461f6a6585947f31f7466df5bdf90ba2ce18b2fd1ac68346c",
+      "git_blob": "22179027170f9f7d6a6cf7e06fcada8bad21d18c"
+    },
+    {
+      "path": "vault/02-Arquitectura/Gamas-de-Modelo.md",
+      "bytes": 87215,
+      "sha256": "b8d1c4d24a3a51c45423ec98bb884dfa30f07a273c7794f138d7328c55c15933",
+      "git_blob": "896a9ad5cd1b123707f5a2782ef96d0e9773fe12"
+    },
+    {
+      "path": "vault/02-Arquitectura/La-Pantalla.md",
+      "bytes": 25431,
+      "sha256": "f4c7877c18881ec6354853027df8e1198c932761269dec3595245b406f8deb68",
+      "git_blob": "f2cf79d53914beaff799aa1149beee914b0dc285"
+    },
+    {
+      "path": "vault/02-Arquitectura/Nomenclatura-y-Convenciones.md",
+      "bytes": 2404,
+      "sha256": "fd75c4cedffadcc57185ffc93beeb1847901e8ae4872f2e1c6a64f101692956b",
+      "git_blob": "3c854de88e27f42b1f83983b3bb4bcf646df84f9"
+    },
+    {
+      "path": "vault/02-Arquitectura/Palabras.md",
+      "bytes": 6878,
+      "sha256": "071ab979b3e61257d481b3e88319f650299e3fbde4f37ce2ab65432b83cb880e",
+      "git_blob": "fa9e7c55d86eda9f0d6d40f3d0f66deb86ce37d1"
+    },
+    {
+      "path": "vault/02-Arquitectura/Procesos.md",
+      "bytes": 11718,
+      "sha256": "9a4c8a151892564af37706d3b571d35bb04ad3d078c5c619d91b9d4ad60b14c5",
+      "git_blob": "b375897abde4d3807a681e74ee9c712a36063742"
+    },
+    {
+      "path": "vault/02-Arquitectura/Programas-Ajenos.md",
+      "bytes": 16383,
+      "sha256": "bc259f9695e817f6ed613c2e9a5224c784a6ea62a61fde8d25c30e338c997746",
+      "git_blob": "e962015fde1b6befb911113bc8a08868ad90eb0a"
+    },
+    {
+      "path": "vault/02-Arquitectura/Red.md",
+      "bytes": 4261,
+      "sha256": "6b6ce09f1e5d9a22517f6bbb4593efd96886d2bdd0bf505cb14ea1a7213c8503",
+      "git_blob": "7052a83933948a8db10221ee541472e6c9f22a47"
+    },
+    {
+      "path": "vault/02-Arquitectura/Sistema-de-Modulos.md",
+      "bytes": 5868,
+      "sha256": "5da2f682346d5fdd822f2d779d5fd16dd892a924242a3a76bc91d831a12e90ec",
+      "git_blob": "c3805e955eea165640f1546340e29d6c3627ad0b"
+    },
+    {
+      "path": "vault/02-Arquitectura/Superficie-para-el-LLM.md",
+      "bytes": 32822,
+      "sha256": "ad8e7a0217e965d4033221642bd33c334e299f850e403f05d41d4fd16c5fa58d",
+      "git_blob": "3d60a5d778994bb86f20d3a368a6ee70e7e51650"
+    },
+    {
+      "path": "vault/03-Primitivas/Conocimiento-con-Testigo.md",
+      "bytes": 5712,
+      "sha256": "6fe610c8adafd67cc432e0297a06abac9179a284d8ab66adbb4523beae12b767",
+      "git_blob": "5354eca20d2b8ac9fec740c0f6991e7016b3ff8b"
+    },
+    {
+      "path": "vault/03-Primitivas/Ejecucion-Transaccional.md",
+      "bytes": 8544,
+      "sha256": "e34a9c77f0125e059f4b7da2dcbd00921169313d1495ecad67b3061861173a53",
+      "git_blob": "7b9cdf5f1b3d10dc4a86be9ec9193ccaa6745736"
+    },
+    {
+      "path": "vault/03-Primitivas/FS-en-Grafo.md",
+      "bytes": 17863,
+      "sha256": "768f80ac959d5b0b543d1e151b919abebbfc1683d2a8cb691478a7d08ec1bd9f",
+      "git_blob": "207e242bb690f5a6bcd7d43c897f2e556b312f64"
+    },
+    {
+      "path": "vault/03-Primitivas/Identidad-de-Estado.md",
+      "bytes": 14523,
+      "sha256": "6dfaa90dadfb4ba668e2db75ac84461622cb50da0b93acdd1be21ce6b573803d",
+      "git_blob": "df366445860ca549589c997188bf20344ab247ea"
+    },
+    {
+      "path": "vault/03-Primitivas/Memoria-Persistente.md",
+      "bytes": 6544,
+      "sha256": "781bb070c026afbbaf5d98dc024f62f7f1fcb4a8881fb72f24a5947ab77872c8",
+      "git_blob": "a80bb6333045ff51c9e0e45b3d90758b53a82c51"
+    },
+    {
+      "path": "vault/03-Primitivas/Parser-Mecanico.md",
+      "bytes": 3439,
+      "sha256": "33f4f777e5ba5a7ada10b447f4e096b55918eb3c18ced5df1e47d8bb51ae8108",
+      "git_blob": "7196d16740b0aea7246637616cd746f2cb108b40"
+    },
+    {
+      "path": "vault/03-Primitivas/Permisos-JIT.md",
+      "bytes": 16073,
+      "sha256": "0443047fb29defdec97e70ab58dbc6fc8be55b6c0e705367653de5ff4adb0365",
+      "git_blob": "485bea10e4ec4548d7a66b323139303fe7024ea5"
+    },
+    {
+      "path": "vault/03-Primitivas/Primitivas-Base-Overview.md",
+      "bytes": 2501,
+      "sha256": "53f2c89fcaa7bab5ce6387510f4572461e7d629c7de6019618b308da9b3570c7",
+      "git_blob": "45b539082a6310f7f7e819dbdb40352e97982bc0"
+    },
+    {
+      "path": "vault/03-Primitivas/Scheduler-Predictivo.md",
+      "bytes": 1964,
+      "sha256": "3842bd70bf756ada6521d3610df84bef723be2ef01db887dbd4153bb3c046370",
+      "git_blob": "9280e898f28e8d9e15f55aa36a08aadacf2b3242"
+    },
+    {
+      "path": "vault/03-Primitivas/Semantica-Compilada.md",
+      "bytes": 17128,
+      "sha256": "749a88bc31a684feb73ec461e0aef923a89a691ee587a5f010688d3327b98064",
+      "git_blob": "79468c591296e158ae0d3631dd5d16492904a203"
+    },
+    {
+      "path": "vault/03-Primitivas/Transaccion-Programable.md",
+      "bytes": 11630,
+      "sha256": "cdde695471d7bb72f841853aa5f9e7c77e64808abbc524f5c68783c9c47ddb0b",
+      "git_blob": "e26468d4200871623c5f1f166e94cb74f64b014d"
+    },
+    {
+      "path": "vault/04-Flujo-Canonico/Caso-Fallo-Rollback.md",
+      "bytes": 3551,
+      "sha256": "a774ff991e1fb13ef578582c4b38c0673e272a02c00f2da05794bd298d6e09ec",
+      "git_blob": "0ee052dfac2fbb7d238ce4efd85ff72d12278766"
+    },
+    {
+      "path": "vault/04-Flujo-Canonico/Caso-Instalar-Modulo.md",
+      "bytes": 8121,
+      "sha256": "0593c8d00f1db81b4bc9711b1feb582f129aac42e66112c4e86db0ccfc66a889",
+      "git_blob": "d4c4d080f7188f0f526a93152dfd6f30b4d835bc"
+    },
+    {
+      "path": "vault/04-Flujo-Canonico/Coherencia-Doble-Ruta.md",
+      "bytes": 4132,
+      "sha256": "49c5ef8930b9c39a437a652fc03b8ceb9666cca8fc9d35a6aad6354ac5cb4431",
+      "git_blob": "b01bcbc2223d2ba7a8f6f4f955026e43427ea074"
+    },
+    {
+      "path": "vault/04-Flujo-Canonico/Concurrencia.md",
+      "bytes": 7289,
+      "sha256": "a5010ff9d18c0d95fc4b6404f87f5b3db94ce698aa60180e7d3fa4169edbfd9c",
+      "git_blob": "0ed3bce2c050513b279a1bb2f984d8196180c7dd"
+    },
+    {
+      "path": "vault/04-Flujo-Canonico/Contrato-Estructurado.md",
+      "bytes": 3681,
+      "sha256": "e4c139c44805c526e02e79a0142ef439276435f700be4674162405db017c65d6",
+      "git_blob": "e3a0ac9577c4d1983e1c55dbe4a8583179affc71"
+    },
+    {
+      "path": "vault/04-Flujo-Canonico/Fase-Commit-Atomico.md",
+      "bytes": 7374,
+      "sha256": "ea94bf2a3340b3936e4bc08a73941c09357399ea937e30c1a6c1bc3ce7850ebf",
+      "git_blob": "076b265b7a600c880fc8cef03754a8f25a3ceaae"
+    },
+    {
+      "path": "vault/04-Flujo-Canonico/Flujo-Canonico-Overview.md",
+      "bytes": 5030,
+      "sha256": "1642fce85557d25195908625454458500eb43951233fc14185a70fb6e09ee74c",
+      "git_blob": "dd28dbdec16fc90bfce15ec7821755b91285dbeb"
+    },
+    {
+      "path": "vault/04-Flujo-Canonico/Journal-y-Snapshots.md",
+      "bytes": 4905,
+      "sha256": "323f97ef7f64c106ff883e8282ba41428b59c23fd8513e987770f29116f8b3e8",
+      "git_blob": "9246376dff24c651db8146d8e2f91c02a93c12ca"
+    },
+    {
+      "path": "vault/04-Flujo-Canonico/Ramas-de-Fallo.md",
+      "bytes": 3236,
+      "sha256": "18e95ab729bf37f1d17c9a7eba516d6227bc47d360b1550af332114a2c56d079",
+      "git_blob": "308af2963d2612c0a9d75578de29960516716a27"
+    },
+    {
+      "path": "vault/04-Flujo-Canonico/Resolucion-de-Versiones.md",
+      "bytes": 3251,
+      "sha256": "5bcb3d2cb83ef883526f02f05930bcbc8e67b774dd41ac09e05684af7529b500",
+      "git_blob": "c439a51dee4cd547a8b812d4a2e25252c2ff34c8"
+    },
+    {
+      "path": "vault/04-Flujo-Canonico/Resolver-vs-Instalar.md",
+      "bytes": 1452,
+      "sha256": "590da21312548cb14a4bc96b97d29c9a96b697ead1582ead88a5e526a00bbe15",
+      "git_blob": "48b7aec44d201e9cba0296b84fb96fef6b4a204d"
+    },
+    {
+      "path": "vault/04-Flujo-Canonico/Rollback-vs-Restore.md",
+      "bytes": 6330,
+      "sha256": "5e4e2b53265e36ef619a8c51b252e5509e037e1801ae3b554c0178ece679187e",
+      "git_blob": "0e5b7c30f151ee144023ff5397db49bce62ab239"
+    },
+    {
+      "path": "vault/04-Flujo-Canonico/Sandbox-Ejecucion.md",
+      "bytes": 26954,
+      "sha256": "f522f5d3e50b8b11699dd170fff5728f6bbfbf8733203b3773a96469da69d3f8",
+      "git_blob": "f6c1f57d9b172a116b3ae696999f1ce7b995be67"
+    },
+    {
+      "path": "vault/04-Flujo-Canonico/Tres-Categorias-de-Autorizacion.md",
+      "bytes": 2618,
+      "sha256": "2ae3b245ef58671dc6a7c8f7e4c45e9cb1279326f07b608498250608d5aac032",
+      "git_blob": "e7bdd3040bb28db5ee2cf9653952ac79be67b303"
+    },
+    {
+      "path": "vault/04-Flujo-Canonico/Tres-Tipos-de-Permiso.md",
+      "bytes": 1036,
+      "sha256": "1ca76858585aa94c164f38c4588df0ef508ce35d3ae405de0558de50e7f4b25b",
+      "git_blob": "1d8c2c6736a85c90267e9a7b915d304efc15c5a8"
+    },
+    {
+      "path": "vault/04-Flujo-Canonico/Verificacion-y-Distribucion.md",
+      "bytes": 5228,
+      "sha256": "15508fe98fc8f5ca86132c313bec8f607977ccbb33d617a8e309eb42b2feb7aa",
+      "git_blob": "c4a844a3636f0fd8a1e01a670c92181496607920"
+    },
+    {
+      "path": "vault/05-Decisiones-y-Debates/Debate-Agente-Fine-Tuning.md",
+      "bytes": 2832,
+      "sha256": "652ec0767f0998cb021e47d4bc9640b1664212763592c6572ab38cda7daa1606",
+      "git_blob": "2bb15a598f26625acc276ce184d62b2cad7c7dd8"
+    },
+    {
+      "path": "vault/05-Decisiones-y-Debates/Debate-Conflicto-Recursos.md",
+      "bytes": 1102,
+      "sha256": "df777532665c2fee5b1f58481b603d3042a5d991cbdaa9934179d8d40defb99d",
+      "git_blob": "68d64a2dcac32a724e1b214b479fbde8ab70eaf9"
+    },
+    {
+      "path": "vault/05-Decisiones-y-Debates/Debate-Core-Modules.md",
+      "bytes": 921,
+      "sha256": "46aab0f1a42832143c83b5bc3e7ff71ebe6fd90515988a9102b5dea429bd248f",
+      "git_blob": "63f175791d6abe8ea0d2c263bfea20763ebc5384"
+    },
+    {
+      "path": "vault/05-Decisiones-y-Debates/Debates-Overview.md",
+      "bytes": 2526,
+      "sha256": "40a4282729dfae76306bdba05e5525a43811f31b1e09e5386a687d73cbc66091",
+      "git_blob": "3c564099abbd42ec707a4c2f90b441d62d6751da"
+    },
+    {
+      "path": "vault/05-Decisiones-y-Debates/Decision-Capa-vs-SO-Nuevo.md",
+      "bytes": 6440,
+      "sha256": "d3b08382511625f336dbf9c3eab9bb607c939c3e2135820fe305d02ff616862e",
+      "git_blob": "e408f515c1526c1f9eda532d28ceb9936bac3f05"
+    },
+    {
+      "path": "vault/05-Decisiones-y-Debates/Decision-Licencia.md",
+      "bytes": 2180,
+      "sha256": "92604b275e37786d1d946790534866c19b9559a1db73276c7b08f738cfbda980",
+      "git_blob": "6926662720ef72b763b32b915baccbcd5fd48f2f"
+    },
+    {
+      "path": "vault/05-Decisiones-y-Debates/Motor-Residente.md",
+      "bytes": 10452,
+      "sha256": "c785aa5af80bdac5d52c1caf40f94a08b1b856d9dba68b2c7d58099145410c66",
+      "git_blob": "a431288e82be72f911b5fdab55a5105d9205367b"
+    },
+    {
+      "path": "vault/05-Decisiones-y-Debates/Motor-de-Inferencia-como-Modulo.md",
+      "bytes": 18155,
+      "sha256": "f29084f4ea10d92dc3e475db43a96b4f27a8c44f495d3e7d330f0f11b2df9bfc",
+      "git_blob": "c83b57924194d1ab22fa96fb9e89a92dfaccf1b7"
+    },
+    {
+      "path": "vault/05-Decisiones-y-Debates/Que-es-una-Tarea.md",
+      "bytes": 486,
+      "sha256": "70719e372af460456fbb33ccd370f672b77cd299b53caf0b6828e201741e5ba4",
+      "git_blob": "50e53ccf8c7a89930ca1ac01337429058438a704"
+    },
+    {
+      "path": "vault/05-Decisiones-y-Debates/Ritmo-de-Construccion.md",
+      "bytes": 5502,
+      "sha256": "50cabe15c6b95cdfef38951c458483f87b76515972f59fb0d7702351d1eeceb1",
+      "git_blob": "e704c85bd3f4b19b975dbd14fc943d925dcfb065"
+    },
+    {
+      "path": "vault/05-Decisiones-y-Debates/Sistema-Reputacion-Sybil.md",
+      "bytes": 1298,
+      "sha256": "999d6d23a6d20a5adbe004d3fd8af9085226f9991c0a83a1fc659e8115df82c2",
+      "git_blob": "0a3661919ff2870522597237f217fdcd8687f74b"
+    },
+    {
+      "path": "vault/05-Decisiones-y-Debates/Validacion-Confiable.md",
+      "bytes": 6730,
+      "sha256": "9cf20f871febea6904cf30ec284b6bcc08818921c7ee0ff5f9bc5411b7ecef87",
+      "git_blob": "d9ccdc8d3d05999d5d87c195b35e19b99ae9e58c"
+    },
+    {
+      "path": "vault/06-Pendientes/Punto-Actual.md",
+      "bytes": 502377,
+      "sha256": "01f68eaa43136a31b92b8e00ec4b6f0da9966dafafa7800fdffbafd87700a110",
+      "git_blob": "aa40db95fdf79741d6727fc2861d289f47b024ed"
+    },
+    {
+      "path": "vault/06-Pendientes/Tareas-Pendientes.md",
+      "bytes": 94984,
+      "sha256": "77680fdfc5e0de79b9028d2712f300ca7e262305d827152078aea74b23e28f95",
+      "git_blob": "d54e79336509f64571f687148f7fff3cd7e80c06"
+    },
+    {
+      "path": "vault/07-Adopcion-y-Fases/Agentes-Externos.md",
+      "bytes": 27941,
+      "sha256": "086ee2ec7d14d5402011f6bf9b196c059b169423ac48588e979c3e8a1f6c0ce8",
+      "git_blob": "8b0d48caa1aa307d72d8e28b40040db4fbdc0ecb"
+    },
+    {
+      "path": "vault/07-Adopcion-y-Fases/Condiciones-de-Adopcion.md",
+      "bytes": 5731,
+      "sha256": "b372313de1375aca474700f2611dca571eee86c9d0825e25b680fd73f424e112",
+      "git_blob": "3bbe3a0facbf28dd5095e8aa4c290ecf1ae76aa4"
+    },
+    {
+      "path": "vault/07-Adopcion-y-Fases/Criterio-de-Salida-Fase-1.md",
+      "bytes": 31813,
+      "sha256": "0efa2b6009fc0b9c70e6cd514aee57f08bee24348b05ec288319e037de6957df",
+      "git_blob": "ec554192f3952d347567fe006f676b300d7a5934"
+    },
+    {
+      "path": "vault/07-Adopcion-y-Fases/Evidencia-de-Agentes.md",
+      "bytes": 52699,
+      "sha256": "bd4bfb87367a6a10089017d70385bd99881fafb1ad66c31a571e5be475954a8d",
+      "git_blob": "4714157e988699e277c0dbaad52df7ae2f558f5e"
+    },
+    {
+      "path": "vault/07-Adopcion-y-Fases/Fases-de-Implementacion.md",
+      "bytes": 7285,
+      "sha256": "88431949f2f9b518c87c5f4e485c1b9a0515b8fa2301f4b4b629b36da24f361d",
+      "git_blob": "57e1323157701993994c3150c66cadd95ea24c40"
+    },
+    {
+      "path": "vault/07-Adopcion-y-Fases/Por-Que-Elegirian-Este-SO.md",
+      "bytes": 5040,
+      "sha256": "e40fcbfcb2535134e48f347ac11bfd2aab79cd5bafa903fecea1cbac7882776f",
+      "git_blob": "f4c558fb6bfd89b13ab511aa729cbab324b7082b"
+    },
+    {
+      "path": "vault/07-Adopcion-y-Fases/Prioridad-Operativa.md",
+      "bytes": 10982,
+      "sha256": "ca94b74e107a36baf99b296705d2e06ccc47124fa97017728baf8d36da659e57",
+      "git_blob": "976db0ca484203410d581814b8aa6913e0ccc7a0"
+    },
+    {
+      "path": "vault/08-Investigacion/Interpretabilidad-Mecanicista.md",
+      "bytes": 1814,
+      "sha256": "dc166ddf6841eb45df9cae190af01ef63ea91ff5af7b67334a7890cf1d216fc1",
+      "git_blob": "ae92f12f00c421e812f2c074161e3bc25bd120be"
+    },
+    {
+      "path": "vault/09-Notas-Tecnicas/Agente-Minimo.md",
+      "bytes": 12889,
+      "sha256": "b5d3c916e1a8195241a4d857b7cf5c5bd9ee8107cd4576b1587922313ef8885d",
+      "git_blob": "468fee5c5732bed2b32dbcaacb8ae6d31cacb9d6"
+    },
+    {
+      "path": "vault/09-Notas-Tecnicas/Arranque-en-Hierro.md",
+      "bytes": 14797,
+      "sha256": "ca88d529ce0205ef9fcc530907e44d31372fc7b4deb38ce145f7ad3ffc39a72d",
+      "git_blob": "310694899d0951d8be61350fec968a41dcfa9019"
+    },
+    {
+      "path": "vault/09-Notas-Tecnicas/Cargador-BPF-Propio.md",
+      "bytes": 10339,
+      "sha256": "40629771da748a9fe0c1065255f16d56d740b9a0404a017b2096500c4eff3785",
+      "git_blob": "22e812da2761d7aa8a2827fa1d055004b3c039b1"
+    },
+    {
+      "path": "vault/09-Notas-Tecnicas/Construccion-del-ISO.md",
+      "bytes": 55109,
+      "sha256": "5c2ee2a7a2d99d8df569e34d2de6fdc62867cfd64d42e303daee083c0919b83d",
+      "git_blob": "ca1c27e2edde580e57de1d6d3242a14551ed1fe4"
+    },
+    {
+      "path": "vault/09-Notas-Tecnicas/Estado-de-Implementacion.md",
+      "bytes": 71568,
+      "sha256": "af413c9c158a914ec52742f5bb9cdb5906846569bc99b6cefc1b5824710d1b6e",
+      "git_blob": "c1d32daaeb0c43e50e59f7fb9460255f4a8b3b11"
+    },
+    {
+      "path": "vault/09-Notas-Tecnicas/Estrategia-de-Pruebas.md",
+      "bytes": 357058,
+      "sha256": "68bc0396d2f3fe6f7f9a8b4020f7a4744ab981741b7cfe0db1c3f97ca582bb6e",
+      "git_blob": "f0d3191ffe6e77faad894a415cb34c99a385c10a"
+    },
+    {
+      "path": "vault/09-Notas-Tecnicas/Notas-Tecnicas-Implementacion.md",
+      "bytes": 3701,
+      "sha256": "26c427058131c7c556645722d0e60f0d7c6d69e0b63146c90985d987b946da4a",
+      "git_blob": "b552ad620f30d59ef66b3e2ae8e8e12d0dcf64ef"
+    },
+    {
+      "path": "vault/09-Notas-Tecnicas/Primer-Arranque.md",
+      "bytes": 26166,
+      "sha256": "60612046391405f133bd3242e7aa2613d51cced56e25d21d846ed80266f4ea92",
+      "git_blob": "4a083fa993aab8eb6e9acbb537cb8f187ed67dff"
+    },
+    {
+      "path": "vault/09-Notas-Tecnicas/Que-Necesita-Un-Agente-Ajeno.md",
+      "bytes": 9795,
+      "sha256": "8e6b4a6ec0d0ad5bc9cec88e25f500a9fcef0d5f1681e7b44d8be4b2e667bd86",
+      "git_blob": "e1ee51c80266661ae1756613f7881b5902b116e8"
+    },
+    {
+      "path": "vault/09-Notas-Tecnicas/Runtime-Rust-Agente.md",
+      "bytes": 16135,
+      "sha256": "5d153b8d7b440405393d2860faec8fde118a6c6a1b2c0c377563de7fa2a8e22b",
+      "git_blob": "e59c4fd0ac8a709385b2e0b63c37858ef2e6df29"
+    },
+    {
+      "path": "vault/09-Notas-Tecnicas/Trabajo-Entre-Inferencias.md",
+      "bytes": 5106,
+      "sha256": "55f5ef266fea9dfde5b4b7fd1cb31f9a514d68e381cb7c258f75d7852221b0b2",
+      "git_blob": "6473e3ff96c789a045200a759a78e3b17890ece5"
+    },
+    {
+      "path": "vault/10-Carrera-y-Contexto-Personal/Estrategia-Carrera.md",
+      "bytes": 1950,
+      "sha256": "6759ac0dc600c3d87372c7e9e65b155753db20eebc85980453a8abc44c8681ff",
+      "git_blob": "8bcff6e284e4bfd64c89add5de4042f1c0eb82df"
+    },
+    {
+      "path": "vault/10-Carrera-y-Contexto-Personal/Riesgo-de-Ejecucion.md",
+      "bytes": 2060,
+      "sha256": "cefed67ca64c756c8c304de8b77398c5bbd2e444de7c7d673ce3f0b86f319802",
+      "git_blob": "0a8084371a8f8c1ef9b88220354e1c0312e4adf8"
+    },
+    {
+      "path": "vault/11-Seguridad/Camino-Confiable.md",
+      "bytes": 7412,
+      "sha256": "f856acecad007f29da7ee72d6d8842dd89d6cd6a370647fec11d09d43d5aa0d7",
+      "git_blob": "a22ace02d2e91c0061e79fab7b952fd6949cbcdb"
+    },
+    {
+      "path": "vault/11-Seguridad/Marcado-de-Origen.md",
+      "bytes": 3769,
+      "sha256": "98f5998f645b2fd1b8ad68fe379248de79e2e4d2b46468caa8d377d8b7ad302a",
+      "git_blob": "6dea631d519c6c04e0b062d5ce11b549f9e5df35"
+    },
+    {
+      "path": "vault/11-Seguridad/Modelo-de-Amenaza.md",
+      "bytes": 4423,
+      "sha256": "391029d83f2cb7e46bdda387830184a316e855af3ba0d86ba58ddd201541c8f8",
+      "git_blob": "1b6090a55d491fdb48fe72bbbcde89a40915bf30"
+    },
+    {
+      "path": "vault/Plantillas/Plantilla-Caso-Trazado.md",
+      "bytes": 1356,
+      "sha256": "b82d3661ef06f65f773c8fb96e6d15f89d1515d5cc67c335bc7ec48fb28e914e",
+      "git_blob": "09fe0eb549a05b0dcae762b36bda557bfeb306e2"
+    },
+    {
+      "path": "vault/Plantillas/Plantilla-Debate.md",
+      "bytes": 848,
+      "sha256": "78ea1d8c26aa5919db4a6222b807ff2aafd0ffb5189fe12ddb8e69c429cab2a7",
+      "git_blob": "8b4501f18697f53fc9c75fc551d92d919a8e3eb3"
+    },
+    {
+      "path": "vault/Plantillas/Plantilla-Decision.md",
+      "bytes": 742,
+      "sha256": "79296f06dd31805cbf0b3ea86c536bf54c3b6cdf4663ecbe25bf89e7d1720449",
+      "git_blob": "c42b8c37fbb898c984f4ec13dd34ec2c7e7193ef"
+    },
+    {
+      "path": "vault/Plantillas/Plantilla-Primitiva.md",
+      "bytes": 1020,
+      "sha256": "a41a931a057d1e6668d12096f68e7904223434353389b5320069503d58ec1a5f",
+      "git_blob": "f970c33b2b43b6b9cb150cd220b385724b18b576"
+    }
+  ]
+}

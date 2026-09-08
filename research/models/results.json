@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "evidence_kind": "bounded_design_models_not_kernel_verification",
+  "python": "3.12.14",
+  "script_sha256": "535a23c710005ecfee42506348ff7fa1771f322c637e835942fa64101b01ab4b",
+  "MODEL-01": {
+    "status": "PASS_WITH_EXPECTED_COUNTEREXAMPLE",
+    "states": 294,
+    "transitions": 615,
+    "bounds": {
+      "scopes": 1,
+      "grant_derivations": 1,
+      "invocations": 2
+    },
+    "checked": [
+      "no admission under a fenced grant or scope",
+      "no retirement with modeled tickets outstanding",
+      "fences and grant lineage are monotonic"
+    ],
+    "false_claim": "No effect may complete after a fence",
+    "counterexample": [
+      "derive",
+      "enqueue:0",
+      "receive:0",
+      "precheck_effect:0",
+      "begin_effect:0",
+      "fence_grant",
+      "complete:0"
+    ],
+    "unsafe_check_then_admit_counterexample": [
+      "derive",
+      "enqueue:0",
+      "receive:0",
+      "precheck_effect:0",
+      "fence_grant",
+      "begin_effect:0"
+    ]
+  },
+  "MODEL-02": {
+    "status": "PASS_WITH_EXPECTED_COUNTEREXAMPLES",
+    "crash_cases": 23,
+    "bounds": {
+      "publications": 1,
+      "persistable_fragments": 6
+    },
+    "negative_controls": {
+      "missing_data_flush": {
+        "cases": 40,
+        "counterexample": {
+          "boundary": 7,
+          "after": "C1",
+          "persisted": [
+            "C0",
+            "C1",
+            "P0",
+            "P1"
+          ],
+          "acknowledged": false,
+          "recovered_root": "old",
+          "violations": [
+            "complete commit without durable dependencies"
+          ]
+        }
+      },
+      "ack_before_commit_flush": {
+        "cases": 26,
+        "counterexample": {
+          "boundary": 9,
+          "after": "ack",
+          "persisted": [
+            "D0",
+            "D1",
+            "P0",
+            "P1"
+          ],
+          "acknowledged": true,
+          "recovered_root": "old",
+          "violations": [
+            "acknowledged publication lost after crash"
+          ]
+        }
+      }
+    }
+  },
+  "ABA": {
+    "status": "EXPECTED_COUNTEREXAMPLE",
+    "history": [
+      {
+        "content": "A",
+        "generation": 0
+      },
+      {
+        "content": "B",
+        "generation": 1
+      },
+      {
+        "content": "A",
+        "generation": 2
+      }
+    ],
+    "content_only_accepts_stale_expectation": true,
+    "generation_accepts_stale_expectation": false
+  }
+}
