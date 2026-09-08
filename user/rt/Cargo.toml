@@ -1,0 +1,15 @@
+[package]
+name = "thalyx-user-rt"
+description = "Minimal K1 user-side runtime: entry point, panic handling and ABI stubs."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+thalyx-abi.workspace = true
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
