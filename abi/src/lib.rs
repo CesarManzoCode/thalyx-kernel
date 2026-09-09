@@ -1,38 +1,39 @@
 //! Thalyx-Kernel binary interface (ABI), V0.
 //!
-//! This crate holds the parts of the kernel ABI that K1 actually implements,
-//! plus the descriptor header whose layout `vault/architecture/abi.md` already
-//! fixes. It deliberately does **not** define the object, capability, memory or
-//! IPC opcode space: that table is assigned in K2 from a single schema, and
-//! publishing provisional numbers here would announce compatibility with
-//! numbers that are not assigned yet.
+//! The interface is generated, not written. [`abi/schema/v0.json`] is the single
+//! place where an entry number, an operation code, a rights bit, an error value
+//! or a structure layout is decided; `tools/gen_abi.py` emits the Rust bindings
+//! in [`generated`], the layout fixtures in [`fixture`] and the C header in
+//! `abi/include/thalyx_abi.h` from it. `tools/check_abi.py` regenerates all
+//! three and fails when a committed file differs, so the three languages cannot
+//! drift apart quietly.
 //!
-//! Two entry namespaces exist and they are not equivalent:
+//! [`abi/schema/v0.json`]: https://github.com/CesarManzoCode/thalyx-kernel/blob/main/abi/schema/v0.json
 //!
-//! * [`entry`] — assigned ABI entries. Only the reserved version query exists
-//!   in V0. Numbers in this namespace are part of the interface.
-//! * [`scaffold`] — K1 diagnostic scaffolding. Every identifier has bit 63 set,
-//!   is documented as temporary, and is removed when K2 introduces the
-//!   supervisor fault channel and the control-receipt plane. Nothing in this
-//!   namespace is an ABI commitment.
+//! Three namespaces exist and they are not equivalent:
+//!
+//! * [`generated`] — the assigned V0 interface. Re-exported at the crate root.
+//! * [`fixture`] — encoded sample structures and the values they must decode to.
+//! * [`scaffold`] — K1 diagnostic scaffolding, kept only so the K1 regression
+//!   image stays executable. No K2 program uses it, and every identifier in it
+//!   has bit 63 set so it can never be confused with an assigned entry.
 
 #![no_std]
 
-/// Assigned ABI entries. Stable numbering starts in K2; V0 assigns only the
-/// reserved version query, which carries no authority over any object.
-pub mod entry {
-    /// Reserved entry that reports the interface version. Takes no handle and
-    /// no descriptor, and never inspects user memory.
-    pub const VERSION_QUERY: u64 = 0;
-}
+pub mod fixture;
+pub mod generated;
+
+pub use generated::*;
 
 /// K1 diagnostic scaffolding. **Not ABI.**
 ///
-/// K1 has no supervisor domain, no endpoints and no control-receipt objects, so
-/// a user domain cannot yet report progress or terminate through the mechanisms
-/// the architecture specifies. These two entries stand in for that, they carry
-/// only register-sized integers (the kernel never dereferences a user pointer
-/// on their behalf), and they are removed in K2.
+/// K1 had no supervisor, no endpoints and no control-receipt objects, so a user
+/// domain could not report progress or terminate through the mechanisms the
+/// architecture specifies. These two entries stood in for that. K2 provides the
+/// real mechanisms — [`generated::entry::EXIT`], endpoints and the control log —
+/// and no K2 domain invokes anything here. They remain because the K1 evidence
+/// run must stay reproducible on the kernel that K2 leaves behind; the K2 gate
+/// refuses any run in which a K2 domain touched them.
 pub mod scaffold {
     /// Bit set on every scaffolding entry so that a scaffolding call can never
     /// be mistaken for an assigned ABI entry.
@@ -64,66 +65,55 @@ pub mod note {
     pub const PROBE_INTENT: u64 = 3;
 }
 
-/// Status returned in RAX. Zero is success; every error is negative.
-///
-/// V0 defines only the statuses K1 can actually produce. The remaining base
-/// errors named in the ABI contract (invalid handle, wrong type, insufficient
-/// rights, expired, closed scope, exhausted limit, full queue, dead peer,
-/// cancellation, pending operation) require objects that do not exist yet and
-/// are assigned with the K2 schema.
-pub mod status {
-    /// Operation completed.
-    pub const OK: i64 = 0;
-    /// The entry identifier is not implemented by this kernel revision.
-    pub const UNSUPPORTED_ENTRY: i64 = -1;
-    /// Arguments were structurally rejected before any effect.
-    pub const INVALID_ARGUMENT: i64 = -2;
-    /// The requested interface version is not supported.
-    pub const INCOMPATIBLE_VERSION: i64 = -3;
-}
+/// Largest descriptor accepted by V0.
+pub const MAX_DESCRIPTOR_LEN: u32 = generated::limit::MAX_DESCRIPTOR_LEN as u32;
+/// Largest inline IPC payload accepted by V0.
+pub const MAX_INLINE_PAYLOAD_LEN: u32 = generated::limit::MAX_INLINE_PAYLOAD as u32;
+/// Capabilities one message may carry.
+pub const MAX_MESSAGE_CAPS: usize = generated::limit::MAX_CAPS_PER_MESSAGE as usize;
 
-/// Interface version reported by [`entry::VERSION_QUERY`].
-pub const VERSION_MAJOR: u16 = 0;
-/// Minor interface version. K1 is revision 1 of the V0 interface.
-pub const VERSION_MINOR: u16 = 1;
-
-/// Packs a version pair the way [`entry::VERSION_QUERY`] returns it in RDX.
+/// Packs a version pair the way [`generated::entry::VERSION_QUERY`] returns it
+/// in RDX.
 #[must_use]
 pub const fn pack_version(major: u16, minor: u16) -> u64 {
     ((major as u64) << 16) | (minor as u64)
 }
 
-/// Common descriptor header, 32 bytes, little-endian, explicit padding.
+/// Builds a handle from a table slot and a generation.
 ///
-/// The layout is fixed by `vault/architecture/abi.md`. No operation in K1 uses
-/// it; it is defined here so the layout has a machine-checked definition before
-/// the first descriptor crosses the boundary in K2.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DescriptorHeader {
-    /// Major interface version of the descriptor.
-    pub major: u16,
-    /// Minor interface version of the descriptor.
-    pub minor: u16,
-    /// Operation selector within the addressed object's type.
-    pub opcode: u32,
-    /// Operation flags; unknown bits are rejected, never ignored.
-    pub flags: u32,
-    /// Total descriptor length in bytes, header included.
-    pub total_len: u32,
-    /// Client correlation value. Not authorization and not durable dedupe.
-    pub cookie: u64,
-    /// Reserved, must be zero.
-    pub reserved: u64,
+/// Zero is never a valid handle: generations start at one, so no live entry can
+/// encode to zero even in slot zero.
+#[must_use]
+pub const fn handle(slot: u32, generation: u32) -> u64 {
+    ((generation as u64) << 32) | (slot as u64)
 }
 
-const _: () = assert!(core::mem::size_of::<DescriptorHeader>() == 32);
-const _: () = assert!(core::mem::align_of::<DescriptorHeader>() == 8);
+/// Table slot a handle names.
+#[must_use]
+pub const fn handle_slot(value: u64) -> u32 {
+    (value & 0xFFFF_FFFF) as u32
+}
 
-/// Largest descriptor accepted by V0.
-pub const MAX_DESCRIPTOR_LEN: u32 = 4096;
-/// Largest inline IPC payload accepted by V0.
-pub const MAX_INLINE_PAYLOAD_LEN: u32 = 256;
+/// Generation a handle carries.
+#[must_use]
+pub const fn handle_generation(value: u64) -> u32 {
+    (value >> 32) as u32
+}
+
+/// Handle of a capability the kernel or a supervisor installed in a slot that
+/// had never been used before, whose generation is therefore one.
+#[must_use]
+pub const fn boot_handle(slot: u32) -> u64 {
+    handle(slot, 1)
+}
+
+const _: () = assert!(boot_handle(0) != 0);
+
+/// Object type a capability names, taken from an operation code.
+#[must_use]
+pub const fn op_type(operation: u32) -> u32 {
+    operation >> 16
+}
 
 /// Raw kernel entry stub.
 ///
@@ -135,10 +125,12 @@ pub const MAX_INLINE_PAYLOAD_LEN: u32 = 256;
 ///
 /// # Safety
 ///
-/// The caller is responsible for the meaning of the arguments for the entry it
-/// selects. For every entry K1 implements, all arguments are plain integers and
-/// the kernel dereferences none of them, so no memory precondition applies
-/// there; entries that take descriptor pointers do not exist yet.
+/// For an entry that takes a descriptor, `descriptor` must point at `len`
+/// readable bytes of the caller's memory, and at `len` writable bytes when the
+/// operation returns one. The kernel validates the range and refuses it rather
+/// than faulting, so a wrong pointer is an error and not undefined behaviour on
+/// the kernel side; it is still the caller's own memory that is read or
+/// written, which is why this is `unsafe`.
 ///
 /// The kernel switches to a private stack on entry and never reads or writes
 /// the caller's stack, which is what makes `nostack` correct here.
