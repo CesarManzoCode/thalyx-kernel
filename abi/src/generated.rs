@@ -1088,6 +1088,16 @@ pub mod receipt_kind {
     pub const OBJECT_LIFE: u32 = 6;
 }
 
+/// `CapLineage` values crossing the boundary as integers.
+pub mod cap_lineage {
+    /// `CapLineage::LIVE`.
+    pub const LIVE: u32 = 1;
+    /// `CapLineage::FENCED`.
+    pub const FENCED: u32 = 2;
+    /// `CapLineage::EXPIRED`.
+    pub const EXPIRED: u32 = 3;
+}
+
 /// Slots the kernel installs the first supervisor's boot capabilities in.
 pub mod boot_slot {
     /// The supervisor's own domain: build, map, install and activate children through it.
@@ -1228,7 +1238,7 @@ pub struct CapInfo {
     pub rights: u32,
     /// Schema field `derive_depth`, little-endian `u32`.
     pub derive_depth: u32,
-    /// 1 live, 2 fenced, 3 expired.
+    /// CapLineage: what the lineage between this grant and its root still permits.
     pub lineage_state: u32,
     /// Schema field `grant_id`, little-endian `u64`.
     pub grant_id: u64,

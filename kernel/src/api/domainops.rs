@@ -379,6 +379,13 @@ pub fn add_thread(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Re
         return Err(status::INVALID_ARGUMENT);
     }
     let target = ctx.cap.object.index as usize;
+    // Before the address space is consulted, because a domain that has stopped
+    // has no address space either: asking about the entry point first would
+    // report "that entry point is not mapped" for a domain whose real answer is
+    // "this domain is no longer being built".
+    if machine.domains[target].state != DomainState::Building {
+        return Err(status::STATE_CONFLICT);
+    }
     let space_ok = machine.domains[target].space.as_ref().is_some_and(|space| {
         let entry = space
             .translate(request.entry)
@@ -401,7 +408,12 @@ pub fn add_thread(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Re
         request.stack_top,
         request.argument,
     )
-    .map_err(|_| status::LIMIT_EXHAUSTED)?;
+    .map_err(|error| match error {
+        // The state was checked above, so what is left here is a table, a
+        // budget or a kernel stack that ran out.
+        crate::domain::CreateError::ScopeClosed => status::STATE_CONFLICT,
+        _ => status::LIMIT_EXHAUSTED,
+    })?;
     event!(
         "thread.created",
         "domain={target} name={} thread={thread} id={} entry=0x{:x} stack_top=0x{:x}",

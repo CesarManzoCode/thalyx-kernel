@@ -11,7 +11,8 @@
 //! different meaning. Both are implemented here, and the difference is visible.
 
 use thalyx_abi::generated::{
-    CapInfo, DeriveRequest, DrainReport, object_type, receipt_kind, right, scope_state, status,
+    CapInfo, DeriveRequest, DrainReport, cap_lineage, object_type, receipt_kind, right,
+    scope_state, status,
 };
 
 use crate::api::{BODY, Ctx, begin_response, grant_within, receipt, resolve};
@@ -20,18 +21,13 @@ use crate::obj::NO_GRANT;
 use crate::state::Machine;
 use crate::ucopy::Staging;
 
-/// Lineage state as [`CapInfo`] reports it.
-const LINEAGE_LIVE: u32 = 1;
-const LINEAGE_FENCED: u32 = 2;
-const LINEAGE_EXPIRED: u32 = 3;
-
 /// Reports what a capability names and what its lineage still permits.
 pub fn inspect(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u64, i64> {
     let node = machine.grants[ctx.cap.grant as usize];
     let lineage = match crate::api::lineage_status(machine, ctx.cap.grant, ctx.now) {
-        status::OK => LINEAGE_LIVE,
-        status::EXPIRED => LINEAGE_EXPIRED,
-        _ => LINEAGE_FENCED,
+        status::OK => cap_lineage::LIVE,
+        status::EXPIRED => cap_lineage::EXPIRED,
+        _ => cap_lineage::FENCED,
     };
     let info = CapInfo {
         object_type: ctx.cap.object.kind.abi_type(),

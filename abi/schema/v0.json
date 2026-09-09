@@ -1119,6 +1119,20 @@
         "name": "OBJECT_LIFE",
         "value": 6
       }
+    ],
+    "CapLineage": [
+      {
+        "name": "LIVE",
+        "value": 1
+      },
+      {
+        "name": "FENCED",
+        "value": 2
+      },
+      {
+        "name": "EXPIRED",
+        "value": 3
+      }
     ]
   },
   "structs": [
@@ -1257,7 +1271,7 @@
         {
           "name": "lineage_state",
           "type": "u32",
-          "doc": "1 live, 2 fenced, 3 expired."
+          "doc": "CapLineage: what the lineage between this grant and its root still permits."
         },
         {
           "name": "grant_id",

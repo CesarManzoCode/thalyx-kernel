@@ -188,6 +188,9 @@
 #define THALYX_RECEIPT_KIND_RETIRE 4u
 #define THALYX_RECEIPT_KIND_SERVICE_NOTE 5u
 #define THALYX_RECEIPT_KIND_OBJECT_LIFE 6u
+#define THALYX_CAP_LINEAGE_LIVE 1u
+#define THALYX_CAP_LINEAGE_FENCED 2u
+#define THALYX_CAP_LINEAGE_EXPIRED 3u
 
 #define THALYX_BOOT_SLOT_SELF_DOMAIN 1u
 #define THALYX_BOOT_SLOT_SELF_SCOPE 2u
@@ -259,7 +262,7 @@ typedef struct {
     uint32_t object_type; /* Schema field `object_type`, little-endian `u32`. */
     uint32_t rights; /* Effective rights: never larger than any ancestor's. */
     uint32_t derive_depth; /* Schema field `derive_depth`, little-endian `u32`. */
-    uint32_t lineage_state; /* 1 live, 2 fenced, 3 expired. */
+    uint32_t lineage_state; /* CapLineage: what the lineage between this grant and its root still permits. */
     uint64_t grant_id; /* Schema field `grant_id`, little-endian `u64`. */
     uint64_t parent_grant_id; /* Schema field `parent_grant_id`, little-endian `u64`. */
     uint64_t deadline_ns; /* Zero means no deadline. */

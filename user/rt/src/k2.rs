@@ -345,7 +345,12 @@ pub fn signal_query(signal: u64) -> Result<SignalInfo, i64> {
     query::<SignalInfo>(signal, op::SIGNAL_QUERY).map(|(info, _)| info)
 }
 
-/// Narrows a scope's limits. A scope may only ever be given less.
+/// Changes an open scope's ceilings.
+///
+/// Two rules bound the new ceilings, and they are not the same rule: nothing
+/// may exceed what the parent holds, and nothing may fall below what the
+/// subtree has already been charged for. The first keeps the tree a bound; the
+/// second keeps an accounted charge from turning into a debt nobody agreed to.
 pub fn scope_set_limits(scope: u64, limits: ScopeLimits) -> Outcome {
     with(scope, op::SCOPE_SET_LIMITS, 0, limits)
 }
@@ -1160,6 +1165,22 @@ pub mod report {
     pub const RECEIPTS_READ: u64 = 0x201C;
     /// A single grant was fenced, without closing its scope.
     pub const GRANT_FENCED: u64 = 0x201D;
+    /// A fenced grant lineage reported what it still holds. Value: packed.
+    pub const GRANT_DRAINED: u64 = 0x201E;
+    /// A receipt carried the origin the kernel stamped, not the claimed one.
+    pub const ORIGIN_STAMPED: u64 = 0x201F;
+    /// Receipts were acknowledged and the log released them. Value: how many.
+    pub const RECEIPTS_ACKED: u64 = 0x2020;
+    /// A scope's ceilings were narrowed. Value: the new page ceiling.
+    pub const LIMITS_NARROWED: u64 = 0x2021;
+    /// A domain's state was read through a capability. Value: the state.
+    pub const DOMAIN_OBSERVED: u64 = 0x2022;
+    /// A thread was added to a domain under construction. Value: its id.
+    pub const THREAD_ADDED: u64 = 0x2023;
+    /// A domain was stopped from outside. Value: its id.
+    pub const DOMAIN_STOPPED: u64 = 0x2024;
+    /// A signal's bits and sequence were read without waiting. Value: sequence.
+    pub const SIGNAL_OBSERVED: u64 = 0x2025;
 }
 
 /// Reports one observation on the diagnostic plane.

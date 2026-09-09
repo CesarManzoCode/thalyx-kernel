@@ -368,6 +368,48 @@ pub fn resolve(
     required_rights: u32,
     now: u64,
 ) -> Result<Resolved, i64> {
+    let resolved = resolve_entry(machine, domain, handle, required_type, required_rights)?;
+    let lineage = lineage_status(machine, resolved.grant, now);
+    if lineage != status::OK {
+        return Err(lineage);
+    }
+    Ok(resolved)
+}
+
+/// Resolves a handle whose lineage may already be fenced, expired or orphaned.
+///
+/// [`resolve`] refuses a dead lineage, and that refusal is what makes a barrier
+/// mean something: authority stops working through every handle that descends
+/// from it. But three operations are *about* that state rather than acting
+/// through it -- reading what a grant's lineage still permits, reading what a
+/// fenced lineage still holds, and dropping the caller's own handle on it --
+/// and holding them behind the same gate made each of them unreachable exactly
+/// when it was needed. `CAP_DRAIN_STATUS` could never report on the
+/// `CAP_FENCE` it documents, `CapInfo`'s fenced and expired lineage states
+/// could never be observed, and a handle whose lineage died could never be
+/// released by its holder.
+///
+/// Everything else still holds: the object type, the rights the operation
+/// declares, and an object that still exists. Only the liveness of the lineage
+/// stops being a precondition, and none of these three can act on the object.
+pub fn resolve_observer(
+    machine: &Machine,
+    domain: usize,
+    handle: u64,
+    required_type: u32,
+    required_rights: u32,
+) -> Result<Resolved, i64> {
+    resolve_entry(machine, domain, handle, required_type, required_rights)
+}
+
+/// The part of resolution that a barrier does not change.
+fn resolve_entry(
+    machine: &Machine,
+    domain: usize,
+    handle: u64,
+    required_type: u32,
+    required_rights: u32,
+) -> Result<Resolved, i64> {
     let entry = *machine.domains[domain]
         .caps
         .lookup(handle)
@@ -391,10 +433,6 @@ pub fn resolve(
     }
     if node.rights & required_rights != required_rights {
         return Err(status::INSUFFICIENT_RIGHTS);
-    }
-    let lineage = lineage_status(machine, grant, now);
-    if lineage != status::OK {
-        return Err(lineage);
     }
     if !object_alive(machine, entry.object) {
         return Err(status::PEER_DEAD);
@@ -530,6 +568,17 @@ fn simple(
     }
 }
 
+/// True for the three operations that report on, or clean up after, a lineage
+/// that may already be dead.
+///
+/// See [`resolve_observer`] for why these are not behind the liveness gate.
+const fn observes_lineage(operation: u32) -> bool {
+    matches!(
+        operation,
+        op::CAP_INSPECT | op::CAP_CLOSE | op::CAP_DRAIN_STATUS
+    )
+}
+
 /// True for the operations that own their own locking because they can wait.
 const fn waits(operation: u32) -> bool {
     matches!(
@@ -645,14 +694,18 @@ pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64)
         }
     } else {
         let mut machine = MACHINE.lock();
-        let resolved = resolve(
-            &machine,
-            domain,
-            frame.rdi,
-            spec.object_type,
-            spec.rights,
-            now,
-        );
+        let resolved = if observes_lineage(operation) {
+            resolve_observer(&machine, domain, frame.rdi, spec.object_type, spec.rights)
+        } else {
+            resolve(
+                &machine,
+                domain,
+                frame.rdi,
+                spec.object_type,
+                spec.rights,
+                now,
+            )
+        };
         match resolved {
             Ok(cap) => {
                 let ctx = Ctx { cap, ..ctx_base };
