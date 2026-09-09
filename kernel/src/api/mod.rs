@@ -338,6 +338,15 @@ pub fn lineage_status(machine: &Machine, grant: GrantId, now: u64) -> i64 {
         {
             return status::SCOPE_CLOSED;
         }
+        // The scope that sponsors a grant is the perimeter the barrier closes.
+        // Fencing a scope has to reach the authority derived under it --
+        // "including copied and derived capabilities" -- or a client could keep
+        // acting through a handle it happens to still hold, and through every
+        // handle it had already given away. This is the check that makes the
+        // barrier reach a capability the closed domain moved to someone else.
+        if !scope::is_open(&machine.scopes, node.sponsor) {
+            return status::SCOPE_CLOSED;
+        }
         current = node.parent;
     }
     status::OK

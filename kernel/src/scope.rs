@@ -283,15 +283,37 @@ pub fn is_within(table: &Table, ancestor: ScopeId, candidate: ScopeId) -> bool {
 /// parent does not have.
 pub fn reserve(table: &mut Table, scope: ScopeId, resource: Resource, amount: u64) -> bool {
     let mut fits = true;
+    let mut binding = scope;
     ancestors(table, scope, |index| {
         let node = &table[index];
         if node.state != State::Open {
+            if fits {
+                binding = index as ScopeId;
+            }
             fits = false;
         } else if node.used(resource).saturating_add(amount) > node.limit(resource) {
+            if fits {
+                binding = index as ScopeId;
+            }
             fits = false;
         }
     });
     if !fits {
+        // Which scope and which resource, not merely that something was
+        // refused. A limit that is only ever reported as a status code is a
+        // limit whose accounting nobody can check: the record names the
+        // ancestor that actually bound the request, which is not always the one
+        // the caller addressed.
+        crate::event!(
+            "scope.limit_refused",
+            "scope={scope} binding_scope={binding} binding_id={} resource={} \
+             requested={amount} used={} limit={} state={}",
+            table[binding as usize].id,
+            resource.name(),
+            table[binding as usize].used(resource),
+            table[binding as usize].limit(resource),
+            table[binding as usize].state.name()
+        );
         return false;
     }
     let mut chain = [usize::MAX; thalyx_abi::limit::MAX_SCOPE_DEPTH as usize + 1];
@@ -384,7 +406,13 @@ pub fn eligible(table: &Table, scope: ScopeId, recovery: bool) -> bool {
                 ok = false;
             }
         } else {
-            if node.state != State::Open {
+            // A barrier closes admissions, not the CPU. A scope that has been
+            // fenced keeps running what it already had: the contract is
+            // explicit that an operation admitted before the barrier may finish
+            // after it, and a drain that waited for threads it had already made
+            // unschedulable would wait forever. Quiescent and retired scopes
+            // have nothing left to run by construction.
+            if !matches!(node.state, State::Open | State::Fenced) {
                 ok = false;
             }
             if node.cpu_window_ns >= node.limits.cpu_budget_ns {
@@ -493,7 +521,11 @@ pub fn pending(table: &Table, root: ScopeId) -> Pending {
             continue;
         }
         let node = &table[index];
-        total.threads += node.parallelism_used;
+        // Live executions, not the ones charging the scope at this instant. A
+        // thread that exists but is not currently dispatched is still something
+        // a drain has to wait for; counting only the dispatched ones would
+        // declare quiescence with a domain of the scope still alive.
+        total.threads += node.threads;
         total.invocations += node.invocations_pending;
         total.effects += node.effects_pending;
         total.maps += node.maps_pending;

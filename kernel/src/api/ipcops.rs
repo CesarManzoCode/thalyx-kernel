@@ -603,6 +603,29 @@ pub fn receive(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i
                 crate::api::now_ns(),
             )?;
             let endpoint = cap.object.index as usize;
+
+            // An endpoint has exactly one receiver. `install_cap` names it when
+            // a supervisor hands the receive side to a domain it is building;
+            // this is the same claim made by a domain acting for itself, which
+            // is the only way a supervisor can receive on an endpoint it
+            // created. It is a claim, not a transfer: an endpoint another live
+            // domain already receives on is refused rather than stolen.
+            let current = machine.endpoints[endpoint].receiver_domain;
+            if current == u16::MAX {
+                machine.endpoints[endpoint].receiver_domain = ctx.domain as u16;
+                machine.endpoints[endpoint].receiver_generation =
+                    machine.domains[ctx.domain].generation;
+                event!(
+                    "ipc.receiver_claimed",
+                    "endpoint={} domain={} name={} route=self_claim",
+                    machine.endpoints[endpoint].id,
+                    machine.domains[ctx.domain].id,
+                    machine.domains[ctx.domain].name_str()
+                );
+            } else if current as usize != ctx.domain {
+                return Err(status::STATE_CONFLICT);
+            }
+
             let head = machine.endpoints[endpoint].head;
             if head != NO_MESSAGE {
                 return deliver(&mut machine, ctx, endpoint, head as usize, staging);
@@ -974,12 +997,14 @@ pub fn resolve_invocation(
     };
     event!(
         "ipc.resolved",
-        "invocation={} responder_domain={} outcome={} effect={} detail=0x{:x} \
-         origin_scope={}",
+        "invocation={} responder_domain={} outcome={} from_state={} effect={} \
+         cancel={} detail=0x{:x} origin_scope={}",
         invocation.id,
         machine.domains[ctx.domain].id,
         request.outcome,
+        invocation.state.name(),
         invocation.effect.name(),
+        invocation.cancel.name(),
         request.detail,
         machine.scopes[invocation.origin_scope as usize].id
     );

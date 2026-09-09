@@ -5,7 +5,7 @@ status: observed
 ---
 # Estado actual
 
-**2026-09-08 · Fundación 0.1.0 · K0 y K1 completos. K2 en curso: sustrato del kernel construido, vertical de usuario pendiente.**
+**2026-09-08 · Fundación 0.1.0 · K0 y K1 completos. K2 en curso: la primera vertical se ejecuta; falta la puerta independiente y la evidencia escrita.**
 
 ## Qué existe
 
@@ -39,7 +39,21 @@ El kernel implementa los mecanismos K2 del lado del núcleo: tabla generacional 
 
 `kernel/src/syscall.rs` conecta las cuatro entradas asignadas con ese punto de admisión. Las dos entradas de andamiaje de K1 siguen presentes, marcadas como tales y sin tocar ningún objeto, para que la regresión de K1 se siga ejecutando contra el kernel en el que K2 creció.
 
-El arranque elige la ruta por el paquete: si un módulo declara `SUPERVISOR`, el kernel construye la raíz, el log de control y ese único dominio con su manifiesto explícito de capacidades; si no, cae en los dominios de K1.
+El arranque elige la ruta por el paquete: si un módulo declara `SUPERVISOR`, el kernel construye la raíz, el log de control y ese único dominio con su manifiesto explícito de capacidades; si no, cae en los dominios de K1. `tools/build_image.py --phase k2` produce ese paquete; el kernel es el mismo binario en ambas fases, de modo que «K1 sigue pasando» es una afirmación sobre un kernel y no sobre dos.
+
+### Primera vertical
+
+Tres programas de usuario ejecutan la vertical descrita en la ruta. `k2super` recibe el manifiesto de arranque y construye todo lo demás por la interfaz: dos ámbitos hijos, un endpoint de trabajo, uno de supervisión, una señal, un objeto de memoria, y los dominios `k2server` y `k2client` con sus capacidades y su canal de fallos. No usa ninguna llamada que abra un recurso por nombre; localiza las imágenes preguntando a cada objeto sellado su etiqueta.
+
+`k2client` arranca con dos capacidades y nada más: una faceta del endpoint y un buffer propio. Estrecha una capacidad de solo lectura sobre ese buffer y se la entrega al servidor con la llamada. `k2server` la lee, no consigue escribir por ella, no consigue ampliarla, admite un efecto sobre la invocación y retiene la obligación.
+
+Con el servidor reteniendo trabajo, el supervisor cierra el ámbito del cliente. El informe de drenaje después de la barrera sigue contando el hilo, la invocación y el efecto pendientes; la retirada se rechaza mientras eso siga siendo cierto. El servidor observa `ORIGIN_FENCED`, comprueba que la capacidad derivada por el cliente ya no funciona, y resuelve la obligación —que sí sobrevive a la barrera, porque su grant lo patrocina el ámbito del servidor—. La llamada del cliente vuelve `CANCELLED` y su segunda llamada se rechaza con `SCOPE_CLOSED`. Solo entonces el ámbito queda quiescente y la retirada libera lo que patrocinaba.
+
+Doce controles negativos se ejecutan dentro de esa vertical y los doce son rechazados con el código esperado. Ninguna operación que debía ser rechazada tuvo éxito.
+
+### Lo que la vertical corrigió del sustrato
+
+Ejecutar los mecanismos encontró cinco defectos que compilar no encuentra, y los cinco están corregidos: el creador de un objeto de memoria no recibía derechos comunes sobre lo que acababa de crear; un dominio no podía reclamarse receptor de un endpoint propio, de modo que ningún supervisor podía tener canal de fallos; la barrera no alcanzaba a los grants patrocinados por el ámbito cerrado, así que la autoridad delegada seguía funcionando después del cierre; cercar un ámbito con un hilo vivo lo dejaba permanentemente inejecutable y la ejecución no terminaba; y el informe de drenaje contaba hilos despachados en lugar de hilos vivos, declarando quiescencia con un dominio todavía en pie. La retirada, además, marcaba el ámbito y no liberaba nada.
 
 ## Evidencia ejecutada aquí
 
@@ -54,17 +68,18 @@ El arranque elige la ruta por el paquete: si un módulo declara `SUPERVISOR`, el
 | Esquema ABI | PASS en 4 comprobaciones. [Comprobador](../../tools/check_abi.py). |
 | Puerta K1 | PASS en 13 criterios decididos por separado desde los registros del kernel, con controles negativos. [Detalle y límites](../evidence/k1-protected-boot.md). |
 | Regresión K1 sobre el sustrato K2 | PASS en los mismos 13 criterios con los mecanismos K2 compilados dentro del kernel. |
+| Vertical K2 en QEMU | La imagen K2 arranca, ejecuta supervisor, servidor y cliente, y termina en `no_runnable_domain` con estado completo. 12 controles negativos rechazados con el código esperado, 0 resultados inesperados. Todavía **no** evaluada por una puerta independiente. |
 
 ## Qué no existe todavía
 
-Del lado de K2 falta lo que da sentido a los mecanismos: no hay programa supervisor, ni servidor, ni cliente, así que **ninguna operación K2 se ha ejecutado desde ring 3**. Sin eso no hay vertical, no hay evidencia EXP-01/02/03/04/06 en alcance UP, no hay controles negativos ejecutados y no hay puerta K2. El empaquetado de imagen todavía no emite módulos de tipo `SUPERVISOR`, de modo que la ruta de arranque K2 del kernel no se ha tomado nunca en una ejecución real.
+Del lado de K2 falta la parte que decide si lo anterior vale: **no hay puerta K2**. Que una ejecución termine sin resultados inesperados es la afirmación del propio programa sobre sí mismo; hasta que un comprobador independiente lea los registros del kernel y decida criterio por criterio, no hay más que un log que parece bueno. Tampoco hay documento de evidencia, ni actualización de los experimentos, ni control negativo a nivel de puerta.
 
-Que los 60 manejadores compilen y que el despacho los alcance no dice nada sobre si hacen lo que su contrato exige. Esa distinción es el trabajo que queda.
+Que los 60 manejadores compilen no dice nada sobre si hacen lo que su contrato exige, y una sola ejecución de una sola vertical tampoco lo dice de todos ellos. La vertical ejerce autoridad, memoria, IPC, efectos, barrera, drenaje y retirada; no ejerce agotamiento de colas ni de handles, ni reciclado de slots, ni expiración por deadline, que EXP-02 y EXP-06 también piden.
 
 Más allá de K2: SMP, drivers propios, DMA, servicio de estado implementado, Thalyx sobre este kernel, pruebas de hardware físico, mediciones de rendimiento o prueba formal general. El plano de diagnóstico de K1 es temporal y no es el plano de recibos. No se ha retirado ni reemplazado Linux.
 
 ## Siguiente trabajo
 
-Construir el lado de usuario de K2 y ejecutarlo: runtime de usuario sobre las cuatro entradas, programa supervisor que reciba el manifiesto de arranque y cree el resto por la interfaz, empaquetado de imagen con módulo `SUPERVISOR`, y la primera vertical —cliente sin permisos ambientales que solicita una operación, deriva autoridad, consume presupuesto y se cancela mientras el servidor retiene trabajo—. Después, controles negativos y puerta K2 independiente.
+Ampliar la vertical con lo que EXP-02 y EXP-06 exigen y todavía no se ejerce, y después escribir la puerta K2: un comprobador que decida cada criterio por separado desde los registros del kernel, con sus propios controles negativos, y el documento de evidencia que registre qué se ejecutó y qué no.
 
 No hay una elección técnica pendiente que deba devolver el diseño al usuario. [Las preguntas abiertas](open-questions.md) especifican qué dato falta y con qué decisión conservadora avanzar.

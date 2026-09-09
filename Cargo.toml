@@ -9,6 +9,9 @@ members = [
     "user/worker",
     "user/trespasser",
     "user/wxprobe",
+    "user/k2super",
+    "user/k2server",
+    "user/k2client",
 ]
 
 [workspace.package]

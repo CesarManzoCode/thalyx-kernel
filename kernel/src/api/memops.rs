@@ -125,7 +125,14 @@ pub fn create(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
         owner,
         crate::obj::NO_GRANT,
         object,
-        request.max_rights,
+        // The object's `max_rights` is a ceiling on what may ever be done
+        // *through* a capability to these pages; it is not a statement about
+        // the capability itself. A creator that could not inspect, narrow or
+        // hand on the object it just made would be unable to give it to anyone,
+        // which is the only reason to create one. Every other creator in the
+        // interface holds its type's full mask, and this is the same rule with
+        // the caller's ceiling applied to the memory bits.
+        request.max_rights | ObjKind::COMMON_RIGHTS,
         0,
         None,
         0,

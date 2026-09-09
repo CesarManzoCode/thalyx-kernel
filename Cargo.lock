@@ -111,6 +111,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "thalyx-user-k2client"
+version = "0.2.0"
+dependencies = [
+ "thalyx-abi",
+ "thalyx-user-rt",
+]
+
+[[package]]
+name = "thalyx-user-k2server"
+version = "0.2.0"
+dependencies = [
+ "thalyx-abi",
+ "thalyx-user-rt",
+]
+
+[[package]]
+name = "thalyx-user-k2super"
+version = "0.2.0"
+dependencies = [
+ "thalyx-abi",
+ "thalyx-user-rt",
+]
+
+[[package]]
 name = "thalyx-user-rt"
 version = "0.2.0"
 dependencies = [

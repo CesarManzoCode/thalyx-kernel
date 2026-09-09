@@ -19,10 +19,12 @@ use thalyx_abi::generated::{
 use crate::api::{BODY, Ctx, begin_response, receipt};
 use crate::event;
 use crate::ipc;
+use crate::mm::{Frame, Owner};
 use crate::obj::{ObjKind, ObjRef, ScopeId};
 use crate::scope::{self, Limits, Resource, State};
 use crate::state::{Machine, ThreadState, Wait};
 use crate::ucopy::Staging;
+use thalyx_boot_protocol::PAGE_SIZE;
 
 fn to_limits(request: &ScopeLimits) -> Limits {
     Limits {
@@ -313,7 +315,14 @@ pub fn retire(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
         return Ok(0);
     }
 
+    // Release what the perimeter sponsored, then report what is left. The
+    // numbers have to be read after the release, or "retained" would mean
+    // "held before anyone tried to free it", which is exactly the reassuring
+    // and useless figure the resource contract warns against.
+    let released = release_sponsored(machine, root);
+
     let id = machine.scopes[root as usize].id;
+    let previous = machine.scopes[root as usize].state.name();
     let pages = machine.scopes[root as usize].memory_pages;
     let metadata = machine.scopes[root as usize].metadata;
     for index in 0..machine.scopes.len() {
@@ -326,7 +335,10 @@ pub fn retire(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
     }
     event!(
         "scope.retired",
-        "scope={root} id={id} retained_pages={pages} retained_metadata={metadata}"
+        "scope={root} id={id} from_state={previous} freed_pages={} freed_objects={} \
+         retained_pages={pages} retained_metadata={metadata}",
+        released.0,
+        released.1
     );
     receipt(
         machine,
@@ -342,6 +354,150 @@ pub fn retire(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
         false,
     );
     Ok(pages)
+}
+
+/// Withdraws every capability that names `object`, wherever it is held.
+///
+/// A retired object's table slot is reused, and its generation is what stops an
+/// old handle from naming the next occupant. Withdrawing the entries as well is
+/// what keeps the accounting honest rather than merely safe: the grant and the
+/// metadata charge behind each entry are released to whoever was paying for
+/// them, instead of surviving as a charge on a scope that no longer exists.
+fn withdraw_everywhere(machine: &mut Machine, object: ObjRef) {
+    for domain in 0..machine.domains.len() {
+        if machine.domains[domain].state == crate::state::DomainState::Empty {
+            continue;
+        }
+        for slot in 0..crate::limits::MAX_CAPS {
+            let entry = machine.domains[domain].caps.slots[slot];
+            if entry.live && entry.object == object {
+                crate::api::cap_release_slot(machine, domain, slot);
+            }
+        }
+    }
+}
+
+/// Frees the objects a retired perimeter sponsored.
+///
+/// Returns the pages and the objects actually released. Retirement is where the
+/// resource contract's third result happens -- "memory and metadata were freed"
+/// -- and it is deliberately the slow operation of the three: the barrier is
+/// what has to be brief, not this.
+///
+/// A memory object that something still maps is not freed. There is no mapping
+/// left to take down here that this pass could confirm, and freeing a frame a
+/// live page table still points at would be exactly the dangerous reuse the
+/// memory contract forbids. It stays, and the retained counters say so.
+fn release_sponsored(machine: &mut Machine, root: ScopeId) -> (u64, u64) {
+    let mut pages = 0;
+    let mut objects = 0;
+
+    for index in 0..machine.memories.len() {
+        let (state, sponsor, map_count, generation, base, page_count, id) = {
+            let object = &machine.memories[index];
+            (
+                object.state,
+                object.sponsor,
+                object.map_count,
+                object.generation,
+                object.base,
+                object.pages,
+                object.id,
+            )
+        };
+        if state == crate::memobj::State::Empty || !scope::is_within(&machine.scopes, root, sponsor)
+        {
+            continue;
+        }
+        if map_count != 0 {
+            continue;
+        }
+        withdraw_everywhere(
+            machine,
+            ObjRef::new(ObjKind::Memory, index as u16, generation),
+        );
+        let count = u64::from(page_count);
+        for page in 0..count {
+            // SAFETY: the object has no mapping (`map_count == 0`), so no page
+            // table points at these frames; this is a uniprocessor kernel with
+            // no DMA in K2, so no other agent holds a reference either.
+            unsafe {
+                machine.allocator().release(
+                    Frame::containing(base.addr() + page * PAGE_SIZE),
+                    Owner::Scope(sponsor),
+                );
+            }
+        }
+        scope::release(&mut machine.scopes, sponsor, Resource::MemoryPages, count);
+        scope::release(&mut machine.scopes, sponsor, Resource::Metadata, 1);
+        machine.memories[index] = crate::memobj::MemoryObject::empty();
+        machine.memories[index].generation = generation;
+        event!(
+            "mem.released",
+            "object={id} pages={count} state_at_release={} sponsor_scope={} \
+             reason=scope_retired",
+            state.name(),
+            machine.scopes[sponsor as usize].id
+        );
+        pages += count;
+        objects += 1;
+    }
+
+    for index in 0..machine.endpoints.len() {
+        let (used, owner_scope, generation) = {
+            let endpoint = &machine.endpoints[index];
+            (endpoint.used, endpoint.owner_scope, endpoint.generation)
+        };
+        if !used || !scope::is_within(&machine.scopes, root, owner_scope) {
+            continue;
+        }
+        withdraw_everywhere(
+            machine,
+            ObjRef::new(ObjKind::Endpoint, index as u16, generation),
+        );
+        scope::release(&mut machine.scopes, owner_scope, Resource::Metadata, 1);
+        machine.endpoints[index] = crate::ipc::Endpoint::empty();
+        machine.endpoints[index].generation = generation;
+        objects += 1;
+    }
+
+    for index in 0..machine.signals.len() {
+        let (used, owner_scope, generation) = {
+            let signal = &machine.signals[index];
+            (signal.used, signal.owner_scope, signal.generation)
+        };
+        if !used || !scope::is_within(&machine.scopes, root, owner_scope) {
+            continue;
+        }
+        withdraw_everywhere(
+            machine,
+            ObjRef::new(ObjKind::Signal, index as u16, generation),
+        );
+        scope::release(&mut machine.scopes, owner_scope, Resource::Metadata, 1);
+        machine.signals[index] = crate::events::Signal::empty();
+        machine.signals[index].generation = generation;
+        objects += 1;
+    }
+
+    for index in 0..machine.timers.len() {
+        let (used, owner_scope, generation) = {
+            let timer = &machine.timers[index];
+            (timer.used, timer.owner_scope, timer.generation)
+        };
+        if !used || !scope::is_within(&machine.scopes, root, owner_scope) {
+            continue;
+        }
+        withdraw_everywhere(
+            machine,
+            ObjRef::new(ObjKind::Timer, index as u16, generation),
+        );
+        scope::release(&mut machine.scopes, owner_scope, Resource::Metadata, 1);
+        machine.timers[index] = crate::events::Timer::empty();
+        machine.timers[index].generation = generation;
+        objects += 1;
+    }
+
+    (pages, objects)
 }
 
 /// Number of invocations still charged to a scope subtree, for the summary.

@@ -82,12 +82,20 @@ impl ObjKind {
         }
     }
 
+    /// Rights every object type defines, whatever it is.
+    ///
+    /// These say what may be done with the *capability* -- read it, narrow it,
+    /// hand it on, withdraw it -- as opposed to what may be done through it to
+    /// the object. A creator holds all of them over what it just created; a
+    /// ceiling on an object's type-specific rights does not bound them.
+    pub const COMMON_RIGHTS: u32 =
+        right::INSPECT | right::DERIVE | right::TRANSFER | right::DESTROY | right::ADMIN;
+
     /// Every right this type defines, common bits included. Rights outside it
     /// are refused rather than stored, so one bit never means two things.
     #[must_use]
     pub const fn rights_mask(self) -> u32 {
-        let common =
-            right::INSPECT | right::DERIVE | right::TRANSFER | right::DESTROY | right::ADMIN;
+        let common = Self::COMMON_RIGHTS;
         let specific = match self {
             ObjKind::Scope => {
                 right::SCOPE_CREATE | right::SCOPE_LIMIT | right::SCOPE_FENCE | right::SCOPE_EXEC
