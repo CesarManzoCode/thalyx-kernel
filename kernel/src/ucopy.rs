@@ -208,13 +208,3 @@ pub fn copy_out(space: &AddressSpace, addr: u64, source: &[u8]) -> Result<(), Fa
         }
     })
 }
-
-/// Checks that the whole range is readable by the domain without copying it.
-pub fn check_readable(space: &AddressSpace, addr: u64, len: u64) -> Result<(), Fault> {
-    walk(space, addr, len, false, |_, _, _| {})
-}
-
-/// Checks that the whole range is writable by the domain without copying it.
-pub fn check_writable(space: &AddressSpace, addr: u64, len: u64) -> Result<(), Fault> {
-    walk(space, addr, len, true, |_, _, _| {})
-}

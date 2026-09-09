@@ -149,7 +149,7 @@ pub fn map(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u6
     if last > u64::from(machine.memories[object].pages) {
         return Err(status::INVALID_ARGUMENT);
     }
-    if request.vaddr % PAGE_SIZE != 0 {
+    if !request.vaddr.is_multiple_of(PAGE_SIZE) {
         return Err(status::INVALID_ARGUMENT);
     }
     let end = request
@@ -271,9 +271,11 @@ pub fn unmap(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<
         return Err(status::INVALID_ARGUMENT);
     }
     let target = ctx.cap.object.index as usize;
+    let generation = machine.domains[target].generation;
     let record = machine.maps.iter().position(|record| {
         record.used
             && record.domain as usize == target
+            && record.domain_generation == generation
             && record.vaddr == request.vaddr
             && record.pages == request.page_count
     });

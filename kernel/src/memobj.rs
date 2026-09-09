@@ -134,20 +134,6 @@ impl MemoryObject {
         // exclusive access for the lifetime of the borrow.
         unsafe { core::slice::from_raw_parts(self.base.hhdm_ptr(), self.len() as usize) }
     }
-
-    /// The object's bytes, mutably.
-    ///
-    /// # Safety
-    ///
-    /// As [`MemoryObject::bytes`], and the object must not be sealed: a sealed
-    /// object promises that nothing inside the perimeter writes it, and the
-    /// kernel is inside that perimeter.
-    #[must_use]
-    pub unsafe fn bytes_mut(&mut self) -> &'static mut [u8] {
-        // SAFETY: as `bytes`, with the caller's additional guarantee that the
-        // object is not sealed.
-        unsafe { core::slice::from_raw_parts_mut(self.base.hhdm_ptr(), self.len() as usize) }
-    }
 }
 
 /// One installed mapping.

@@ -286,12 +286,12 @@ pub fn reserve(table: &mut Table, scope: ScopeId, resource: Resource, amount: u6
     let mut binding = scope;
     ancestors(table, scope, |index| {
         let node = &table[index];
-        if node.state != State::Open {
-            if fits {
-                binding = index as ScopeId;
-            }
-            fits = false;
-        } else if node.used(resource).saturating_add(amount) > node.limit(resource) {
+        // A closed scope and an exhausted one both refuse, and the record names
+        // the first ancestor that did either. Which of the two it was is in the
+        // state the record also prints.
+        let refuses = node.state != State::Open
+            || node.used(resource).saturating_add(amount) > node.limit(resource);
+        if refuses {
             if fits {
                 binding = index as ScopeId;
             }

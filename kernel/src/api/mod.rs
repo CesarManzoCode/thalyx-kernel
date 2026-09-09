@@ -40,7 +40,7 @@ use crate::arch::x86_64::trap::TrapFrame;
 use crate::event;
 use crate::obj::{GrantId, NO_GRANT, ObjKind, ObjRef, ScopeId};
 use crate::scope;
-use crate::state::{MACHINE, Machine, ThreadKind};
+use crate::state::{MACHINE, Machine};
 use crate::ucopy::{self, Staging};
 
 /// Diagnostic records of refused operations emitted per domain before the
@@ -262,6 +262,13 @@ pub fn collect_grant(machine: &mut Machine, grant: GrantId) {
 }
 
 /// Allocates a grant node charged to `sponsor`.
+///
+/// Every parameter is a separate fact about the node and none is derivable from
+/// the others: who pays for it, what it descends from, what it authorises, how
+/// much, until when, what extra lifetime bounds it, and which facet it carries.
+/// Bundling them into a struct would move the argument list rather than shorten
+/// it, and would let a caller forget a field instead of being made to state it.
+#[allow(clippy::too_many_arguments)]
 pub fn grant_alloc(
     machine: &mut Machine,
     sponsor: ScopeId,
@@ -374,6 +381,14 @@ pub fn resolve(
         .get(grant as usize)
         .filter(|node| node.used)
         .ok_or(status::INVALID_HANDLE)?;
+    // A capability entry and its grant each name the object. They are written
+    // together and must stay together: an entry pointing at one object through
+    // a grant that authorises another would be authority over the wrong thing,
+    // and it is the kind of mistake a table of indices makes silently. Checking
+    // it here costs a comparison and turns redundant state into a checked one.
+    if node.object != entry.object {
+        return Err(status::INVALID_HANDLE);
+    }
     if node.rights & required_rights != required_rights {
         return Err(status::INSUFFICIENT_RIGHTS);
     }
@@ -560,7 +575,19 @@ pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64)
             &mut staging.bytes,
         );
         drop(machine);
-        if copied.is_err() {
+        if let Err(fault) = copied {
+            // Which way the range was wrong, not only that it was. A caller
+            // that passed an unmapped pointer and one that passed a kernel
+            // address get the same status, and telling them apart from the
+            // outside is otherwise guesswork.
+            event!(
+                "user.copy_refused",
+                "domain={domain} op={} direction=in addr=0x{:x} len={} reason={}",
+                operation_name(operation),
+                frame.rdx,
+                spec.descriptor_len,
+                fault.name()
+            );
             return refuse(domain, operation, status::INVALID_ADDRESS);
         }
         let header: DescriptorHeader = staging.read(0);
@@ -630,9 +657,18 @@ pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64)
         let bytes = &staging.bytes[..spec.descriptor_len as usize];
         let written = ucopy::copy_out(space, frame.rdx, bytes);
         drop(machine);
-        if written.is_err() {
+        if let Err(fault) = written {
             // The operation happened. A failed copy of its result is a delivery
             // failure, not an undo, and the interface says so.
+            event!(
+                "user.copy_refused",
+                "domain={domain} op={} direction=out addr=0x{:x} len={} reason={} \
+                 note=operation_already_happened",
+                operation_name(operation),
+                frame.rdx,
+                spec.descriptor_len,
+                fault.name()
+            );
             return refuse(domain, operation, status::INVALID_ADDRESS);
         }
     }
@@ -680,17 +716,6 @@ pub fn begin_response(staging: &mut Staging, operation: u32) {
         *byte = 0;
     }
     response_header(staging, spec, cookie);
-}
-
-/// Identifies the calling domain and thread of a kernel entry.
-#[must_use]
-pub fn caller() -> Option<(usize, usize)> {
-    let machine = MACHINE.lock();
-    let thread = machine.current;
-    if machine.threads[thread].kind != ThreadKind::User {
-        return None;
-    }
-    Some((machine.threads[thread].domain, thread))
 }
 
 /// Writes a control receipt and mirrors it onto the diagnostic plane.

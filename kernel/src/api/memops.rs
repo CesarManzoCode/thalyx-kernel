@@ -325,11 +325,17 @@ pub fn withdraw_map(machine: &mut Machine, map_index: usize) -> u32 {
             }
         }
     }
+    // The record names its object by table slot, and a slot is reused. The
+    // generation is what says whether it still names the object the mapping was
+    // installed against; decrementing the counters of whatever occupies the
+    // slot now would corrupt the accounting of an unrelated object.
     let memory = record.memory as usize;
-    machine.memories[memory].map_count = machine.memories[memory].map_count.saturating_sub(1);
-    if record.rights & right::MEMORY_WRITE != 0 {
-        machine.memories[memory].writable_maps =
-            machine.memories[memory].writable_maps.saturating_sub(1);
+    if machine.memories[memory].generation == record.memory_generation {
+        machine.memories[memory].map_count = machine.memories[memory].map_count.saturating_sub(1);
+        if record.rights & right::MEMORY_WRITE != 0 {
+            machine.memories[memory].writable_maps =
+                machine.memories[memory].writable_maps.saturating_sub(1);
+        }
     }
     let scope = record.scope;
     machine.scopes[scope as usize].maps_pending = machine.scopes[scope as usize]
@@ -344,6 +350,7 @@ pub fn withdraw_map(machine: &mut Machine, map_index: usize) -> u32 {
 pub fn seal(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u64, i64> {
     let index = ctx.cap.object.index as usize;
     let id = machine.memories[index].id;
+    let generation = machine.memories[index].generation;
     match machine.memories[index].state {
         State::Sealed => {
             let object = &machine.memories[index];
@@ -376,10 +383,19 @@ pub fn seal(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u
         let record = machine.maps[map_index];
         if !record.used
             || record.memory as usize != index
+            || record.memory_generation != generation
             || record.rights & right::MEMORY_WRITE == 0
         {
             continue;
         }
+        event!(
+            "mem.writer_withdrawn",
+            "object={id} domain={} vaddr=0x{:x} offset_pages={} pages={} reason=sealing",
+            record.domain,
+            record.vaddr,
+            record.offset_pages,
+            record.pages
+        );
         pages += withdraw_map(machine, map_index);
         withdrawn += 1;
     }

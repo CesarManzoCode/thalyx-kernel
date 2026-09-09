@@ -68,15 +68,6 @@ fn pick(machine: &mut Machine) -> usize {
     IDLE_THREAD
 }
 
-/// True when at least one user thread is ready or running, eligible or not.
-#[must_use]
-pub fn has_runnable_user_thread() -> bool {
-    let machine = MACHINE.lock();
-    machine.threads.iter().enumerate().any(|(index, thread)| {
-        index != IDLE_THREAD && matches!(thread.state, ThreadState::Ready | ThreadState::Running)
-    })
-}
-
 /// True when some thread is waiting inside a kernel entry.
 fn any_blocked(machine: &Machine) -> bool {
     machine

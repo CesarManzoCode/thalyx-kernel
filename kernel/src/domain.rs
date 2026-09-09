@@ -220,6 +220,12 @@ pub fn create_in(
     if machine.scopes[owner_scope as usize].state != scope::State::Open {
         return Err(CreateError::ScopeClosed);
     }
+    // A domain arrives with a thread, and that thread will charge this scope.
+    // Refusing here rather than after the build keeps a scope at its
+    // parallelism limit from being given a half-built domain to reject.
+    if !scope::has_parallelism(&machine.scopes, owner_scope) {
+        return Err(CreateError::LimitExhausted);
+    }
     let index = machine
         .domains
         .iter()
@@ -470,6 +476,14 @@ fn build(
     thread.syscalls = 0;
     thread.ring3_confirmed = false;
     machine.domains[index].threads[0] = Some(thread_index);
+
+    // The thread charges its owner scope from here, so it holds one of that
+    // scope's parallelism slots. The limit bounds how many threads may charge
+    // one scope at all -- a domain's own and any worker borrowed into it -- and
+    // it is only a limit if every one of them is counted.
+    let owner_scope = machine.domains[index].owner_scope;
+    scope::take_parallelism(&mut machine.scopes, owner_scope);
+    machine.threads[thread_index].parallelism_scope = Some(owner_scope);
 
     Ok(())
 }
@@ -743,6 +757,9 @@ pub fn add_thread_in(
         .ok_or(CreateError::ThreadTableFull)?;
 
     let owner_scope = machine.domains[index].owner_scope;
+    if !scope::has_parallelism(&machine.scopes, owner_scope) {
+        return Err(CreateError::LimitExhausted);
+    }
     if !scope::reserve(
         &mut machine.scopes,
         owner_scope,
@@ -815,6 +832,8 @@ pub fn add_thread_in(
     machine.domains[index].reserved_pages += layout::KSTACK_PAGES;
     machine.domains[index].reserved_metadata += 1;
     machine.scopes[owner_scope as usize].threads += 1;
+    scope::take_parallelism(&mut machine.scopes, owner_scope);
+    machine.threads[thread_index].parallelism_scope = Some(owner_scope);
     Ok(thread_index)
 }
 

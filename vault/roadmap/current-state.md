@@ -5,13 +5,15 @@ status: observed
 ---
 # Estado actual
 
-**2026-09-08 · Fundación 0.1.0 · K0 y K1 completos. K2 en curso: la primera vertical se ejecuta; falta la puerta independiente y la evidencia escrita.**
+**2026-09-08 · Fundación 0.1.0 · K0, K1 y K2 completos. K3–K6 pendientes.**
 
 ## Qué existe
 
 Un vault de 40 notas con constitución, 13 contratos de arquitectura, glosario, reconstrucción de Thalyx, 32 fuentes primarias anotadas, ocho decisiones, 23 invariantes, alternativas, integración Linux/nativa, experimentos y ruta de implementación. Se incluyen herramientas documentales y dos modelos finitos de investigación con controles negativos y resultado versionado.
 
-Existe además un kernel que arranca. El workspace tiene loader UEFI, protocolo de arranque, kernel con `arch/x86_64`, ABI de llamadas y cuatro programas de usuario, con toolchain fijada y construcción reproducible. La imagen arranca en QEMU, ejecuta dominios en ring 3, los preempta con timer, contiene sus fallos ilegales y sobrevive. [Qué se ejecutó exactamente](../evidence/k1-protected-boot.md).
+Existe además un kernel que arranca y un sistema de capacidades que se ejecuta sobre él. El workspace tiene loader UEFI, protocolo de arranque, kernel con `arch/x86_64`, interfaz V0 generada desde un esquema y siete programas de usuario, con toolchain fijada y construcción reproducible desde un solo script para las dos fases.
+
+La imagen K1 arranca en QEMU, ejecuta dominios en ring 3, los preempta con timer, contiene sus fallos ilegales y sobrevive. [Qué se ejecutó exactamente](../evidence/k1-protected-boot.md). La imagen K2, con el mismo kernel y otro paquete, construye un supervisor con un manifiesto explícito de capacidades y deja que ese supervisor cree todo lo demás por la interfaz. [Qué se ejecutó exactamente](../evidence/k2-objects-authority-work.md).
 
 La base de evidencia de Thalyx está fijada al commit `0492f72e487e2463b0d7b938365a8b3383364cb9`: inventario de 407 commits alcanzables, 96 archivos del vault, 38 rutas de código/configuración de evidencia y 15 revisiones históricas seleccionadas. Inventariar no significa haber ejecutado ni auditado exhaustivamente cada archivo.
 
@@ -23,7 +25,7 @@ Microkernel de capacidades con ámbitos de trabajo; dominios de memoria como fro
 
 Las decisiones son contratos para implementar, no resultados del sistema. [Registro de decisiones](../decisions/README.md).
 
-## K2 en curso
+## K2
 
 ### Interfaz V0
 
@@ -49,11 +51,17 @@ Tres programas de usuario ejecutan la vertical descrita en la ruta. `k2super` re
 
 Con el servidor reteniendo trabajo, el supervisor cierra el ámbito del cliente. El informe de drenaje después de la barrera sigue contando el hilo, la invocación y el efecto pendientes; la retirada se rechaza mientras eso siga siendo cierto. El servidor observa `ORIGIN_FENCED`, comprueba que la capacidad derivada por el cliente ya no funciona, y resuelve la obligación —que sí sobrevive a la barrera, porque su grant lo patrocina el ámbito del servidor—. La llamada del cliente vuelve `CANCELLED` y su segunda llamada se rechaza con `SCOPE_CLOSED`. Solo entonces el ámbito queda quiescente y la retirada libera lo que patrocinaba.
 
-Doce controles negativos se ejecutan dentro de esa vertical y los doce son rechazados con el código esperado. Ninguna operación que debía ser rechazada tuvo éxito.
+Veintisiete controles negativos se ejecutan dentro de esa vertical y los veintisiete son rechazados con el código esperado, en doce estados distintos. Ninguna operación que debía ser rechazada tuvo éxito.
+
+La vertical cubre además lo que EXP-02 y EXP-06 piden en alcance K2: copiar una capacidad, cerrarla, ver la ranura liberada volver bajo otro handle que el antiguo no nombra, sostener una capacidad vencida, once peticiones malformadas rechazadas sin efecto parcial, y los límites de tabla, cola y log alcanzados con el cierre todavía disponible.
+
+### Puerta K2
+
+`tools/check_k2.py` decide dieciséis criterios por separado desde los registros del kernel; los dos que necesitan las notas de los programas lo dicen en su título. La regresión de K1 es uno de esos criterios, porque una puerta K2 que pasara con el arranque protegido roto mediría otra cosa. `--self-test` daña la ejecución de dieciséis formas distintas y comprueba que cada daño hace fallar al criterio que le corresponde.
 
 ### Lo que la vertical corrigió del sustrato
 
-Ejecutar los mecanismos encontró cinco defectos que compilar no encuentra, y los cinco están corregidos: el creador de un objeto de memoria no recibía derechos comunes sobre lo que acababa de crear; un dominio no podía reclamarse receptor de un endpoint propio, de modo que ningún supervisor podía tener canal de fallos; la barrera no alcanzaba a los grants patrocinados por el ámbito cerrado, así que la autoridad delegada seguía funcionando después del cierre; cercar un ámbito con un hilo vivo lo dejaba permanentemente inejecutable y la ejecución no terminaba; y el informe de drenaje contaba hilos despachados en lugar de hilos vivos, declarando quiescencia con un dominio todavía en pie. La retirada, además, marcaba el ámbito y no liberaba nada.
+Ejecutar los mecanismos encontró siete defectos que compilar no encuentra, y los siete están corregidos: el creador de un objeto de memoria no recibía derechos comunes sobre lo que acababa de crear; un dominio no podía reclamarse receptor de un endpoint propio, de modo que ningún supervisor podía tener canal de fallos; la barrera no alcanzaba a los grants patrocinados por el ámbito cerrado, así que la autoridad delegada seguía funcionando después del cierre; cercar un ámbito con un hilo vivo lo dejaba permanentemente inejecutable y la ejecución no terminaba; el informe de drenaje contaba hilos despachados en lugar de hilos vivos, declarando quiescencia con un dominio todavía en pie; la retirada marcaba el ámbito y no liberaba nada; y el despacho descartaba la respuesta de toda operación que rechazara, de modo que el informe de `SCOPE_RETIRE` nunca llegaba a quien `DRAIN_INCOMPLETE` manda mirarlo. [Detalle](../evidence/k2-objects-authority-work.md).
 
 ## Evidencia ejecutada aquí
 
@@ -68,18 +76,19 @@ Ejecutar los mecanismos encontró cinco defectos que compilar no encuentra, y lo
 | Esquema ABI | PASS en 4 comprobaciones. [Comprobador](../../tools/check_abi.py). |
 | Puerta K1 | PASS en 13 criterios decididos por separado desde los registros del kernel, con controles negativos. [Detalle y límites](../evidence/k1-protected-boot.md). |
 | Regresión K1 sobre el sustrato K2 | PASS en los mismos 13 criterios con los mecanismos K2 compilados dentro del kernel. |
-| Vertical K2 en QEMU | La imagen K2 arranca, ejecuta supervisor, servidor y cliente, y termina en `no_runnable_domain` con estado completo. 12 controles negativos rechazados con el código esperado, 0 resultados inesperados. Todavía **no** evaluada por una puerta independiente. |
+| Puerta K2 | PASS en 16 criterios decididos por separado, 14 de ellos desde los registros del kernel. [Detalle y límites](../evidence/k2-objects-authority-work.md). |
+| Autocomprobación de la puerta K2 | 16 ejecuciones dañadas de una forma cada una, las 16 detectadas por el criterio que les corresponde. |
 
 ## Qué no existe todavía
 
-Del lado de K2 falta la parte que decide si lo anterior vale: **no hay puerta K2**. Que una ejecución termine sin resultados inesperados es la afirmación del propio programa sobre sí mismo; hasta que un comprobador independiente lea los registros del kernel y decida criterio por criterio, no hay más que un log que parece bueno. Tampoco hay documento de evidencia, ni actualización de los experimentos, ni control negativo a nivel de puerta.
+Lo que K2 demuestra está acotado por lo que una vertical puede demostrar. Los mecanismos tienen más caminos de los que una ejecución recorre: los 60 manejadores del esquema no están todos ejercidos, y los que lo están lo están por un camino cada uno. EXP-02, EXP-03, EXP-04 y EXP-06 quedan ejecutados **en su alcance K2** —uniprocesador, sin dispositivos, sin estado durable— y sus partes de K3 y K4 siguen pendientes.
 
-Que los 60 manejadores compilen no dice nada sobre si hacen lo que su contrato exige, y una sola ejecución de una sola vertical tampoco lo dice de todos ellos. La vertical ejerce autoridad, memoria, IPC, efectos, barrera, drenaje y retirada; no ejerce agotamiento de colas ni de handles, ni reciclado de slots, ni expiración por deadline, que EXP-02 y EXP-06 también piden.
-
-Más allá de K2: SMP, drivers propios, DMA, servicio de estado implementado, Thalyx sobre este kernel, pruebas de hardware físico, mediciones de rendimiento o prueba formal general. El plano de diagnóstico de K1 es temporal y no es el plano de recibos. No se ha retirado ni reemplazado Linux.
+No existe: SMP, drivers propios, DMA, servicio de estado implementado, Thalyx sobre este kernel, pruebas de hardware físico, mediciones de rendimiento o prueba formal general. El plano de diagnóstico de K1 sigue presente, sigue sin ser el plano de recibos, y sus dos entradas de andamiaje permanecen para que la regresión de K1 se siga ejecutando. El primer supervisor no tiene supervisor: su fallo termina la ejecución. No se ha retirado ni reemplazado Linux.
 
 ## Siguiente trabajo
 
-Ampliar la vertical con lo que EXP-02 y EXP-06 exigen y todavía no se ejerce, y después escribir la puerta K2: un comprobador que decida cada criterio por separado desde los registros del kernel, con sus propios controles negativos, y el documento de evidencia que registre qué se ejecutó y qué no.
+Ejecutar el paquete K3 descrito en [la ruta](phases.md): arranque de procesadores de aplicación, planificación con presupuesto agregado entre núcleos, sincronización, invalidación de TLB entre núcleos y reclamación diferida; después el primer driver propio con IRQ y buffers separados, y el perfil de aislamiento que declare honestamente sus dependencias de IOMMU.
+
+Lo primero que K3 debe romper es la suposición que K2 tiene derecho a hacer y K3 no: que hay un solo núcleo y que, por tanto, un cerrojo de máquina y la ausencia de DMA bastan para que una barrera signifique algo.
 
 No hay una elección técnica pendiente que deba devolver el diseño al usuario. [Las preguntas abiertas](open-questions.md) especifican qué dato falta y con qué decisión conservadora avanzar.

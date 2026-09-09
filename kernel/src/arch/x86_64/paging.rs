@@ -29,8 +29,6 @@ pub const FLAG_WRITABLE: u64 = WRITABLE;
 /// from ring 3.
 pub const FLAG_USER: u64 = USER;
 /// Leaf flag reported by [`AddressSpace::translate`]: the page is not
-/// executable.
-pub const FLAG_NO_EXECUTE: u64 = NO_EXECUTE;
 
 const ADDRESS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 const ENTRIES: usize = 512;

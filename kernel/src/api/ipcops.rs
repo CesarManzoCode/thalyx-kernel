@@ -235,7 +235,8 @@ fn admit(
     // entry twice; the interface refuses it rather than picking a meaning.
     let mut sources = [(0usize, ObjRef::new(ObjKind::Scope, 0, 0), NO_GRANT, false); 4];
     for index in 0..count {
-        if request.cap_ops[index] != cap_op::COPY && request.cap_ops[index] != cap_op::MOVE {
+        let operation = request.cap_ops[index];
+        if operation != cap_op::COPY && operation != cap_op::MOVE {
             return Err(status::INVALID_ARGUMENT);
         }
         let cap = resolve(
@@ -246,17 +247,14 @@ fn admit(
             right::TRANSFER,
             ctx.now,
         )?;
-        for previous in sources.iter().take(index) {
-            if previous.0 == cap.slot {
-                return Err(status::INVALID_ARGUMENT);
-            }
+        if sources
+            .iter()
+            .take(index)
+            .any(|previous| previous.0 == cap.slot)
+        {
+            return Err(status::INVALID_ARGUMENT);
         }
-        sources[index] = (
-            cap.slot,
-            cap.object,
-            cap.grant,
-            request.cap_ops[index] == cap_op::MOVE,
-        );
+        sources[index] = (cap.slot, cap.object, cap.grant, operation == cap_op::MOVE);
     }
 
     let ordinary = kind != message_kind::FAULT;
@@ -660,6 +658,18 @@ fn deliver(
 ) -> Result<u64, i64> {
     let message = machine.messages[message_index];
     let invocation_index = message.invocation as usize;
+
+    // Admission recorded which endpoint the work arrived on. Delivering it from
+    // a different one would mean the queue and the invocation had drifted
+    // apart, and the header the receiver is about to be handed -- which it is
+    // entitled to treat as the kernel's statement -- would be wrong about where
+    // the work came from.
+    if machine.invocations[invocation_index].endpoint as usize != endpoint
+        || machine.invocations[invocation_index].endpoint_generation
+            != machine.endpoints[endpoint].generation
+    {
+        return Err(status::STATE_CONFLICT);
+    }
 
     // The receiver needs a handle on the obligation before the message leaves
     // the queue: if the table is full the message stays where it was, which is
@@ -1079,6 +1089,13 @@ pub fn bind_worker(machine: &mut Machine, ctx: &Ctx) -> Result<u64, i64> {
         return Err(status::STATE_CONFLICT);
     }
     let recovery = !scope::is_open(&machine.scopes, invocation.origin_scope);
+    // A borrowed worker competes for the origin's parallelism slots like any
+    // thread the origin owns. The exception is a recovery binding: the
+    // obligation still has to be finished, and refusing to bind a worker to it
+    // because the closed scope is busy would leave it unfinishable.
+    if !recovery && !scope::has_parallelism(&machine.scopes, invocation.origin_scope) {
+        return Err(status::LIMIT_EXHAUSTED);
+    }
     if let Some(previous) = machine.threads[thread].parallelism_scope.take() {
         scope::drop_parallelism(&mut machine.scopes, previous);
     }

@@ -617,6 +617,10 @@ fn create_supervisor(root: ScopeId, supervisor: &thalyx_boot_protocol::BootModul
 
     let index = {
         let mut machine = MACHINE.lock();
+        // The package chose this path, and the run records which one it took.
+        // Two images built from one kernel differ only here, so a log that did
+        // not say which it was would be ambiguous about the thing that matters.
+        machine.managed_boot = true;
         k2boot::establish_supervisor(&mut machine, root, supervisor, &images[..count])
     };
     let Some(index) = index else {
@@ -837,10 +841,17 @@ fn summarize(terminal: sched::Terminal) {
             machine.allocator().charged(Owner::Domain(index as u16))
         };
         let name = domain::domain_name(index);
+        let (handles, scope_id) = {
+            let machine = MACHINE.lock();
+            (
+                machine.domains[index].caps.live(),
+                machine.scopes[machine.domains[index].owner_scope as usize].id,
+            )
+        };
         event!(
             "k1.domain_summary",
             "domain={index} name={name} final_state={} exit_reason={reason} notes={notes} \
-             charged_frames={charged}",
+             charged_frames={charged} handles_held={handles} scope={scope_id}",
             state.name()
         );
     }
@@ -852,13 +863,33 @@ fn summarize(terminal: sched::Terminal) {
     let reclaimed = machine.reclaimed_frames;
     drop(machine);
 
+    // Obligations nobody discharged and the path the package chose. A run that
+    // ended tidily while an invocation was still charged somewhere would look
+    // exactly like one that did not, without the first number.
+    let (outstanding, managed) = {
+        let machine = MACHINE.lock();
+        let outstanding = machine
+            .root_scope
+            .map_or(0, |root| crate::api::scopeops::outstanding(&machine, root));
+        (outstanding, machine.managed_boot)
+    };
+
     event!(
         "k1.summary",
         "timer_ticks={ticks} preemptions={preemptions} preempt_records_emitted={records} \
          user_faults={faults} modules_rejected={rejected} kernel_charged_frames={kernel_charged} \
          free_frames={free} usable_frames_at_boot={usable} boot_frames_reclaimed={reclaimed} \
-         plane=diagnostic coalesced={}",
+         invocations_outstanding={outstanding} plane=diagnostic coalesced={}",
         u8::from(preemptions > u64::from(records))
     );
-    event!("k1.terminal", "reason={} status=complete", terminal.name());
+    event!(
+        "k1.terminal",
+        "reason={} boot_path={} status=complete",
+        terminal.name(),
+        if managed {
+            "k2_supervisor"
+        } else {
+            "k1_domains"
+        }
+    );
 }

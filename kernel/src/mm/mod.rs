@@ -190,14 +190,4 @@ impl Owner {
             Owner::Scope(id) => (id as usize) + 1 + crate::limits::MAX_DOMAINS,
         }
     }
-
-    /// Short name used in diagnostic records.
-    #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Owner::Kernel => "kernel",
-            Owner::Domain(_) => "domain",
-            Owner::Scope(_) => "scope",
-        }
-    }
 }
