@@ -1,5 +1,18 @@
 # Historial del proyecto
 
+## 0.3.1 — 2026-09-09
+
+K2 cerrado. La interfaz entera ejercida y exigida por la puerta.
+
+- Cobertura real de 42 a **51 de 51** operaciones asignadas, sin ninguna nombrada como no tocada. Cuatro pasos nuevos del supervisor la cierran: lectura y reconocimiento de recibos por capacidad, barrera sobre una concesión en lugar de sobre un ámbito, un dominio que se construye y se termina sin activarse nunca, y techos de ámbito que bajan después de crearlo. `SIGNAL_QUERY` se ejerce a ambos lados de la espera del timer.
+- El log de control se lee por fin desde un programa: 58 recibos recorridos en lotes acotados, secuencias estrictamente crecientes, y el recibo que el guion escribió declarando un origen falso encontrado con el origen real estampado encima. Leer y reconocer son derechos separables y se comprueba que lo son.
+- Criterio de cobertura en la puerta, que compara el recuento contra la lista de operaciones sin tocar en lugar de fiarse de uno de los dos: 21 criterios y 28 mutaciones de autocomprobación, tres de ellas de cobertura.
+- Controles negativos de 27 a **41**, en 13 estados distintos, ninguno inesperado y ninguno ausente.
+- Tres defectos más que solo aparecieron al ejecutar estos caminos. Las tres operaciones que informan sobre un linaje o lo limpian —`CAP_INSPECT`, `CAP_CLOSE`, `CAP_DRAIN_STATUS`— estaban detrás de la misma puerta de resolución que rechaza el linaje cercado o vencido del que existen para hablar: medido desactivando la corrección, `CAP_DRAIN_STATUS` no se alcanza nunca. `DOMAIN_ADD_THREAD` informaba de un conflicto de estado como límite agotado y consultaba el espacio de direcciones antes que el estado. `CapInfo.lineage_state` no tenía valores con nombre en el esquema; `CapLineage` entra en él.
+- Evidencia y estado actualizados con lo medido y con sus límites explícitos, incluidos los que el número de cobertura no cubre: un camino por operación, el contador marcado antes de comprobar derechos, y el hilo del dominio de repuesto que nunca se ejecuta.
+
+K2 queda completo. El siguiente paquete es K3 y no hay trabajo K2 pendiente.
+
 ## 0.3.0 — 2026-09-08
 
 K2 — Objetos, autoridad y trabajo. Primer sistema de capacidades ejecutándose.
