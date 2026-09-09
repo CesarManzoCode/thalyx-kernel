@@ -244,6 +244,15 @@ pub struct Domain {
     pub stack_mapped: bool,
     /// Whether the domain was built through the K2 capability path.
     pub managed: bool,
+    /// Bit per processor this domain's address space has ever been dispatched
+    /// on.
+    ///
+    /// A count of who is in the space *right now* answers a different and much
+    /// weaker question: an invalidation has to reach every processor that could
+    /// hold a translation, and a processor that ran here a microsecond ago
+    /// still could. The mask is what makes "reached everyone who could have
+    /// cached it" checkable after the fact.
+    pub cpu_mask: u64,
     /// Pages reserved in the owner scope for this domain's infrastructure.
     pub reserved_pages: u64,
     /// Metadata units reserved in the owner scope for this domain and its
@@ -288,6 +297,7 @@ impl Domain {
             entry: 0,
             segments: 0,
             image_pages: 0,
+            cpu_mask: 0,
             stack_mapped: false,
             managed: false,
             reserved_pages: 0,
@@ -528,12 +538,23 @@ pub struct Machine {
     /// Processors that completed their handshake, the bootstrap processor
     /// included.
     pub cpus_online: usize,
+    /// Processors that ever completed it. Never decremented, so a summary
+    /// written after the others have parked still says how many ran.
+    pub cpus_started: usize,
     /// Timer ticks since the timer was armed, summed over every processor.
     pub ticks: u64,
     /// Involuntary switches away from a user thread.
     pub preemptions: u64,
     /// Dispatches refused because a scope had no budget or no parallelism slot.
     pub budget_stalls: u64,
+    /// Longest interval a single charge covered.
+    ///
+    /// A quantum bounds how long a thread is *scheduled* for; this is how long
+    /// it was actually charged for between two observations of the clock. Under
+    /// an emulated platform the two are not the same number, and a budget
+    /// overrun is only attributable if the difference is measured rather than
+    /// assumed.
+    pub max_charge_interval_ns: u64,
     /// Frames reclaimed from loader and module memory after bootstrap.
     pub reclaimed_frames: usize,
     /// User faults contained.
@@ -587,9 +608,11 @@ impl Machine {
             kstack_used: [false; MAX_KSTACKS],
             cpus: [CpuSlot::empty(); MAX_CPUS],
             cpus_online: 0,
+            cpus_started: 0,
             ticks: 0,
             preemptions: 0,
             budget_stalls: 0,
+            max_charge_interval_ns: 0,
             reclaimed_frames: 0,
             user_faults: 0,
             modules_rejected: 0,

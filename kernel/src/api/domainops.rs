@@ -242,6 +242,14 @@ pub fn map(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u6
         grant: memory.grant,
         scope: owner_scope,
     };
+    // The record names the grant that authorised it, and it names it by table
+    // slot. Holding a reference is what keeps that slot from being collected
+    // and reused under the record while the mapping is still installed: a
+    // withdrawal would then consult an unrelated grant.
+    if memory.grant != crate::obj::NO_GRANT {
+        machine.grants[memory.grant as usize].refs =
+            machine.grants[memory.grant as usize].refs.saturating_add(1);
+    }
     machine.domains[target].reserved_pages += MAP_TABLE_RESERVE;
     machine.memories[object].map_count += 1;
     if request.rights & right::MEMORY_WRITE != 0 {
@@ -284,7 +292,7 @@ pub fn unmap(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64
     if request.reserved0 != 0 {
         return Err(status::INVALID_ARGUMENT);
     }
-    let (target, pages) = {
+    let (target, pages, live, mask) = {
         let mut machine = MACHINE.lock();
         let cap = resolve(
             &machine,
@@ -306,18 +314,31 @@ pub fn unmap(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64
         let Some(record_index) = record else {
             return Err(status::INVALID_ARGUMENT);
         };
+        // Measured before the entries are removed: afterwards nothing is
+        // executing there through this mapping by definition.
+        let live = machine.domains[target].space.as_ref().map_or(0, |space| {
+            crate::api::memops::cpus_in_space(&machine, space.cr3())
+        });
+        // Every processor this address space has ever been dispatched on, not
+        // only the ones inside it at this instant. That is the set an
+        // invalidation actually has to reach.
+        let mask = machine.domains[target].cpu_mask;
         (
             target,
             crate::api::memops::withdraw_map(&mut machine, record_index),
+            live,
+            mask,
         )
     };
 
     let ack = crate::tlb::shootdown();
     event!(
         "mem.unmapped",
-        "domain={target} vaddr=0x{:x} pages={pages} invalidation_generation={} \
+        "domain={target} vaddr=0x{:x} pages={pages} active_in_space={live} \
+         space_cpu_mask=0x{mask:x} space_cpus={} invalidation_generation={} \
          acknowledged_cpus={} expected_cpus={} acknowledged={}",
         request.vaddr,
+        mask.count_ones(),
         ack.generation,
         ack.acknowledged,
         ack.expected,
@@ -569,6 +590,7 @@ pub fn query(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<
         fault_vector: fault.vector,
         fault_rip: fault.rip,
         charged_pages: charged,
+        entry_point: domain.entry,
     };
     begin_response(staging, ctx.operation);
     staging.write(BODY, info);

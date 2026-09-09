@@ -1842,6 +1842,11 @@
         {
           "name": "charged_pages",
           "type": "u64"
+        },
+        {
+          "name": "entry_point",
+          "type": "u64",
+          "doc": "Entry point the image declared. An authority adding a thread needs it, and the domain's creator is the only one that can be told."
         }
       ]
     },

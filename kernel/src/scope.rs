@@ -134,6 +134,37 @@ pub struct Scope {
     pub closure_dispatch_ns: u64,
     /// Threads dispatched on some processor charging this scope right now.
     pub running: u32,
+    /// Most this scope ever held dispatched at one instant.
+    ///
+    /// Sampled where the count changes rather than where a report is asked
+    /// for. A report can only see the instant it runs in, and on several
+    /// processors that instant is very unlikely to be the interesting one.
+    pub max_running: u32,
+    /// Most this scope ever had committed at once in a window: what it had
+    /// already spent plus what it had promised and not yet spent.
+    ///
+    /// The reservation exists so this never exceeds the budget. Recording the
+    /// peak where the commitment is made turns that from a claim about the
+    /// code into a number a run either contradicts or does not.
+    pub max_committed_ns: u64,
+    /// Dispatch reservations granted.
+    pub dispatch_grants: u64,
+    /// Dispatch reservations refused for want of budget or simultaneity.
+    pub dispatch_refusals: u64,
+    /// What `cpu_window_ns` held when the current window opened: the overrun
+    /// the previous window carried in.
+    pub window_opened_ns: u64,
+    /// Most this scope was charged *inside* one window, carried debt excluded.
+    pub max_charged_in_window_ns: u64,
+    /// Most a window was charged beyond what that window could admit.
+    ///
+    /// This is the number the reservation is supposed to bound, and it is not
+    /// the same as the overrun. A window that opens already in debt can close
+    /// over budget having executed nothing; what says whether admission held is
+    /// how much ran beyond what admission allowed. Preemption is tick-driven,
+    /// so a dispatch can outlive its reservation by less than a tick period on
+    /// each processor, and that is the whole of what this may contain.
+    pub max_excess_ns: u64,
     /// Ordinary execution charged since creation.
     pub cpu_total_ns: u64,
     /// Overrun carried into later windows. Never cleared by a window change.
@@ -144,6 +175,19 @@ pub struct Scope {
     pub closure_reserved_ns: u64,
     /// Window the charges above belong to.
     pub window_index: u64,
+    /// Most this scope was charged in any window that has closed.
+    ///
+    /// The number the reservation exists to bound. With one processor it is
+    /// bounded by arithmetic; with several it is bounded only if a dispatch
+    /// takes the balance before it runs, and reading it back afterwards is how
+    /// that stops being an assertion.
+    pub max_window_ns: u64,
+    /// Windows that have closed with this scope in existence.
+    pub windows_closed: u64,
+    /// Of those, how many closed over budget.
+    pub overruns: u64,
+    /// The largest overrun observed.
+    pub max_overrun_ns: u64,
     /// Threads whose owning domain belongs to this scope.
     pub threads: u32,
     /// Threads currently charging this scope.
@@ -190,11 +234,22 @@ impl Scope {
             cpu_reserved_ns: 0,
             closure_dispatch_ns: 0,
             running: 0,
+            max_running: 0,
+            max_committed_ns: 0,
+            dispatch_grants: 0,
+            dispatch_refusals: 0,
+            window_opened_ns: 0,
+            max_charged_in_window_ns: 0,
+            max_excess_ns: 0,
             cpu_total_ns: 0,
             cpu_debt_ns: 0,
             closure_used_ns: 0,
             closure_reserved_ns: 0,
             window_index: 0,
+            max_window_ns: 0,
+            windows_closed: 0,
+            overruns: 0,
+            max_overrun_ns: 0,
             threads: 0,
             parallelism_used: 0,
             invocations_pending: 0,
@@ -374,6 +429,7 @@ pub fn roll_window(table: &mut Table, now_ns: u64) {
         if node.state == State::Empty || node.window_index == window {
             continue;
         }
+        let closing = node.cpu_window_ns;
         let overrun = node.cpu_window_ns.saturating_sub(node.limits.cpu_budget_ns);
         if overrun != 0 {
             // Carried debt that nobody can see is not a limit, it is a number.
@@ -391,8 +447,34 @@ pub fn roll_window(table: &mut Table, now_ns: u64) {
             );
         }
         let node = &mut table[index];
+        node.windows_closed += 1;
+        if closing > node.max_window_ns {
+            node.max_window_ns = closing;
+        }
+        // What this window actually executed, and what it was allowed to
+        // admit. Their difference is the only part of the overrun the
+        // reservation is answerable for.
+        let charged = closing.saturating_sub(node.window_opened_ns);
+        let admissible = node
+            .limits
+            .cpu_budget_ns
+            .saturating_sub(node.window_opened_ns);
+        if charged > node.max_charged_in_window_ns {
+            node.max_charged_in_window_ns = charged;
+        }
+        let excess = charged.saturating_sub(admissible);
+        if excess > node.max_excess_ns {
+            node.max_excess_ns = excess;
+        }
+        if overrun != 0 {
+            node.overruns += 1;
+            if overrun > node.max_overrun_ns {
+                node.max_overrun_ns = overrun;
+            }
+        }
         node.cpu_debt_ns = node.cpu_debt_ns.saturating_add(overrun);
         node.cpu_window_ns = overrun;
+        node.window_opened_ns = overrun;
         node.closure_used_ns = 0;
         // A reservation belongs to the window it was made in. Carrying it
         // across the boundary would credit the new window with capacity the old
@@ -478,6 +560,8 @@ pub fn available_ns(table: &Table, scope: ScopeId, recovery: bool) -> u64 {
 /// spending the same balance.
 pub fn reserve_dispatch(table: &mut Table, scope: ScopeId, amount: u64, recovery: bool) -> bool {
     if available_ns(table, scope, recovery) < amount {
+        table[scope as usize].dispatch_refusals =
+            table[scope as usize].dispatch_refusals.saturating_add(1);
         return false;
     }
     let mut fits = true;
@@ -487,6 +571,8 @@ pub fn reserve_dispatch(table: &mut Table, scope: ScopeId, amount: u64, recovery
         }
     });
     if !fits {
+        table[scope as usize].dispatch_refusals =
+            table[scope as usize].dispatch_refusals.saturating_add(1);
         return false;
     }
     let mut chain = [usize::MAX; thalyx_abi::limit::MAX_SCOPE_DEPTH as usize + 1];
@@ -500,12 +586,20 @@ pub fn reserve_dispatch(table: &mut Table, scope: ScopeId, amount: u64, recovery
     for index in &chain[..count] {
         let node = &mut table[*index];
         node.running = node.running.saturating_add(1);
+        if node.running > node.max_running {
+            node.max_running = node.running;
+        }
         if recovery {
             node.closure_dispatch_ns = node.closure_dispatch_ns.saturating_add(amount);
         } else {
             node.cpu_reserved_ns = node.cpu_reserved_ns.saturating_add(amount);
+            let committed = node.cpu_window_ns.saturating_add(node.cpu_reserved_ns);
+            if committed > node.max_committed_ns {
+                node.max_committed_ns = committed;
+            }
         }
     }
+    table[scope as usize].dispatch_grants = table[scope as usize].dispatch_grants.saturating_add(1);
     true
 }
 
@@ -544,10 +638,10 @@ pub fn settle_dispatch(
     }
 }
 
-/// Highest simultaneity any scope in the table is holding.
+/// Highest simultaneity any scope in the table ever held.
 #[must_use]
 pub fn peak_running(table: &Table) -> u32 {
-    table.iter().map(|node| node.running).max().unwrap_or(0)
+    table.iter().map(|node| node.max_running).max().unwrap_or(0)
 }
 
 /// True when `scope` and every ancestor have a free parallelism slot.

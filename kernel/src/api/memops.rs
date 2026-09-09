@@ -294,6 +294,27 @@ pub fn read(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u
     Ok(request.length)
 }
 
+/// Processors executing in the address space rooted at `cr3` right now.
+///
+/// Measured rather than inferred, and measured at the moment a withdrawal is
+/// published. "The mapping was removed" and "the mapping was removed while two
+/// other processors were executing in that space" are different claims, and
+/// only the second one is about the race this mechanism exists for.
+#[must_use]
+pub fn cpus_in_space(machine: &Machine, cr3: u64) -> u32 {
+    let mut count = 0;
+    for cpu in 0..crate::limits::MAX_CPUS {
+        let slot = machine.cpus[cpu];
+        if !slot.online || slot.current == usize::MAX || slot.current >= machine.threads.len() {
+            continue;
+        }
+        if machine.threads[slot.current].cr3 == cr3 {
+            count += 1;
+        }
+    }
+    count
+}
+
 /// Withdraws one mapping, invalidates it here and publishes it everywhere.
 ///
 /// Two things are needed and they are not the same thing. The processor running
@@ -354,7 +375,15 @@ pub fn withdraw_map(machine: &mut Machine, map_index: usize) -> u32 {
         .maps_pending
         .saturating_sub(1);
     scope::release(&mut machine.scopes, scope, Resource::Metadata, 1);
+    let grant = record.grant;
     machine.maps[map_index] = crate::memobj::MapRecord::empty();
+    // The reference the mapping held on its authorising grant. Releasing it
+    // here, after the record is gone, is what lets a node whose last handle was
+    // closed while the mapping stood be collected now.
+    if grant != crate::obj::NO_GRANT {
+        machine.grants[grant as usize].refs = machine.grants[grant as usize].refs.saturating_sub(1);
+        crate::api::collect_grant(machine, grant);
+    }
     if removed != 0 {
         crate::tlb::publish();
     }
@@ -396,8 +425,9 @@ fn describe(machine: &Machine, index: usize) -> MemoryInfo {
 /// and the caller is told the drain is incomplete. Retrying is allowed and
 /// finishes the transition; declaring the bytes immutable is not.
 pub fn seal(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64> {
-    let (index, id, generation, withdrawn, pages) = {
+    let (index, id, generation, withdrawn, pages, live, mask) = {
         let mut machine = MACHINE.lock();
+        let mut writers = [false; crate::state::MAX_DOMAINS];
         let cap = resolve(
             &machine,
             ctx.domain,
@@ -461,10 +491,22 @@ pub fn seal(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
                 record.offset_pages,
                 record.pages
             );
+            writers[record.domain as usize] = true;
             pages += withdraw_map(&mut machine, map_index);
             withdrawn += 1;
         }
-        (index, id, generation, withdrawn, pages)
+        let mut live = 0u32;
+        let mut mask = 0u64;
+        for domain in 0..crate::state::MAX_DOMAINS {
+            if !writers[domain] {
+                continue;
+            }
+            if let Some(space) = machine.domains[domain].space.as_ref() {
+                live += cpus_in_space(&machine, space.cr3());
+            }
+            mask |= machine.domains[domain].cpu_mask;
+        }
+        (index, id, generation, withdrawn, pages, live, mask)
     };
 
     // No lock is held here, which is the point.
@@ -507,10 +549,12 @@ pub fn seal(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
         "object={id} label={label} pages={object_pages} writers_withdrawn={withdrawn} \
          pages_unmapped={pages} remaining_maps={map_count} \
          invalidation_generation={} acknowledged_cpus={} expected_cpus={} \
-         perimeter=cpu_translations_retired dma=none",
+         writer_cpus_at_withdrawal={live} writer_cpu_mask=0x{mask:x} \
+         writer_cpus_ever={} perimeter=cpu_translations_retired dma=none",
         ack.generation,
         ack.acknowledged,
-        ack.expected
+        ack.expected,
+        mask.count_ones()
     );
     drop(machine);
     begin_response(staging, ctx.operation);

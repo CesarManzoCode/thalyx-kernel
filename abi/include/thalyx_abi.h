@@ -512,8 +512,9 @@ typedef struct {
     uint64_t fault_vector; /* Schema field `fault_vector`, little-endian `u64`. */
     uint64_t fault_rip; /* Schema field `fault_rip`, little-endian `u64`. */
     uint64_t charged_pages; /* Schema field `charged_pages`, little-endian `u64`. */
+    uint64_t entry_point; /* Entry point the image declared. An authority adding a thread needs it, and the domain's creator is the only one that can be told. */
 } thalyx_domain_info_t;
-_Static_assert(sizeof(thalyx_domain_info_t) == 64, "DomainInfo size");
+_Static_assert(sizeof(thalyx_domain_info_t) == 72, "DomainInfo size");
 _Static_assert(_Alignof(thalyx_domain_info_t) == 8, "DomainInfo alignment");
 _Static_assert(offsetof(thalyx_domain_info_t, state) == 0, "DomainInfo.state offset");
 _Static_assert(offsetof(thalyx_domain_info_t, threads) == 4, "DomainInfo.threads offset");
@@ -525,6 +526,7 @@ _Static_assert(offsetof(thalyx_domain_info_t, exit_code) == 32, "DomainInfo.exit
 _Static_assert(offsetof(thalyx_domain_info_t, fault_vector) == 40, "DomainInfo.fault_vector offset");
 _Static_assert(offsetof(thalyx_domain_info_t, fault_rip) == 48, "DomainInfo.fault_rip offset");
 _Static_assert(offsetof(thalyx_domain_info_t, charged_pages) == 56, "DomainInfo.charged_pages offset");
+_Static_assert(offsetof(thalyx_domain_info_t, entry_point) == 64, "DomainInfo.entry_point offset");
 
 /* Reserve resident pages before the object becomes visible. */
 typedef struct {

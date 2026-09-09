@@ -932,7 +932,9 @@ fn drain_quarantine() {
 /// only the first is evidence that the scheduling was multiprocessor.
 fn scheduling_summary() {
     let machine = MACHINE.lock();
-    let online = machine.cpus_online;
+    // The processors that ran, not the ones still running: this summary is
+    // written after the others have parked.
+    let online = machine.cpus_started;
     let peak = crate::scope::peak_running(&machine.scopes);
     let mut rows = [(0usize, 0u32, 0u64, 0u64, 0u64, 0u64, 0u64); crate::limits::MAX_CPUS];
     let mut count = 0usize;
@@ -953,6 +955,7 @@ fn scheduling_summary() {
         count += 1;
     }
     let migrations: u64 = machine.threads.iter().map(|thread| thread.migrations).sum();
+    let interval = machine.max_charge_interval_ns;
     drop(machine);
 
     for slot in 0..count {
@@ -963,14 +966,62 @@ fn scheduling_summary() {
              preemptions={preemptions} budget_stalls={stalls} user_ns={user_ns}"
         );
     }
+    // Every scope that was ever given a budget, with the most it was actually
+    // charged in a closed window. A budget nothing was measured against is a
+    // number, not a limit.
+    for index in 0..crate::limits::MAX_SCOPES {
+        let machine = MACHINE.lock();
+        let node = &machine.scopes[index];
+        if node.state == crate::scope::State::Empty || node.limits.cpu_budget_ns == 0 {
+            continue;
+        }
+        let (id, label, budget, parallelism) = (
+            node.id,
+            node.label_str(),
+            node.limits.cpu_budget_ns,
+            node.limits.parallelism,
+        );
+        let (windows, worst, overruns, worst_overrun, total, debt) = (
+            node.windows_closed,
+            node.max_window_ns,
+            node.overruns,
+            node.max_overrun_ns,
+            node.cpu_total_ns,
+            node.cpu_debt_ns,
+        );
+        // The peaks are recorded where the commitment happens, so they answer
+        // the question a closed window cannot: how much was ever promised at
+        // once, and how many threads ever held this scope at one instant.
+        let (committed, peak, grants, refusals) = (
+            node.max_committed_ns,
+            node.max_running,
+            node.dispatch_grants,
+            node.dispatch_refusals,
+        );
+        let (charged, excess) = (node.max_charged_in_window_ns, node.max_excess_ns);
+        event!(
+            "scope.accounting",
+            "scope={index} id={id} label={label} budget_ns={budget} \
+             parallelism={parallelism} windows_closed={windows} max_window_ns={worst} \
+             overruns={overruns} max_overrun_ns={worst_overrun} total_ns={total} \
+             debt_ns={debt} max_committed_ns={committed} max_running={peak} \
+             dispatch_grants={grants} dispatch_refusals={refusals} \
+             max_charged_in_window_ns={charged} max_excess_ns={excess}"
+        );
+        drop(machine);
+    }
+
     let (published, ipis, flushes, timeouts, spins) = tlb::counters();
     let (observations, regressions, worst) = time::monotonicity();
     event!(
         "sched.summary",
-        "cpus_online={online} peak_simultaneous_threads={peak} migrations={migrations} \
+        "cpus_started={online} peak_simultaneous_threads={peak} migrations={migrations} \
+         quantum_ns={} tick_hz={} max_charge_interval_ns={interval} \
          invalidations={published} shootdown_ipis={ipis} flushes={flushes} \
          ack_timeouts={timeouts} max_ack_spins={spins} clock_readings={observations} \
-         clock_regressions={regressions} worst_regression_ns={worst}"
+         clock_regressions={regressions} worst_regression_ns={worst}",
+        crate::sched::QUANTUM_NS,
+        crate::sched::TICK_HZ
     );
 }
 

@@ -95,6 +95,18 @@ fn dispatch_grant(machine: &Machine, index: usize, now: u64) -> u64 {
     QUANTUM_NS.min(available).min(window_left)
 }
 
+/// Ticks a dispatch may run for, from the execution it was actually granted.
+///
+/// A reservation that does not bound the run is not a reservation. When the
+/// budget left in the window is less than a quantum, the dispatch gets the
+/// smaller of the two, and the preemption that ends it has to arrive that much
+/// sooner. One tick is the floor: preemption is tick-driven, so a dispatch can
+/// overrun its reservation by less than a tick period and no more.
+const fn quantum_ticks_for(grant: u64) -> u32 {
+    let ticks = grant * TICK_HZ / 1_000_000_000;
+    if ticks == 0 { 1 } else { ticks as u32 }
+}
+
 /// Chooses a thread for `cpu` and takes its reservation, or returns the
 /// processor's idle thread.
 ///
@@ -111,6 +123,15 @@ fn pick_and_reserve(machine: &mut Machine, cpu: usize, now: u64) -> usize {
         }
         let grant = dispatch_grant(machine, index, now);
         if grant == 0 {
+            // Counted on the scope that ran out, where the refusal happens. A
+            // ceiling nothing was ever refused against is a number, not a
+            // limit, and this is what tells the two apart.
+            let target = machine.threads[index].effective_scope;
+            let recovery = machine.threads[index].recovery;
+            if scope::available_ns(&machine.scopes, target, recovery) == 0 {
+                let node = &mut machine.scopes[target as usize];
+                node.dispatch_refusals = node.dispatch_refusals.saturating_add(1);
+            }
             stalled += 1;
             continue;
         }
@@ -207,7 +228,8 @@ fn plan(cpu: usize) -> Option<Plan> {
     settle(&mut machine, current);
     let next = pick_and_reserve(&mut machine, cpu, now);
     if next == current {
-        machine.threads[current].quantum_ticks = QUANTUM_TICKS;
+        machine.threads[current].quantum_ticks =
+            quantum_ticks_for(machine.threads[current].dispatch_reserved_ns);
         return None;
     }
 
@@ -223,10 +245,15 @@ fn plan(cpu: usize) -> Option<Plan> {
     machine.threads[next].last_cpu = cpu;
     machine.threads[next].state = ThreadState::Running;
     machine.threads[next].dispatched_ns = now;
-    machine.threads[next].quantum_ticks = QUANTUM_TICKS;
+    machine.threads[next].quantum_ticks =
+        quantum_ticks_for(machine.threads[next].dispatch_reserved_ns);
     machine.cpus[cpu].current = next;
     if machine.threads[next].kind == ThreadKind::User {
         machine.cpus[cpu].dispatches += 1;
+        let domain = machine.threads[next].domain;
+        if domain < machine.domains.len() {
+            machine.domains[domain].cpu_mask |= 1u64 << cpu;
+        }
     }
 
     // SAFETY: the tables live in a `static`, so pointers into them stay valid
@@ -312,6 +339,11 @@ fn charge(machine: &mut Machine, index: usize, now: u64) {
     machine.threads[index].dispatched_ns = now;
     if machine.threads[index].kind != ThreadKind::User || ran == 0 {
         return;
+    }
+    // Measured on user execution only: an idle thread's first interval spans
+    // the processor's whole bring-up and would say nothing about scheduling.
+    if ran > machine.max_charge_interval_ns {
+        machine.max_charge_interval_ns = ran;
     }
     let cpu = percpu::index();
     machine.cpus[cpu].user_ns = machine.cpus[cpu].user_ns.saturating_add(ran);

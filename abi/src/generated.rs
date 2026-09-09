@@ -471,7 +471,7 @@ pub mod op_sizes {
     /// Descriptor bytes for `op::DOMAIN_TERMINATE`; zero when it takes none.
     pub const DOMAIN_TERMINATE: u32 = 0;
     /// Descriptor bytes for `op::DOMAIN_QUERY`; zero when it takes none.
-    pub const DOMAIN_QUERY: u32 = 96;
+    pub const DOMAIN_QUERY: u32 = 104;
     /// Descriptor bytes for `op::MEMORY_QUERY`; zero when it takes none.
     pub const MEMORY_QUERY: u32 = 88;
     /// Descriptor bytes for `op::MEMORY_COPY`; zero when it takes none.
@@ -761,7 +761,7 @@ pub const OPERATIONS: [OpSpec; 59] = [
         code: 0x00020008,
         object_type: 2,
         rights: 0x00000800,
-        descriptor_len: 96,
+        descriptor_len: 104,
         writes_response: true,
         name: "DOMAIN_QUERY",
     },
@@ -1906,9 +1906,11 @@ pub struct DomainInfo {
     pub fault_rip: u64,
     /// Schema field `charged_pages`, little-endian `u64`.
     pub charged_pages: u64,
+    /// Entry point the image declared. An authority adding a thread needs it, and the domain's creator is the only one that can be told.
+    pub entry_point: u64,
 }
 
-const _: () = assert!(core::mem::size_of::<DomainInfo>() == 64);
+const _: () = assert!(core::mem::size_of::<DomainInfo>() == 72);
 const _: () = assert!(core::mem::align_of::<DomainInfo>() == 8);
 const _: () = assert!(core::mem::offset_of!(DomainInfo, state) == 0);
 const _: () = assert!(core::mem::offset_of!(DomainInfo, threads) == 4);
@@ -1920,12 +1922,13 @@ const _: () = assert!(core::mem::offset_of!(DomainInfo, exit_code) == 32);
 const _: () = assert!(core::mem::offset_of!(DomainInfo, fault_vector) == 40);
 const _: () = assert!(core::mem::offset_of!(DomainInfo, fault_rip) == 48);
 const _: () = assert!(core::mem::offset_of!(DomainInfo, charged_pages) == 56);
+const _: () = assert!(core::mem::offset_of!(DomainInfo, entry_point) == 64);
 
 impl DomainInfo {
     /// Size in bytes, as fixed by the schema.
-    pub const SIZE: usize = 64;
+    pub const SIZE: usize = 72;
     /// Size of a descriptor carrying this body, header included.
-    pub const DESCRIPTOR_LEN: u32 = 96;
+    pub const DESCRIPTOR_LEN: u32 = 104;
     /// A zeroed value.
     #[must_use]
     pub const fn zeroed() -> Self {
