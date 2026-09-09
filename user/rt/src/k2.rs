@@ -20,9 +20,10 @@ use thalyx_abi::generated::{
     BindFacetRequest, CallResult, CapInfo, DeriveRequest, DescriptorHeader, DomainCreateRequest,
     DrainReport, EffectRequest, EndpointCreateRequest, EndpointInfo, FaultChannelRequest,
     InstallCapRequest, InvocationInfo, Limits, LogAppendRequest, LogInfo, MapRequest, MemoryBytes,
-    MemoryCreateRequest, MemoryInfo, ReceiveResult, ReplyRequest, ResolveRequest,
-    ScopeCreateRequest, ScopeInfo, ScopeLimits, SendRequest, SignalBits, SignalInfo,
-    ThreadCreateRequest, TimerArmRequest, TimerCreateRequest, TimerInfo, entry, op, spec, status,
+    MemoryCopyRequest, MemoryCreateRequest, MemoryInfo, ReceiveResult, ReplyRequest,
+    ResolveRequest, ScopeCreateRequest, ScopeInfo, ScopeLimits, SendRequest, SignalBits,
+    SignalInfo, ThreadCreateRequest, TimerArmRequest, TimerCreateRequest, TimerInfo, entry, op,
+    spec, status,
 };
 
 /// Offset of a descriptor body: everything before it is the common header.
@@ -553,6 +554,46 @@ pub fn memory_read(memory: u64, offset: u64, destination: &mut [u8]) -> Outcome 
     Ok(aux)
 }
 
+/// Copies bytes from one memory object into another, inside the kernel.
+///
+/// The destination is the addressed object and the source is named by handle,
+/// so a copy needs authority over both ends. This is the conservative route the
+/// memory contract prefers to sharing a mutable page: the bytes are taken once,
+/// and what the reader gets afterwards cannot be changed underneath it.
+pub fn memory_copy(
+    destination: u64,
+    source_handle: u64,
+    source_offset: u64,
+    dest_offset: u64,
+    length: u64,
+) -> Outcome {
+    with(
+        destination,
+        op::MEMORY_COPY,
+        0,
+        MemoryCopyRequest {
+            source_handle,
+            source_offset,
+            dest_offset,
+            length,
+        },
+    )
+}
+
+/// Removes a mapping a domain holds.
+pub fn domain_unmap(domain: u64, vaddr: u64, page_count: u32) -> Outcome {
+    with(
+        domain,
+        op::DOMAIN_UNMAP,
+        0,
+        thalyx_abi::generated::UnmapRequest {
+            vaddr,
+            page_count,
+            reserved0: 0,
+        },
+    )
+}
+
 /// Withdraws every writer and publishes the object as immutable.
 pub fn memory_seal(memory: u64) -> Result<MemoryInfo, i64> {
     let mut desc = Desc::new();
@@ -804,6 +845,9 @@ pub fn signal_wait(signal: u64, mask: u64, deadline_ns: u64) -> Result<SignalInf
 /// agreement, compiled into both sides. Writing it down once is what keeps the
 /// convention from being three slightly different conventions.
 pub mod slot {
+    /// Client: a sealed object the supervisor published and mapped read-only.
+    pub const CLIENT_PUBLISHED: u32 = 3;
+
     /// Server: the endpoint it receives work on.
     pub const SERVER_ENDPOINT: u32 = 1;
     /// Server: the control log it appends service notes to.
@@ -1074,6 +1118,14 @@ pub mod report {
     pub const BUDGET_AGGREGATED: u64 = 0x2015;
     /// A scope carried debt into a later window. Value: the debt in ns.
     pub const DEBT_CARRIED: u64 = 0x2016;
+    /// A memory object was mapped into a domain. Value: the address.
+    pub const MAPPED: u64 = 0x2017;
+    /// Bytes were copied between two memory objects. Value: the length.
+    pub const COPIED_BYTES: u64 = 0x2018;
+    /// An object was sealed after its writers were withdrawn. Value: pages.
+    pub const SEALED: u64 = 0x2019;
+    /// A mapped page was read through its mapping. Value: the first word.
+    pub const READ_MAPPED: u64 = 0x201A;
 }
 
 /// Reports one observation on the diagnostic plane.

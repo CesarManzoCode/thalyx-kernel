@@ -12,7 +12,8 @@ K2 — Objetos, autoridad y trabajo. Primer sistema de capacidades ejecutándose
 - Veintisiete controles negativos ejecutados dentro de la vertical, incluidas once peticiones malformadas sin efecto parcial y los límites de tabla, cola y log con el cierre todavía disponible.
 - Trabajo atribuible: un servidor se vincula al ticket y adopta el ámbito efectivo de la invocación; después de la barrera la vinculación pasa a recuperación y se carga a la reserva de cierre del servicio, no a la del cliente cerrado.
 - Presupuesto agregado observable: el planificador retiene hilos cuyo ámbito gastó su ventana, cada ventana cerrada por encima del presupuesto deja constancia del exceso que arrastra, y lo que gasta un hijo cuenta contra sus ancestros.
-- Comprobador de la puerta K2: 19 criterios decididos por separado, la mayoría desde los registros del kernel, con la regresión de K1 como criterio propio y una autocomprobación de 22 ejecuciones dañadas.
+- Publicación conservadora de memoria: copia entre objetos, mapeo, sello que retira el escritor antes de prometer inmutabilidad, y remapeo de solo lectura para el lector. W^X y sello se comprueban rechazando los mapeos que los violan.
+- Comprobador de la puerta K2: 20 criterios decididos por separado, la mayoría desde los registros del kernel, con la regresión de K1 como criterio propio y una autocomprobación de 25 ejecuciones dañadas.
 - Registro de lo ejecutado, su alcance y sus límites en el vault, incluidos los diez defectos que solo aparecieron al ejecutar.
 
 EXP-01 queda ejecutado; EXP-02, EXP-03, EXP-04 y EXP-06 quedan ejecutados en su alcance K2, que es uniprocesador, sin dispositivos y sin estado durable. No se incorporan SMP, drivers, DMA, estado durable ni resultados de rendimiento.

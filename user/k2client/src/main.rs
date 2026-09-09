@@ -23,10 +23,21 @@
 //!    descriptors that are deliberately malformed. All must be refused. A
 //!    vertical where only the permitted operations are exercised shows that the
 //!    kernel can say yes.
-//! 4. Calls, and blocks. It is still blocked when its scope is fenced, which is
+//! 4. Reads the sealed page its supervisor published and mapped into it. The
+//!    read goes through the mapping, with an ordinary load, because the mapping
+//!    is the thing being tested. Writing it is refused twice over: the object is
+//!    sealed and the capability carries no write right. A sealed object nobody
+//!    can write is the only kind whose contents a reader may rely on without
+//!    copying them first.
+//!
+//!    The page-level half of that -- a store to a read-only mapping faulting in
+//!    hardware -- is [K1's probe](../../../vault/evidence/k1-protected-boot.md)
+//!    and is not repeated here: a domain that killed itself proving it would not
+//!    be around for the rest of this run, which is what the run is about.
+//! 5. Calls, and blocks. It is still blocked when its scope is fenced, which is
 //!    the situation the whole run exists to produce: the client is closed while
 //!    the server is holding admitted work.
-//! 5. Reports what its call returned, then tries to call again. The second call
+//! 6. Reports what its call returned, then tries to call again. The second call
 //!    is the observable half of the barrier: the origin is closed, so admission
 //!    must refuse it.
 
@@ -52,6 +63,9 @@ const COOKIE: u64 = 0xC11E_0001;
 /// Sized so the server gets scheduled while this domain is still alive.
 const LINGER_ROUNDS: u64 = 64;
 const LINGER_WORK: u64 = 20_000;
+
+/// Where the supervisor maps the sealed page it published.
+const PUBLISHED_VADDR: u64 = 0x0000_0000_5000_0000;
 
 fn run() -> ! {
     let endpoint = thalyx_abi::boot_handle(slot::CLIENT_ENDPOINT);
@@ -88,6 +102,7 @@ fn run() -> ! {
 
     capability_lifecycle(buffer);
     malformed_requests(buffer, endpoint);
+    published_page();
 
     // Narrow the buffer to read-only and hand that, not the original, to the
     // server. `DERIVE` only ever removes rights, so the capability the server
@@ -142,6 +157,51 @@ fn run() -> ! {
 
     k2::note(report::DONE, 4);
     k2::exit(0)
+}
+
+/// Reads the sealed page the supervisor mapped, and confirms it is read-only.
+///
+/// The read goes through the mapping rather than through `MEMORY_READ`, because
+/// the point is the mapping: a page the kernel installed in this domain's
+/// address space with the rights it was told to. The write is the control. It
+/// is announced first so the fault that follows can be matched to an intent,
+/// and the domain does not survive it -- a store to a read-only mapping is a
+/// protection failure, not an error code.
+fn published_page() {
+    let handle = thalyx_abi::boot_handle(slot::CLIENT_PUBLISHED);
+    let info = match k2::memory_query(handle) {
+        Ok(info) => info,
+        Err(code) => {
+            k2::note(report::UNEXPECTED, code as u64);
+            return;
+        }
+    };
+    if info.state != thalyx_abi::generated::memory_state::SEALED {
+        k2::note(report::UNEXPECTED, u64::from(info.state));
+        return;
+    }
+
+    // SAFETY: the supervisor mapped this address readable in this domain. A
+    // load through a mapping that is genuinely present is an ordinary load;
+    // if it were not present, the fault would be contained like any other.
+    let word = unsafe { rt::probe::read_u64(PUBLISHED_VADDR) };
+    if word == 0 {
+        k2::note(report::UNEXPECTED, word);
+        return;
+    }
+    k2::note(report::READ_MAPPED, word);
+
+    // Two independent reasons this domain cannot write it, and the interface
+    // refuses on the first it reaches: the capability carries no write right.
+    k2::expect_refusal(
+        k2::memory_write(handle, 0, b"tampered"),
+        status::INSUFFICIENT_RIGHTS,
+    );
+    // Nor can it widen the capability into one that could.
+    k2::expect_refusal(
+        k2::derive(handle, right::MEMORY_READ | right::MEMORY_WRITE, 0, 0),
+        status::INSUFFICIENT_RIGHTS,
+    );
 }
 
 /// Copy, close, recycle and expire, on the domain's own buffer.

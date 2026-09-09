@@ -85,6 +85,10 @@ NOTE = {
     "clock_advanced": 0x2014,
     "budget_aggregated": 0x2015,
     "debt_carried": 0x2016,
+    "mapped": 0x2017,
+    "copied_bytes": 0x2018,
+    "sealed": 0x2019,
+    "read_mapped": 0x201A,
 }
 
 # Mirrors `thalyx_abi::generated::cancel_state` and `scope_state`.
@@ -795,6 +799,95 @@ def check_charge_conservation(records: list[Record], run: dict) -> Result:
     return result
 
 
+def check_conservative_publish(records: list[Record], run: dict) -> Result:
+    result = Result("memory", "publicación conservadora: copia, retirada, sello y solo lectura")
+    copied = notes(records, "copied_bytes")
+    if not copied or (copied[0].number("b") or 0) == 0:
+        result.detail = "nothing was copied between two memory objects"
+        return result
+
+    sealed = [
+        record
+        for record in by_event(records, "mem.sealed")
+        if (record.number("writers_withdrawn") or 0) > 0
+    ]
+    if not sealed:
+        result.detail = (
+            "no object was sealed after withdrawing a writer; sealing something nothing could "
+            "write shows only that the state changed"
+        )
+        return result
+    seal = sealed[0]
+    if seal.number("remaining_maps") != 0:
+        result.detail = f"an object was sealed with {seal.number('remaining_maps')} maps left"
+        return result
+
+    withdrawn = by_event(records, "mem.writer_withdrawn")
+    if not withdrawn:
+        result.detail = "no writable mapping was withdrawn, so the seal took nothing away"
+        return result
+    if withdrawn[0].seq > seal.seq:
+        result.detail = "the writer was withdrawn after the seal rather than before it"
+        return result
+
+    # A writable mapping before, a read-only one after, of the same object.
+    maps = [record for record in by_event(records, "mem.mapped") if record.get("object") == seal.get("object")]
+    before = [record for record in maps if record.seq < seal.seq]
+    after = [record for record in maps if record.seq > seal.seq]
+    if not before:
+        result.detail = "the object was never mapped before it was sealed"
+        return result
+    if (before[0].number("writable_maps") or 0) == 0:
+        result.detail = "the mapping the seal had to withdraw was not writable"
+        return result
+    if not after:
+        result.detail = "the sealed object was never mapped to a reader"
+        return result
+    if (after[-1].number("writable_maps") or 0) != 0:
+        result.detail = "a writable mapping of the sealed object survived"
+        return result
+
+    conflicts = [
+        record
+        for record in by_event(records, "k2.refused")
+        if record.get("op") == "DOMAIN_MAP" and record.signed("status") == STATE_CONFLICT
+    ]
+    wx = [
+        record
+        for record in by_event(records, "k2.refused")
+        if record.get("op") == "DOMAIN_MAP" and record.signed("status") == INVALID_ARGUMENT
+    ]
+    if not conflicts:
+        result.detail = "mapping the sealed object writable was never attempted, so never refused"
+        return result
+    if not wx:
+        result.detail = "a writable and executable mapping was never attempted, so never refused"
+        return result
+
+    read = notes(records, "read_mapped", CLIENT)
+    if not read or (read[0].number("b") or 0) == 0:
+        result.detail = "the reader never read the published page through its mapping"
+        return result
+
+    result.passed = True
+    result.detail = (
+        f"{copied[0].number('b')} bytes copied into a second object, mapped writable, then "
+        f"sealed after withdrawing {seal.number('writers_withdrawn')} writer and unmapping "
+        f"{seal.number('pages_unmapped')} page; remapped read-only and read back through the "
+        f"mapping; writable and write-execute mappings both refused"
+    )
+    result.evidence = [
+        line_of(before[0]),
+        line_of(withdrawn[0]),
+        line_of(seal),
+        line_of(after[-1]),
+        line_of(conflicts[0]),
+        line_of(wx[0]),
+        line_of(read[0]),
+    ]
+    return result
+
+
 def check_aggregate_budget(records: list[Record], run: dict) -> Result:
     result = Result("budget", "presupuesto agregado y deuda visible")
 
@@ -1103,6 +1196,7 @@ CRITERIA = [
     check_work_tickets,
     check_clock_and_timers,
     check_charge_conservation,
+    check_conservative_publish,
     check_aggregate_budget,
     check_bounded_tables,
     check_closure_available,
@@ -1135,31 +1229,52 @@ def rewrite(pattern: str, replacement: str):
     return mutate
 
 
+def rewrite_re(pattern: str, replacement: str):
+    """Rewrites by pattern, so a mutation does not depend on a run's numbers.
+
+    A self-test whose damage is spelled out literally stops damaging anything
+    the moment a counter changes, and then reports success for a check it never
+    made.
+    """
+    compiled = re.compile(pattern)
+
+    def mutate(lines: list[str]) -> list[str]:
+        return [compiled.sub(replacement, line) for line in lines]
+
+    return mutate
+
+
 # (name, mutation, criterion that must fail)
 MUTATIONS = [
     ("no barrier record", drop_event("scope.fenced"), "barrier"),
     (
         "barrier reporting nothing outstanding",
-        rewrite(
-            "threads=1 invocations_pending=1 effects_pending=1",
-            "threads=0 invocations_pending=0 effects_pending=0",
+        rewrite_re(
+            r"threads=\d+ invocations_pending=\d+ effects_pending=\d+ maps_pending=\d+",
+            "threads=0 invocations_pending=0 effects_pending=0 maps_pending=0",
         ),
         "barrier",
     ),
     (
         "a derivation that widened rights",
-        rewrite("parent_rights=0x307 child_rights=0x105", "parent_rights=0x105 child_rights=0x307"),
+        rewrite_re(
+            r"parent_rights=0x\w+ child_rights=0x\w+",
+            "parent_rights=0x101 child_rights=0x307",
+        ),
         "derivation",
     ),
     ("no retirement", drop_event("scope.retired"), "barrier"),
     (
         "retirement that freed nothing",
-        rewrite("freed_pages=1 freed_objects=1", "freed_pages=0 freed_objects=0"),
+        rewrite_re(r"freed_pages=\d+ freed_objects=\d+", "freed_pages=0 freed_objects=0"),
         "charges",
     ),
     (
         "retirement that left a charge behind",
-        rewrite("retained_pages=0 retained_metadata=0", "retained_pages=4 retained_metadata=2"),
+        rewrite_re(
+            r"retained_pages=\d+ retained_metadata=\d+",
+            "retained_pages=4 retained_metadata=2",
+        ),
         "charges",
     ),
     ("no effect admitted", drop_event("effect.admitted"), "admission"),
@@ -1191,8 +1306,10 @@ MUTATIONS = [
     ("no worker bound to an invocation", drop_event("sched.bound"), "tickets"),
     (
         "recovery charged to the closed client instead of the service",
-        rewrite("effective_scope=14 origin_scope=16 account=closure_reserve",
-                "effective_scope=16 origin_scope=16 account=origin_budget"),
+        rewrite_re(
+            r"effective_scope=(\d+) origin_scope=(\d+) account=closure_reserve",
+            r"effective_scope=\2 origin_scope=\2 account=origin_budget",
+        ),
         "tickets",
     ),
     ("no timer fired", rewrite("a=0x2013 b=", "a=0x20fe b="), "clock"),
@@ -1203,6 +1320,13 @@ MUTATIONS = [
         rewrite("starved=1", "starved=0"),
         "budget",
     ),
+    ("no writer withdrawn before a seal", drop_event("mem.writer_withdrawn"), "memory"),
+    (
+        "a seal that left a mapping behind",
+        rewrite_re(r"remaining_maps=\d+", "remaining_maps=1"),
+        "memory",
+    ),
+    ("the sealed page never mapped or read", drop_event("mem.mapped"), "memory"),
 ]
 
 

@@ -16,9 +16,9 @@ Una segunda imagen UEFI construida solo desde fuentes con el mismo script y el m
 | Artefacto | Comando | Resultado |
 |---|---|---|
 | Imagen | `python3 tools/build_image.py --phase k2` | `build/thalyx-k2.img`, manifiesto con digest de cada artefacto y herramienta |
-| Ejecución | `python3 tools/run_k2.py` | `exit_status=33` (`k1.terminal status=complete`), 409 registros, ~1.6 s |
-| Veredicto | `python3 tools/check_k2.py` | `K2 GATE PASSED: 19 of 19 criteria met` |
-| Autocomprobación | `python3 tools/check_k2.py --self-test` | `22 of 22 damaged runs were caught` |
+| Ejecución | `python3 tools/run_k2.py` | `exit_status=33` (`k1.terminal status=complete`), 432 registros, ~1.6 s |
+| Veredicto | `python3 tools/check_k2.py` | `K2 GATE PASSED: 20 of 20 criteria met` |
+| Autocomprobación | `python3 tools/check_k2.py --self-test` | `25 of 25 damaged runs were caught` |
 
 Toolchain fijada: `rustc 1.98.1`, targets `x86_64-unknown-uefi` y `x86_64-unknown-none`, QEMU 11.1.1 con OVMF, perfil de CPU `qemu64,+smep,+smap,+pdpe1gb`, un solo núcleo, 512 MiB. El runner de K2 reutiliza el del K1 en lugar de repetir esos parámetros: si las dos fases corrieran en máquinas distintas, la comparación entre ellas mediría también el entorno.
 
@@ -29,10 +29,10 @@ Los contadores temporales de una ejecución —ticks, número de preempciones, v
 Digests de la ejecución registrada:
 
 ```text
-image   f147d2988051e3a1d49029b75076c1c88577956c0b8540103a0c05b60c1881af
+image   c12e6deebb6441f18992bdc5eab19bb2423b658db7e9ec62b63adeffe3ecef7d
 kernel  884bbed3105319561b4d666643476add1299c3ff8bcab3acc3a1e21c35d97a75
 loader  669c530b353b8aba9dfa58147167c6879765b3cbaeb109204c41764a1f7bea83
-package 54f4236b98dac057bccf9f89e672f1d305559289001c57ca4d784ade701c8a9a
+package aacf0830e13508ed176b91b65d15299cbfd368a2eb754e964b0fb4e8186fd687
 ```
 
 ## Qué observó la ejecución
@@ -74,6 +74,14 @@ El servidor se vinculó al ticket antes de anunciar el efecto: adoptó el ámbit
 V0 toma un plazo monotónico en seis operaciones. Esta ejecución añadió la entrada que faltaba para poder expresarlo: una lectura del reloj, sin handle, sin descriptor y sin autoridad, porque el paso del tiempo no es autoridad y negarse a exponerlo mientras se aceptan plazos no los hace seguros sino inservibles.
 
 El supervisor leyó el reloj, armó un timer contra esa lectura, esperó a que levantara sus bits en una señal, comprobó que el reloj había avanzado y que el timer constaba disparado y desarmado. Armar con plazo cero se rechazó: cero es como esta interfaz escribe «sin plazo».
+
+### Publicación conservadora
+
+El supervisor llenó un objeto de memoria, copió sus bytes a un segundo objeto dentro del kernel, mapeó el segundo con escritura en el dominio del cliente, y lo selló. El sello retiró el mapeo escribible antes de poder prometer nada: un escritor retirado, una página desmapeada, cero mapeos restantes. Después volvió a mapearlo de solo lectura y el cliente leyó sus bytes a través del mapeo, con una carga ordinaria.
+
+Dos mapeos se rechazaron. Uno pedía escritura y ejecución a la vez, con el techo del objeto permitiendo ambas por separado, de modo que quien lo rechazó fue la regla W^X y no el techo —un control que falla por el motivo equivocado no comprueba nada—. El otro pedía escritura sobre el objeto ya sellado.
+
+Ese es el camino conservador que el contrato de memoria pide: copiar, retirar al escritor, publicar el sello. No se entrega una página mutable llamándola inmutable.
 
 ### Presupuesto agregado y deuda
 

@@ -47,7 +47,9 @@ El arranque elige la ruta por el paquete: si un módulo declara `SUPERVISOR`, el
 
 Tres programas de usuario ejecutan la vertical descrita en la ruta. `k2super` recibe el manifiesto de arranque y construye todo lo demás por la interfaz: dos ámbitos hijos, un endpoint de trabajo, uno de supervisión, una señal, un objeto de memoria, y los dominios `k2server` y `k2client` con sus capacidades y su canal de fallos. No usa ninguna llamada que abra un recurso por nombre; localiza las imágenes preguntando a cada objeto sellado su etiqueta.
 
-`k2client` arranca con dos capacidades y nada más: una faceta del endpoint y un buffer propio. Estrecha una capacidad de solo lectura sobre ese buffer y se la entrega al servidor con la llamada. `k2server` la lee, no consigue escribir por ella, no consigue ampliarla, admite un efecto sobre la invocación y retiene la obligación.
+El supervisor publica además una página inmutable por el camino que el contrato de memoria pide: llena un objeto, copia sus bytes a otro dentro del kernel, lo mapea con escritura, y lo sella —lo que obliga al sello a retirar ese mapeo antes de prometer nada—; después lo mapea de solo lectura en el dominio que va a leerlo.
+
+`k2client` arranca con tres capacidades y nada más: una faceta del endpoint, un buffer propio y la página sellada. Estrecha una capacidad de solo lectura sobre ese buffer y se la entrega al servidor con la llamada. `k2server` la lee, no consigue escribir por ella, no consigue ampliarla, admite un efecto sobre la invocación y retiene la obligación.
 
 Con el servidor reteniendo trabajo, el supervisor cierra el ámbito del cliente. El informe de drenaje después de la barrera sigue contando el hilo, la invocación y el efecto pendientes; la retirada se rechaza mientras eso siga siendo cierto. El servidor observa `ORIGIN_FENCED`, comprueba que la capacidad derivada por el cliente ya no funciona, y resuelve la obligación —que sí sobrevive a la barrera, porque su grant lo patrocina el ámbito del servidor—. La llamada del cliente vuelve `CANCELLED` y su segunda llamada se rechaza con `SCOPE_CLOSED`. Solo entonces el ámbito queda quiescente y la retirada libera lo que patrocinaba.
 
@@ -57,7 +59,7 @@ La vertical cubre además lo que EXP-02 y EXP-06 piden en alcance K2: copiar una
 
 ### Puerta K2
 
-`tools/check_k2.py` decide diecinueve criterios por separado desde los registros del kernel; los que necesitan las notas de los programas lo dicen en su título. La regresión de K1 es uno de esos criterios, porque una puerta K2 que pasara con el arranque protegido roto mediría otra cosa. `--self-test` daña la ejecución de veintidós formas distintas y comprueba que cada daño hace fallar al criterio que le corresponde.
+`tools/check_k2.py` decide veinte criterios por separado desde los registros del kernel; los que necesitan las notas de los programas lo dicen en su título. La regresión de K1 es uno de esos criterios, porque una puerta K2 que pasara con el arranque protegido roto mediría otra cosa. `--self-test` daña la ejecución de veinticinco formas distintas y comprueba que cada daño hace fallar al criterio que le corresponde.
 
 ### Lo que la vertical corrigió del sustrato
 
@@ -76,8 +78,8 @@ Ejecutar los mecanismos encontró diez defectos que compilar no encuentra, y los
 | Esquema ABI | PASS en 4 comprobaciones. [Comprobador](../../tools/check_abi.py). |
 | Puerta K1 | PASS en 13 criterios decididos por separado desde los registros del kernel, con controles negativos. [Detalle y límites](../evidence/k1-protected-boot.md). |
 | Regresión K1 sobre el sustrato K2 | PASS en los mismos 13 criterios con los mecanismos K2 compilados dentro del kernel. |
-| Puerta K2 | PASS en 19 criterios decididos por separado, la mayoría desde los registros del kernel. [Detalle y límites](../evidence/k2-objects-authority-work.md). |
-| Autocomprobación de la puerta K2 | 22 ejecuciones dañadas de una forma cada una, las 22 detectadas por el criterio que les corresponde. |
+| Puerta K2 | PASS en 20 criterios decididos por separado, la mayoría desde los registros del kernel. [Detalle y límites](../evidence/k2-objects-authority-work.md). |
+| Autocomprobación de la puerta K2 | 25 ejecuciones dañadas de una forma cada una, las 25 detectadas por el criterio que les corresponde. |
 
 ## Qué no existe todavía
 

@@ -31,7 +31,14 @@
 //!    on a signal. Every deadline in this interface is an absolute monotonic
 //!    reading, so a program that could not read the clock could not state one,
 //!    and none of them would be usable.
-//! 7. Read its own scope and a child's, and check that what the child spent is
+//! 7. Publish a sealed page: fill a scratch object, copy it into a second one,
+//!    map that one writable into a domain being built, then seal it. Sealing
+//!    must withdraw the writable mapping before it can promise anything, and a
+//!    writable mapping of the sealed result must afterwards be refused. This is
+//!    the conservative route the memory contract asks for -- copy, withdraw the
+//!    writer, publish the seal -- rather than handing out a page and calling it
+//!    immutable.
+//! 8. Read its own scope and a child's, and check that what the child spent is
 //!    also counted against the parent. A budget that only bound the leaf would
 //!    be no budget at all: a domain could carve children until the sum of their
 //!    allowances exceeded anything it was given.
@@ -61,6 +68,11 @@ const SUPERVISION_CAPACITY: u32 = 4;
 
 /// Pages of the client's scratch buffer.
 const CLIENT_BUFFER_PAGES: u64 = 1;
+
+/// The published page: how big, where it lands, and what it says.
+const PUBLISHED_PAGES: u64 = 1;
+const PUBLISHED_VADDR: u64 = 0x0000_0000_5000_0000;
+const PUBLISHED_BYTES: &[u8] = b"k2-published-immutable";
 
 /// Handles the supervisor gives the server and the client. The slot numbers are
 /// the shared convention in `rt::k2::slot`; these are the handles they resolve
@@ -422,6 +434,8 @@ fn run() -> ! {
     ) {
         fail(19, code);
     }
+    publish(client_scope, client, client_buffer);
+
     if let Err(code) = k2::domain_set_fault_channel(client, supervision) {
         fail(20, code);
     }
@@ -565,6 +579,129 @@ fn run() -> ! {
     let _ = k2::log_append(log, receipt_kind::SERVICE_NOTE, 0x5417_0002, spins, 0);
     k2::note(report::DONE, 5);
     k2::exit(0)
+}
+
+/// Builds a sealed page and hands it to a domain being built.
+///
+/// The order is the memory contract's and each step is refusable. Writing needs
+/// a mutable object; copying needs authority over both ends; mapping writable
+/// needs the object to still be mutable; sealing needs every writable mapping
+/// gone, which is why it withdraws them rather than asking the holder to. Only
+/// then is the object published, and only then is a read-only mapping of it
+/// something a reader can rely on.
+fn publish(scope: u64, target: u64, source: u64) {
+    // The ceiling includes execute and seal on purpose. Execute so that the
+    // write-and-execute mapping below is refused by the W^X rule rather than by
+    // the ceiling -- a control that fires for the wrong reason tests nothing --
+    // and seal because publishing is what this object is for.
+    let published = match k2::scope_create_memory(
+        scope,
+        PUBLISHED_PAGES,
+        right::MEMORY_READ
+            | right::MEMORY_WRITE
+            | right::MEMORY_EXECUTE
+            | right::MEMORY_MAP
+            | right::MEMORY_SEAL,
+        name16("published"),
+    ) {
+        Ok(handle) => handle,
+        Err(code) => {
+            k2::note(report::UNEXPECTED, code as u64);
+            return;
+        }
+    };
+
+    if let Err(code) = k2::memory_write(source, 0, PUBLISHED_BYTES) {
+        k2::note(report::UNEXPECTED, code as u64);
+        return;
+    }
+    match k2::memory_copy(published, source, 0, 0, PUBLISHED_BYTES.len() as u64) {
+        Ok(_) => k2::note(report::COPIED_BYTES, PUBLISHED_BYTES.len() as u64),
+        Err(code) => {
+            k2::note(report::UNEXPECTED, code as u64);
+            return;
+        }
+    }
+
+    // Writable and executable at once is not a mapping this kernel will make,
+    // whatever the object's ceiling says, and a mapping with neither read nor
+    // anything else is not a mapping at all.
+    k2::expect_refusal(
+        k2::domain_map(
+            target,
+            published,
+            PUBLISHED_VADDR,
+            0,
+            PUBLISHED_PAGES as u32,
+            right::MEMORY_READ | right::MEMORY_WRITE | right::MEMORY_EXECUTE,
+        ),
+        status::INVALID_ARGUMENT,
+    );
+
+    // A writable mapping, which sealing will have to take away again.
+    match k2::domain_map(
+        target,
+        published,
+        PUBLISHED_VADDR,
+        0,
+        PUBLISHED_PAGES as u32,
+        right::MEMORY_READ | right::MEMORY_WRITE,
+    ) {
+        Ok(_) => k2::note(report::MAPPED, PUBLISHED_VADDR),
+        Err(code) => {
+            k2::note(report::UNEXPECTED, code as u64);
+            return;
+        }
+    }
+
+    match k2::memory_seal(published) {
+        Ok(info) if info.state == memory_state::SEALED && info.writable_maps == 0 => {
+            k2::note(report::SEALED, info.pages);
+        }
+        Ok(info) => {
+            k2::note(report::UNEXPECTED, u64::from(info.writable_maps));
+            return;
+        }
+        Err(code) => {
+            k2::note(report::UNEXPECTED, code as u64);
+            return;
+        }
+    }
+
+    // Sealed means sealed: a writable mapping of it is refused from here on.
+    k2::expect_refusal(
+        k2::domain_map(
+            target,
+            published,
+            PUBLISHED_VADDR,
+            0,
+            PUBLISHED_PAGES as u32,
+            right::MEMORY_READ | right::MEMORY_WRITE,
+        ),
+        status::STATE_CONFLICT,
+    );
+
+    // The reader gets the sealed bytes, read-only, at a fixed address.
+    if let Err(code) = k2::domain_map(
+        target,
+        published,
+        PUBLISHED_VADDR,
+        0,
+        PUBLISHED_PAGES as u32,
+        right::MEMORY_READ,
+    ) {
+        k2::note(report::UNEXPECTED, code as u64);
+        return;
+    }
+    if let Err(code) = k2::domain_install_cap(
+        target,
+        published,
+        slot::CLIENT_PUBLISHED,
+        right::INSPECT | right::MEMORY_READ,
+        0,
+    ) {
+        k2::note(report::UNEXPECTED, code as u64);
+    }
 }
 
 /// Checks that a child's spending is also charged to its ancestors.
