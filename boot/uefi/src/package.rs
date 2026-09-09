@@ -174,7 +174,7 @@ pub fn parse(bytes: &[u8]) -> Result<Directory, Reject> {
         if end > bytes.len() as u64 || offset < directory_end as u64 {
             return Err(Reject::EntryOutsideFile);
         }
-        if kind != module_kind::USER_ELF {
+        if kind != module_kind::USER_ELF && kind != module_kind::SUPERVISOR {
             return Err(Reject::UnknownKind);
         }
         for existing in &entries[..index] {

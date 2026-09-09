@@ -283,6 +283,18 @@ def generate_rust(schema: dict, layout: Layout) -> str:
         out.append(f"    pub const {item['name']}: u32 = 0x{code:08X};")
     out.append("}")
     out.append("")
+    out.append("/// Flags accepted in the flags register. Unknown bits are refused.")
+    out.append("pub mod flag {")
+    for item in schema["flags"]:
+        out.extend(doc_lines(item.get("doc"), "    "))
+        out.append(f"    pub const {item['name']}: u64 = 1 << {item['bit']};")
+    known = 0
+    for item in schema["flags"]:
+        known |= 1 << item["bit"]
+    out.append("    /// Every bit this revision defines.")
+    out.append(f"    pub const KNOWN: u64 = 0x{known:X};")
+    out.append("}")
+    out.append("")
     out.append("/// Rights every operation requires, checked before any effect.")
     out.append("pub mod op_rights {")
     for item in schema["operations"]:
@@ -301,6 +313,65 @@ def generate_rust(schema: dict, layout: Layout) -> str:
             f"    /// Descriptor bytes for `op::{item['name']}`; zero when it takes none."
         )
         out.append(f"    pub const {item['name']}: u32 = {size};")
+    out.append("}")
+    out.append("")
+    out.append("/// What one operation requires, looked up before anything is validated.")
+    out.append("///")
+    out.append("/// The kernel reads this table instead of repeating the schema in a match, so")
+    out.append("/// an operation cannot exist with rights or a descriptor size that differ")
+    out.append("/// from the ones the interface publishes.")
+    out.append("#[derive(Clone, Copy, Debug)]")
+    out.append("pub struct OpSpec {")
+    out.append("    /// Operation code.")
+    out.append("    pub code: u32,")
+    out.append("    /// Object type the handle must have.")
+    out.append("    pub object_type: u32,")
+    out.append("    /// Rights the grant must carry.")
+    out.append("    pub rights: u32,")
+    out.append("    /// Descriptor length in bytes, header included; zero for none.")
+    out.append("    pub descriptor_len: u32,")
+    out.append("    /// Whether the operation writes a response body.")
+    out.append("    pub writes_response: bool,")
+    out.append("    /// Name, for diagnostic records.")
+    out.append("    pub name: &\'static str,")
+    out.append("}")
+    out.append("")
+    specs = []
+    for item in schema["operations"]:
+        code = opcode(types[item["type"]], item["ordinal"])
+        request = layout[item["request"]]["size"] + 32 if item["request"] else 0
+        response = layout[item["response"]]["size"] + 32 if item["response"] else 0
+        specs.append(
+            "    OpSpec { code: 0x%08X, object_type: %d, rights: 0x%08X, descriptor_len: %d, "
+            "writes_response: %s, name: \"%s\" },"
+            % (
+                code,
+                types[item["type"]],
+                rights_value(schema, item["type"], item["rights"]),
+                max(request, response),
+                "true" if response else "false",
+                item["name"],
+            )
+        )
+    out.append("/// Every operation this revision assigns, ordered by code.")
+    out.append(f"pub const OPERATIONS: [OpSpec; {len(specs)}] = [")
+    out.extend(specs)
+    out.append("];")
+    out.append("")
+    out.append("/// Looks up an operation code, or `None` when the number is not assigned.")
+    out.append("///")
+    out.append("/// An unassigned number is refused rather than ignored, so a program built")
+    out.append("/// against a later table fails visibly instead of silently succeeding.")
+    out.append("#[must_use]")
+    out.append("pub fn spec(code: u32) -> Option<&\'static OpSpec> {")
+    out.append("    let mut index = 0;")
+    out.append("    while index < OPERATIONS.len() {")
+    out.append("        if OPERATIONS[index].code == code {")
+    out.append("            return Some(&OPERATIONS[index]);")
+    out.append("        }")
+    out.append("        index += 1;")
+    out.append("    }")
+    out.append("    None")
     out.append("}")
     out.append("")
     out.append("/// Status values returned in RAX. Zero is success, every error is negative.")
@@ -461,6 +532,9 @@ def generate_c(schema: dict, layout: Layout) -> str:
     out.append("")
     for item in schema["entries"]:
         out.append(f"#define THALYX_ENTRY_{item['name']} {item['value']}ull")
+    out.append("")
+    for item in schema["flags"]:
+        out.append(f"#define THALYX_FLAG_{item['name']} (1ull << {item['bit']})")
     out.append("")
     for item in schema["object_types"]:
         out.append(f"#define THALYX_TYPE_{item['name']} {item['value']}u")

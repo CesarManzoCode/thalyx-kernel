@@ -64,19 +64,24 @@ pub unsafe extern "sysv64" fn switch_context(save: *mut u64, load: u64) {
 }
 
 /// Builds the initial stopped context of a thread that has never run, so that
-/// resuming it enters ring 3 at `entry`.
+/// resuming it enters ring 3 at `entry` with `argument` in RDI.
 ///
-/// Every general-purpose register is zero and the FP state is the bootstrap
-/// template, so nothing from the kernel or from another domain is visible in
-/// the new domain's initial register file. RFLAGS carries IF and the reserved
-/// bit only: IOPL is zero, so port access and `cli` from ring 3 fault.
+/// Every other general-purpose register is zero and the FP state is the
+/// bootstrap template, so nothing from the kernel or from another domain is
+/// visible in the new thread's initial register file. RFLAGS carries IF and the
+/// reserved bit only: IOPL is zero, so port access and `cli` from ring 3 fault.
 ///
 /// # Safety
 ///
 /// `kernel_stack_top` must be the top of a mapped, 16-byte-aligned kernel stack
 /// of at least [`core::mem::size_of::<StoppedContext>()`] bytes that no other
 /// thread uses.
-pub unsafe fn prepare_user_thread(kernel_stack_top: u64, entry: u64, user_stack_top: u64) -> u64 {
+pub unsafe fn prepare_user_thread(
+    kernel_stack_top: u64,
+    entry: u64,
+    user_stack_top: u64,
+    argument: u64,
+) -> u64 {
     // The System V ABI has RSP congruent to 8 modulo 16 at a function's first
     // instruction, because the call pushed a return address. The entry point is
     // an ordinary function, so it is entered the same way.
@@ -96,7 +101,7 @@ pub unsafe fn prepare_user_thread(kernel_stack_top: u64, entry: u64, user_stack_
             rcx: 0,
             rdx: 0,
             rsi: 0,
-            rdi: 0,
+            rdi: argument,
             rbp: 0,
             r8: 0,
             r9: 0,

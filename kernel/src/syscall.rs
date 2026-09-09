@@ -1,19 +1,32 @@
 //! Kernel entry dispatch.
 //!
-//! K1 implements one assigned ABI entry, the reserved version query, and two
-//! entries in the scaffolding namespace that K2 removes. Everything else is
-//! refused with `UNSUPPORTED_ENTRY` rather than ignored, so a program built
-//! against a future opcode table fails visibly instead of silently succeeding.
+//! K2 assigns four entries. [`entry::VERSION_QUERY`] and [`entry::LIMITS_QUERY`]
+//! describe the interface and need no authority: a program has to be able to
+//! learn what it is talking to before it holds anything. [`entry::EXIT`] ends
+//! the caller, which is authority over oneself and therefore needs no
+//! capability. Everything else in the interface arrives through
+//! [`entry::INVOKE`], which names a handle and an operation and is the only
+//! entry that touches an object.
 //!
-//! No entry here takes a pointer, so the kernel never reads user memory in K1
-//! and no user-copy path exists to get wrong. That path arrives with
-//! descriptors in K2, together with the bounds and fault handling it needs.
+//! That single invoking entry is the point of the shape. Structure, authority
+//! and effect are checked in that order in exactly one place ([`crate::api`]),
+//! so there is no second path into an object that could skip a barrier or a
+//! rights check. An unassigned entry is refused with `UNSUPPORTED_ENTRY`
+//! rather than ignored, so a program built against a future table fails
+//! visibly instead of silently succeeding.
+//!
+//! The two K1 scaffolding entries stay, carrying their scaffolding bit. They
+//! are not ABI, they touch no object, and they exist so the K1 regression keeps
+//! running against the kernel K2 grew into. Removing them would mean losing the
+//! evidence that protected boot still works.
 
-use thalyx_abi::{entry, note, scaffold, status};
+use thalyx_abi::generated::{Limits, entry, status as k2status};
+use thalyx_abi::{limit, note, scaffold, status};
 
 use crate::arch::x86_64::trap::TrapFrame;
 use crate::event;
 use crate::state::{MACHINE, ThreadKind};
+use crate::ucopy;
 
 /// Handles one `syscall` entry.
 pub fn handle(frame: &mut TrapFrame) {
@@ -38,6 +51,29 @@ pub fn handle(frame: &mut TrapFrame) {
             frame.rdx =
                 thalyx_abi::pack_version(thalyx_abi::VERSION_MAJOR, thalyx_abi::VERSION_MINOR);
         }
+        entry::INVOKE => {
+            if domain == usize::MAX {
+                frame.rax = status::INVALID_ARGUMENT as u64;
+                return;
+            }
+            let (code, aux) = crate::api::invoke(domain, thread, frame);
+            frame.rax = code as u64;
+            frame.rdx = aux;
+        }
+        entry::LIMITS_QUERY => {
+            if domain == usize::MAX {
+                frame.rax = status::INVALID_ARGUMENT as u64;
+                return;
+            }
+            limits_query(domain, frame);
+        }
+        entry::EXIT => {
+            if domain == usize::MAX {
+                frame.rax = status::INVALID_ARGUMENT as u64;
+                return;
+            }
+            crate::domain::terminate_voluntarily(frame.rsi);
+        }
         scaffold::DIAG_NOTE => {
             if domain == usize::MAX {
                 frame.rax = status::INVALID_ARGUMENT as u64;
@@ -60,6 +96,71 @@ pub fn handle(frame: &mut TrapFrame) {
                 "domain={domain} entry=0x{other:x} rip=0x{:x}",
                 frame.rip
             );
+        }
+    }
+}
+
+/// Writes the effective interface limits into the caller's buffer.
+///
+/// These are the interface's numbers, taken from the schema, not the kernel's
+/// table capacities. A program sizes its buffers and its expectations from what
+/// it reads here, so the only two values the kernel supplies itself are the
+/// ones the schema cannot know: the page size it actually runs on and the epoch
+/// this boot started at.
+fn limits_query(domain: usize, frame: &mut TrapFrame) {
+    if frame.r10 != core::mem::size_of::<Limits>() as u64 {
+        frame.rax = k2status::INVALID_ARGUMENT as u64;
+        frame.rdx = 0;
+        return;
+    }
+
+    let boot_epoch = MACHINE.lock().boot_epoch;
+    let limits = Limits {
+        major: thalyx_abi::VERSION_MAJOR,
+        minor: thalyx_abi::VERSION_MINOR,
+        max_descriptor_len: limit::MAX_DESCRIPTOR_LEN as u32,
+        max_inline_payload: limit::MAX_INLINE_PAYLOAD as u32,
+        max_caps_per_message: limit::MAX_CAPS_PER_MESSAGE as u32,
+        max_scope_depth: limit::MAX_SCOPE_DEPTH as u32,
+        max_derive_depth: limit::MAX_DERIVE_DEPTH as u32,
+        max_handles_per_domain: limit::MAX_HANDLES_PER_DOMAIN as u32,
+        max_endpoint_queue: limit::MAX_ENDPOINT_QUEUE as u32,
+        max_memory_pages_per_object: limit::MAX_MEMORY_PAGES_PER_OBJECT as u32,
+        control_log_capacity: limit::CONTROL_LOG_CAPACITY as u32,
+        control_log_reserved: limit::CONTROL_LOG_RESERVED as u32,
+        receipt_batch: limit::RECEIPT_BATCH as u32,
+        cpu_window_ns: limit::CPU_WINDOW_NS,
+        cpu_quantum_ns: limit::CPU_QUANTUM_NS,
+        page_size: limit::PAGE_SIZE,
+        boot_epoch,
+    };
+
+    // SAFETY of the copy is `copy_out`'s: it walks the domain's own tables and
+    // refuses a range that is not user-writable.
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            core::ptr::from_ref(&limits).cast::<u8>(),
+            core::mem::size_of::<Limits>(),
+        )
+    };
+    let machine = MACHINE.lock();
+    let Some(space) = machine.domains[domain].space.as_ref() else {
+        drop(machine);
+        frame.rax = k2status::PEER_DEAD as u64;
+        frame.rdx = 0;
+        return;
+    };
+    let written = ucopy::copy_out(space, frame.rdx, bytes);
+    drop(machine);
+
+    match written {
+        Ok(()) => {
+            frame.rax = k2status::OK as u64;
+            frame.rdx = core::mem::size_of::<Limits>() as u64;
+        }
+        Err(_) => {
+            frame.rax = k2status::INVALID_ADDRESS as u64;
+            frame.rdx = 0;
         }
     }
 }

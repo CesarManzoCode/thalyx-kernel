@@ -194,6 +194,26 @@ pub unsafe fn disable_interrupts() {
     unsafe { asm!("cli", options(nomem, nostack)) }
 }
 
+/// Waits for the next interrupt with interrupts enabled, then masks them again.
+///
+/// This is the only place in the kernel where interrupts are enabled outside
+/// user mode. It exists because a kernel that has nothing to run but something
+/// to wait for — a deadline, a timer — has to let the timer interrupt in. The
+/// `sti; hlt` pair is atomic with respect to interrupt delivery: `sti` takes
+/// effect after the following instruction, so an interrupt cannot arrive in the
+/// gap and leave the CPU halted with nothing to wake it.
+///
+/// # Safety
+///
+/// The caller must hold no lock: the interrupt handler that runs here takes the
+/// machine lock, and it may switch away from this context entirely.
+#[inline]
+pub unsafe fn wait_for_interrupt() {
+    // SAFETY: `sti`, `hlt` and `cli` at CPL 0 are permitted, and the caller
+    // guarantees no lock is held across the window.
+    unsafe { asm!("sti", "hlt", "cli", options(nomem, nostack)) }
+}
+
 /// Halts the CPU with interrupts masked and never returns.
 pub fn halt_forever() -> ! {
     loop {

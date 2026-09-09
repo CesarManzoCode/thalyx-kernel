@@ -261,6 +261,14 @@ pub mod op {
     pub const LOG_QUERY: u32 = 0x00080004;
 }
 
+/// Flags accepted in the flags register. Unknown bits are refused.
+pub mod flag {
+    /// Refuse to wait: an operation that would have blocked returns WOULD_BLOCK instead. Carried in the flags register, never in the descriptor.
+    pub const NONBLOCKING: u64 = 1 << 0;
+    /// Every bit this revision defines.
+    pub const KNOWN: u64 = 0x1;
+}
+
 /// Rights every operation requires, checked before any effect.
 pub mod op_rights {
     /// Rights required by `op::CAP_INSPECT`.
@@ -471,6 +479,455 @@ pub mod op_sizes {
     pub const LOG_ACK: u32 = 40;
     /// Descriptor bytes for `op::LOG_QUERY`; zero when it takes none.
     pub const LOG_QUERY: u32 = 72;
+}
+
+/// What one operation requires, looked up before anything is validated.
+///
+/// The kernel reads this table instead of repeating the schema in a match, so
+/// an operation cannot exist with rights or a descriptor size that differ
+/// from the ones the interface publishes.
+#[derive(Clone, Copy, Debug)]
+pub struct OpSpec {
+    /// Operation code.
+    pub code: u32,
+    /// Object type the handle must have.
+    pub object_type: u32,
+    /// Rights the grant must carry.
+    pub rights: u32,
+    /// Descriptor length in bytes, header included; zero for none.
+    pub descriptor_len: u32,
+    /// Whether the operation writes a response body.
+    pub writes_response: bool,
+    /// Name, for diagnostic records.
+    pub name: &'static str,
+}
+
+/// Every operation this revision assigns, ordered by code.
+pub const OPERATIONS: [OpSpec; 51] = [
+    OpSpec {
+        code: 0x00000001,
+        object_type: 0,
+        rights: 0x00000000,
+        descriptor_len: 96,
+        writes_response: true,
+        name: "CAP_INSPECT",
+    },
+    OpSpec {
+        code: 0x00000002,
+        object_type: 0,
+        rights: 0x00000002,
+        descriptor_len: 56,
+        writes_response: false,
+        name: "CAP_DERIVE",
+    },
+    OpSpec {
+        code: 0x00000003,
+        object_type: 0,
+        rights: 0x00000000,
+        descriptor_len: 0,
+        writes_response: false,
+        name: "CAP_COPY",
+    },
+    OpSpec {
+        code: 0x00000004,
+        object_type: 0,
+        rights: 0x00000000,
+        descriptor_len: 0,
+        writes_response: false,
+        name: "CAP_CLOSE",
+    },
+    OpSpec {
+        code: 0x00000005,
+        object_type: 0,
+        rights: 0x00000010,
+        descriptor_len: 0,
+        writes_response: false,
+        name: "CAP_FENCE",
+    },
+    OpSpec {
+        code: 0x00000006,
+        object_type: 0,
+        rights: 0x00000010,
+        descriptor_len: 96,
+        writes_response: true,
+        name: "CAP_DRAIN_STATUS",
+    },
+    OpSpec {
+        code: 0x00010001,
+        object_type: 1,
+        rights: 0x00000200,
+        descriptor_len: 96,
+        writes_response: false,
+        name: "SCOPE_CREATE_CHILD",
+    },
+    OpSpec {
+        code: 0x00010002,
+        object_type: 1,
+        rights: 0x00000001,
+        descriptor_len: 176,
+        writes_response: true,
+        name: "SCOPE_QUERY",
+    },
+    OpSpec {
+        code: 0x00010003,
+        object_type: 1,
+        rights: 0x00000200,
+        descriptor_len: 80,
+        writes_response: false,
+        name: "SCOPE_SET_LIMITS",
+    },
+    OpSpec {
+        code: 0x00010004,
+        object_type: 1,
+        rights: 0x00000400,
+        descriptor_len: 0,
+        writes_response: false,
+        name: "SCOPE_FENCE",
+    },
+    OpSpec {
+        code: 0x00010005,
+        object_type: 1,
+        rights: 0x00000001,
+        descriptor_len: 96,
+        writes_response: true,
+        name: "SCOPE_DRAIN_STATUS",
+    },
+    OpSpec {
+        code: 0x00010006,
+        object_type: 1,
+        rights: 0x00000400,
+        descriptor_len: 96,
+        writes_response: true,
+        name: "SCOPE_RETIRE",
+    },
+    OpSpec {
+        code: 0x00010007,
+        object_type: 1,
+        rights: 0x00000100,
+        descriptor_len: 56,
+        writes_response: false,
+        name: "SCOPE_CREATE_DOMAIN",
+    },
+    OpSpec {
+        code: 0x00010008,
+        object_type: 1,
+        rights: 0x00000100,
+        descriptor_len: 64,
+        writes_response: false,
+        name: "SCOPE_CREATE_MEMORY",
+    },
+    OpSpec {
+        code: 0x00010009,
+        object_type: 1,
+        rights: 0x00000100,
+        descriptor_len: 56,
+        writes_response: false,
+        name: "SCOPE_CREATE_ENDPOINT",
+    },
+    OpSpec {
+        code: 0x0001000A,
+        object_type: 1,
+        rights: 0x00000100,
+        descriptor_len: 0,
+        writes_response: false,
+        name: "SCOPE_CREATE_SIGNAL",
+    },
+    OpSpec {
+        code: 0x0001000B,
+        object_type: 1,
+        rights: 0x00000100,
+        descriptor_len: 48,
+        writes_response: false,
+        name: "SCOPE_CREATE_TIMER",
+    },
+    OpSpec {
+        code: 0x00020001,
+        object_type: 2,
+        rights: 0x00000100,
+        descriptor_len: 64,
+        writes_response: false,
+        name: "DOMAIN_MAP",
+    },
+    OpSpec {
+        code: 0x00020002,
+        object_type: 2,
+        rights: 0x00000100,
+        descriptor_len: 48,
+        writes_response: false,
+        name: "DOMAIN_UNMAP",
+    },
+    OpSpec {
+        code: 0x00020003,
+        object_type: 2,
+        rights: 0x00000100,
+        descriptor_len: 56,
+        writes_response: false,
+        name: "DOMAIN_INSTALL_CAP",
+    },
+    OpSpec {
+        code: 0x00020004,
+        object_type: 2,
+        rights: 0x00000100,
+        descriptor_len: 64,
+        writes_response: false,
+        name: "DOMAIN_ADD_THREAD",
+    },
+    OpSpec {
+        code: 0x00020005,
+        object_type: 2,
+        rights: 0x00000100,
+        descriptor_len: 48,
+        writes_response: false,
+        name: "DOMAIN_SET_FAULT_CHANNEL",
+    },
+    OpSpec {
+        code: 0x00020006,
+        object_type: 2,
+        rights: 0x00000200,
+        descriptor_len: 0,
+        writes_response: false,
+        name: "DOMAIN_ACTIVATE",
+    },
+    OpSpec {
+        code: 0x00020007,
+        object_type: 2,
+        rights: 0x00000400,
+        descriptor_len: 0,
+        writes_response: false,
+        name: "DOMAIN_TERMINATE",
+    },
+    OpSpec {
+        code: 0x00020008,
+        object_type: 2,
+        rights: 0x00000800,
+        descriptor_len: 96,
+        writes_response: true,
+        name: "DOMAIN_QUERY",
+    },
+    OpSpec {
+        code: 0x00030001,
+        object_type: 3,
+        rights: 0x00000001,
+        descriptor_len: 88,
+        writes_response: true,
+        name: "MEMORY_QUERY",
+    },
+    OpSpec {
+        code: 0x00030002,
+        object_type: 3,
+        rights: 0x00000200,
+        descriptor_len: 64,
+        writes_response: false,
+        name: "MEMORY_COPY",
+    },
+    OpSpec {
+        code: 0x00030003,
+        object_type: 3,
+        rights: 0x00001000,
+        descriptor_len: 88,
+        writes_response: true,
+        name: "MEMORY_SEAL",
+    },
+    OpSpec {
+        code: 0x00030004,
+        object_type: 3,
+        rights: 0x00000200,
+        descriptor_len: 304,
+        writes_response: false,
+        name: "MEMORY_WRITE",
+    },
+    OpSpec {
+        code: 0x00030005,
+        object_type: 3,
+        rights: 0x00000100,
+        descriptor_len: 304,
+        writes_response: true,
+        name: "MEMORY_READ",
+    },
+    OpSpec {
+        code: 0x00040001,
+        object_type: 4,
+        rights: 0x00000800,
+        descriptor_len: 56,
+        writes_response: false,
+        name: "ENDPOINT_BIND_FACET",
+    },
+    OpSpec {
+        code: 0x00040002,
+        object_type: 4,
+        rights: 0x00000200,
+        descriptor_len: 344,
+        writes_response: true,
+        name: "ENDPOINT_CALL",
+    },
+    OpSpec {
+        code: 0x00040003,
+        object_type: 4,
+        rights: 0x00000100,
+        descriptor_len: 344,
+        writes_response: false,
+        name: "ENDPOINT_SEND",
+    },
+    OpSpec {
+        code: 0x00040004,
+        object_type: 4,
+        rights: 0x00000400,
+        descriptor_len: 408,
+        writes_response: true,
+        name: "ENDPOINT_RECEIVE",
+    },
+    OpSpec {
+        code: 0x00040005,
+        object_type: 4,
+        rights: 0x00000001,
+        descriptor_len: 80,
+        writes_response: true,
+        name: "ENDPOINT_QUERY",
+    },
+    OpSpec {
+        code: 0x00050001,
+        object_type: 5,
+        rights: 0x00000100,
+        descriptor_len: 352,
+        writes_response: false,
+        name: "INVOCATION_REPLY",
+    },
+    OpSpec {
+        code: 0x00050002,
+        object_type: 5,
+        rights: 0x00000200,
+        descriptor_len: 48,
+        writes_response: false,
+        name: "INVOCATION_BEGIN_EFFECT",
+    },
+    OpSpec {
+        code: 0x00050003,
+        object_type: 5,
+        rights: 0x00000400,
+        descriptor_len: 48,
+        writes_response: false,
+        name: "INVOCATION_RESOLVE",
+    },
+    OpSpec {
+        code: 0x00050004,
+        object_type: 5,
+        rights: 0x00000001,
+        descriptor_len: 96,
+        writes_response: true,
+        name: "INVOCATION_QUERY",
+    },
+    OpSpec {
+        code: 0x00050005,
+        object_type: 5,
+        rights: 0x00000800,
+        descriptor_len: 0,
+        writes_response: false,
+        name: "INVOCATION_BIND_WORKER",
+    },
+    OpSpec {
+        code: 0x00050006,
+        object_type: 5,
+        rights: 0x00000800,
+        descriptor_len: 0,
+        writes_response: false,
+        name: "INVOCATION_UNBIND_WORKER",
+    },
+    OpSpec {
+        code: 0x00060001,
+        object_type: 6,
+        rights: 0x00000100,
+        descriptor_len: 40,
+        writes_response: false,
+        name: "SIGNAL_RAISE",
+    },
+    OpSpec {
+        code: 0x00060002,
+        object_type: 6,
+        rights: 0x00000200,
+        descriptor_len: 64,
+        writes_response: true,
+        name: "SIGNAL_WAIT",
+    },
+    OpSpec {
+        code: 0x00060003,
+        object_type: 6,
+        rights: 0x00000001,
+        descriptor_len: 64,
+        writes_response: true,
+        name: "SIGNAL_QUERY",
+    },
+    OpSpec {
+        code: 0x00070001,
+        object_type: 7,
+        rights: 0x00000100,
+        descriptor_len: 40,
+        writes_response: false,
+        name: "TIMER_ARM",
+    },
+    OpSpec {
+        code: 0x00070002,
+        object_type: 7,
+        rights: 0x00000100,
+        descriptor_len: 0,
+        writes_response: false,
+        name: "TIMER_CANCEL",
+    },
+    OpSpec {
+        code: 0x00070003,
+        object_type: 7,
+        rights: 0x00000001,
+        descriptor_len: 64,
+        writes_response: true,
+        name: "TIMER_QUERY",
+    },
+    OpSpec {
+        code: 0x00080001,
+        object_type: 8,
+        rights: 0x00000100,
+        descriptor_len: 432,
+        writes_response: true,
+        name: "LOG_READ",
+    },
+    OpSpec {
+        code: 0x00080002,
+        object_type: 8,
+        rights: 0x00000200,
+        descriptor_len: 64,
+        writes_response: false,
+        name: "LOG_APPEND",
+    },
+    OpSpec {
+        code: 0x00080003,
+        object_type: 8,
+        rights: 0x00000400,
+        descriptor_len: 40,
+        writes_response: false,
+        name: "LOG_ACK",
+    },
+    OpSpec {
+        code: 0x00080004,
+        object_type: 8,
+        rights: 0x00000001,
+        descriptor_len: 72,
+        writes_response: true,
+        name: "LOG_QUERY",
+    },
+];
+
+/// Looks up an operation code, or `None` when the number is not assigned.
+///
+/// An unassigned number is refused rather than ignored, so a program built
+/// against a later table fails visibly instead of silently succeeding.
+#[must_use]
+pub fn spec(code: u32) -> Option<&'static OpSpec> {
+    let mut index = 0;
+    while index < OPERATIONS.len() {
+        if OPERATIONS[index].code == code {
+            return Some(&OPERATIONS[index]);
+        }
+        index += 1;
+    }
+    None
 }
 
 /// Status values returned in RAX. Zero is success, every error is negative.
