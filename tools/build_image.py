@@ -24,6 +24,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -51,9 +52,11 @@ MODULE_FLAG_EXPECT_REJECT = 1
 # placed above it so the kernel's range check is what rejects the image.
 KERNEL_RANGE_ADDRESS = 0xFFFFFFFF80000000
 
-# Fixed FAT volume serial and directory-entry timestamp. See `build_esp`: both
-# are what make the image hash a function of its inputs rather than of the
-# clock. 1980-01-01T00:00:00Z is the earliest instant FAT can encode.
+# Fixed FAT volume serial and build timestamp. Both are what make the image a
+# function of its inputs rather than of the clock: mtools stamps directory
+# entries with the current time, and rust-lld stamps the loader's PE header
+# with it. Both read SOURCE_DATE_EPOCH. 1980-01-01T00:00:00Z is the earliest
+# instant FAT can encode.
 IMAGE_SERIAL = "54484c58"
 IMAGE_EPOCH = 315532800
 
@@ -77,11 +80,53 @@ def run(argv: list[str], **kwargs) -> subprocess.CompletedProcess:
     return result
 
 
+def config_rustflags(target: str) -> list[str]:
+    """Reads the flags `.cargo/config.toml` sets for `target`.
+
+    They are read rather than repeated because the per-target environment
+    variable below replaces that table instead of adding to it, and the config
+    file stays the one place where a target's correctness flags are stated.
+    """
+    path = ROOT / ".cargo/config.toml"
+    if not path.exists():
+        return []
+    with path.open("rb") as handle:
+        config = tomllib.load(handle)
+    return list(config.get("target", {}).get(target, {}).get("rustflags", []))
+
+
+def remap_flags() -> list[str]:
+    """Flags that keep absolute build paths out of the images.
+
+    Without these the same sources built in two directories, or on two
+    machines, produce different digests: the compiler records its working
+    directory and the standard library's source paths in debug info. The
+    manifest's digests are only worth recording if they can be compared, so
+    both roots are rewritten to fixed names.
+    """
+    sysroot = subprocess.run(
+        ["rustc", "--print", "sysroot"], capture_output=True, text=True, cwd=ROOT
+    ).stdout.strip()
+    flags = [f"--remap-path-prefix={ROOT}=/thalyx-kernel"]
+    if sysroot:
+        flags.append(f"--remap-path-prefix={sysroot}=/rust")
+    home = os.environ.get("CARGO_HOME") or str(Path.home() / ".cargo")
+    flags.append(f"--remap-path-prefix={home}=/cargo")
+    return flags
+
+
+def cargo_environment(target: str) -> dict[str, str]:
+    variable = "CARGO_TARGET_" + target.upper().replace("-", "_") + "_RUSTFLAGS"
+    environment = dict(os.environ)
+    environment[variable] = " ".join(config_rustflags(target) + remap_flags())
+    return environment
+
+
 def cargo_build(package: str, target: str, profile: str) -> None:
     argv = ["cargo", "build", "-p", package, "--target", target]
     if profile == "release":
         argv.append("--release")
-    run(argv, cwd=ROOT)
+    run(argv, cwd=ROOT, env=cargo_environment(target))
 
 
 def artifact(target: str, profile: str, name: str) -> Path:
@@ -159,13 +204,8 @@ def build_esp(tools: tc.Toolchain, loader: Path, kernel: Path, package: Path, si
     with IMAGE.open("wb") as handle:
         handle.truncate(size_mib * 1024 * 1024)
 
-    # Without these two, the image hash changes on every build even when every
-    # input byte is identical: mformat derives a volume serial from the clock,
-    # and mtools stamps each directory entry with the current time. The
-    # evidence is supposed to be reproducible, so both are pinned. mtools reads
-    # SOURCE_DATE_EPOCH itself; FAT cannot represent dates before 1980, which
-    # is the value used here.
-    os.environ["SOURCE_DATE_EPOCH"] = str(IMAGE_EPOCH)
+    # mformat derives a volume serial from the clock, so it is pinned here; the
+    # directory timestamps come from SOURCE_DATE_EPOCH, which `main` sets.
 
     def mtool(binary: Path, *args: str) -> None:
         argv = [str(binary), "-i", str(IMAGE), *args]
@@ -198,6 +238,10 @@ def main() -> int:
     except tc.MissingTool as error:
         print(str(error), file=sys.stderr)
         return 1
+
+    # Read by rust-lld for the loader's PE timestamp and by mtools for the FAT
+    # directory entries. Set before the first build so both see it.
+    os.environ["SOURCE_DATE_EPOCH"] = str(IMAGE_EPOCH)
 
     STAGE.mkdir(parents=True, exist_ok=True)
 

@@ -8,3 +8,11 @@ rustflags = ["-C", "relocation-model=static"]
 
 [build]
 target-dir = "build/cargo"
+
+# The loader is a PE image. rust-lld stamps every link with a fresh CodeView
+# GUID and a randomised PDB name, which would make the loader the one artefact
+# whose digest changes on every build. Nothing debugs the loader through that
+# record — the kernel is what carries debug info — so the linker is told not to
+# emit it. The link timestamp is pinned separately, through SOURCE_DATE_EPOCH.
+[target.x86_64-unknown-uefi]
+rustflags = ["-C", "link-arg=/DEBUG:NONE"]

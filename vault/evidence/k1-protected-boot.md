@@ -14,7 +14,7 @@ Una imagen UEFI construida solo desde fuentes, arrancada en QEMU con OVMF, con l
 | Artefacto | Comando | Resultado |
 |---|---|---|
 | Imagen | `python3 tools/build_image.py` | `build/thalyx-k1.img`, manifiesto con digest de cada artefacto y herramienta |
-| Ejecución | `python3 tools/run_k1.py` | `exit_status=33` (`k1.terminal status=complete`), 354 registros, ~1.5 s |
+| Ejecución | `python3 tools/run_k1.py` | `exit_status=33` (`k1.terminal status=complete`), 353 registros, ~1.4 s |
 | Veredicto | `python3 tools/check_k1.py` | `K1 GATE PASSED: 13 of 13 criteria met` |
 
 Toolchain fijada: `rustc 1.98.1`, targets `x86_64-unknown-uefi` y `x86_64-unknown-none`, QEMU 11.1.1 con OVMF, perfil de CPU `qemu64,+smep,+smap,+pdpe1gb`, un solo núcleo, 512 MiB.
@@ -22,13 +22,17 @@ Toolchain fijada: `rustc 1.98.1`, targets `x86_64-unknown-uefi` y `x86_64-unknow
 Digests de la ejecución registrada:
 
 ```text
-image   6096a050595533f996ff442366d3b659c640099dc7aab7ab29013c66dcd2e021
-kernel  754453c7104aaae493e42070cae60c5d959961238b548f176ebfa1c03e4d550d
-loader  3f79e2b066df4e9b0a064a8c185e058e17ef2b191ed0b79d13eb771a342a2e96
-package f382855faaf039c510c36f9e43038f79b488cdd6822b4f350d1df834e30da950
+image   5c8320e490ef67dd233dfde0750472d5822e77829124de67c3f0d9e0fb175eb8
+kernel  1a7ad5748f965d61daa281841321f41d3676c1d5965e2013dfb199cb5043f9dd
+loader  c27b3ef9cf22df1d9bcf8d585cd1584e1d38eaa395d22d94e3fcd6108181b6e7
+package 2505cf744ec056de9dfd48f224c027c8371f4b1eb6549d95f3de3e9acdd01810
 ```
 
-La imagen es reproducible byte a byte: dos construcciones de las mismas fuentes, incluida una tras borrar el directorio de staging, producen el mismo digest. Para conseguirlo se fijan el número de serie del volumen FAT y las marcas de tiempo de los directorios, que de otro modo dependen del reloj. Los contadores temporales de una ejecución —ticks, número de preempciones— **no** son reproducibles: dependen del ritmo de emulación TCG. El criterio de la puerta es una propiedad observada, no una cifra exacta.
+La imagen es reproducible byte a byte, incluida su construcción desde otro directorio: comprobado con dos árboles limpios en rutas distintas, cuyos cuatro artefactos y cinco módulos coinciden. Cuatro fuentes de variación tuvieron que eliminarse para conseguirlo, y ninguna era evidente antes de comprobarlo: el número de serie del volumen FAT, las marcas de tiempo de los directorios FAT, las rutas absolutas de compilación que el compilador guarda en la información de depuración, y el GUID CodeView con nombre de PDB aleatorio que el enlazador escribe en el PE del loader en cada enlace.
+
+La primera comprobación de reproducibilidad no detectó las dos últimas porque `cargo` no reenlazó el loader; solo aparecen tras un `clean`. Queda como advertencia sobre el método: una comprobación de reproducibilidad que no fuerza la reconstrucción no comprueba nada.
+
+Los contadores temporales de una ejecución —ticks, número de preempciones— **no** son reproducibles: dependen del ritmo de emulación TCG. El criterio de la puerta es una propiedad observada, no una cifra exacta.
 
 ## Qué observó la ejecución
 
@@ -38,7 +42,7 @@ Después construyó cuatro dominios en cuatro espacios de direcciones distintos 
 
 Cada dominio plantó un patrón FP/SSE derivado de su propio identificador —los dos dominios creados desde la misma imagen plantaron valores distintos— y verificó ese patrón intacto después de perder la CPU, en cada intervalo.
 
-Dos dominios ejecutaron accesos ilegales deliberados y anunciados previamente. `trespasser` leyó la base del mapa del kernel, presente en su espacio pero sin bit de usuario, de modo que el fallo es una violación de privilegio y no una traducción ausente. `wxprobe` escribió sobre su propio texto ejecutable, mapeado y suyo, denegado únicamente por el bit de escritura que el kernel no concede a una página ejecutable. Ambos fallos fueron clasificados como `user_fault`, terminaron solo a su dominio y devolvieron sus marcos a cero cargados. El kernel siguió ejecutando y emitió 194 registros posteriores.
+Dos dominios ejecutaron accesos ilegales deliberados y anunciados previamente. `trespasser` leyó la base del mapa del kernel, presente en su espacio pero sin bit de usuario, de modo que el fallo es una violación de privilegio y no una traducción ausente. `wxprobe` escribió sobre su propio texto ejecutable, mapeado y suyo, denegado únicamente por el bit de escritura que el kernel no concede a una página ejecutable. Ambos fallos fueron clasificados como `user_fault`, terminaron solo a su dominio y devolvieron sus marcos a cero cargados. El kernel siguió ejecutando y emitió 200 registros posteriores.
 
 Los dos `worker` supervivientes continuaron avanzando su propio contador después del último fallo, hasta terminar voluntariamente. El paquete incluía además un módulo malformado cuyo primer segmento cargable apunta a espacio de kernel; el validador lo rechazó por el mismo camino que aceptó a los demás, antes de ejecutarlo.
 
