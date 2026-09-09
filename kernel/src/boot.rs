@@ -285,9 +285,17 @@ pub unsafe fn start(bootinfo_phys: u64) -> ! {
     event!(
         "cpu.profile",
         "name=v0-qemu status=accepted paging=4level nx=on wp=on smep={} smap={} \
-         kernel_simd=off user_fp=x87+sse2 fp_switch=eager",
+         kernel_simd=off user_fp=x87+sse2 fp_switch=eager global_pages={}",
         if features.smep { "on" } else { "absent" },
-        if features.smap { "on" } else { "absent" }
+        if features.smap { "on" } else { "absent" },
+        // Read back rather than assumed. Cross-processor invalidation reloads
+        // `CR3` and calls that complete, which is only true while no mapping is
+        // global, and no mapping can be global while this bit is clear.
+        if cpu::read_cr4() & cpu::CR4_PGE == 0 {
+            "off"
+        } else {
+            "on_unexpected"
+        }
     );
 
     // SAFETY: the feature gate confirmed FXSR and SSE2.
@@ -342,6 +350,14 @@ pub unsafe fn start(bootinfo_phys: u64) -> ! {
         k2boot::establish_control_log(&mut machine, root);
         root
     };
+
+    // Devices are discovered before the first domain exists, and assigned to
+    // the root scope, so that whatever a package's supervisor receives it
+    // receives as an explicit capability rather than by asking for a device by
+    // name later.
+    if let Some(platform) = platform.as_ref() {
+        crate::device::discover(platform, root);
+    }
 
     let created = create_initial_domains(root);
 
@@ -909,6 +925,55 @@ fn drain_quarantine() {
     );
 }
 
+/// What each processor did, and what the invalidation protocol cost.
+///
+/// Per processor rather than summed: "the machine ran four processors" and
+/// "one processor ran everything while three idled" produce the same total, and
+/// only the first is evidence that the scheduling was multiprocessor.
+fn scheduling_summary() {
+    let machine = MACHINE.lock();
+    let online = machine.cpus_online;
+    let peak = crate::scope::peak_running(&machine.scopes);
+    let mut rows = [(0usize, 0u32, 0u64, 0u64, 0u64, 0u64, 0u64); crate::limits::MAX_CPUS];
+    let mut count = 0usize;
+    for cpu in 0..crate::limits::MAX_CPUS {
+        let slot = machine.cpus[cpu];
+        if slot.apic_id == u32::MAX {
+            continue;
+        }
+        rows[count] = (
+            cpu,
+            slot.apic_id,
+            slot.ticks,
+            slot.dispatches,
+            slot.preemptions,
+            slot.budget_stalls,
+            slot.user_ns,
+        );
+        count += 1;
+    }
+    let migrations: u64 = machine.threads.iter().map(|thread| thread.migrations).sum();
+    drop(machine);
+
+    for slot in 0..count {
+        let (cpu, apic_id, ticks, dispatches, preemptions, stalls, user_ns) = rows[slot];
+        event!(
+            "sched.cpu_summary",
+            "cpu={cpu} apic_id={apic_id} ticks={ticks} dispatches={dispatches} \
+             preemptions={preemptions} budget_stalls={stalls} user_ns={user_ns}"
+        );
+    }
+    let (published, ipis, flushes, timeouts, spins) = tlb::counters();
+    let (observations, regressions, worst) = time::monotonicity();
+    event!(
+        "sched.summary",
+        "cpus_online={online} peak_simultaneous_threads={peak} migrations={migrations} \
+         invalidations={published} shootdown_ipis={ipis} flushes={flushes} \
+         ack_timeouts={timeouts} max_ack_spins={spins} clock_readings={observations} \
+         clock_regressions={regressions} worst_regression_ns={worst}"
+    );
+}
+
 fn summarize(terminal: sched::Terminal) {
     let machine = MACHINE.lock();
     let ticks = machine.ticks;
@@ -998,6 +1063,9 @@ fn summarize(terminal: sched::Terminal) {
             }
         }
     }
+
+    scheduling_summary();
+    crate::device::summarize();
 
     event!(
         "k1.terminal",

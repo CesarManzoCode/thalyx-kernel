@@ -10,7 +10,8 @@ use crate::arch::x86_64::cpu;
 use crate::arch::x86_64::idt;
 use crate::arch::x86_64::lapic;
 use crate::arch::x86_64::trap::{
-    RESCHEDULE_VECTOR, SPURIOUS_VECTOR, TIMER_VECTOR, TLB_VECTOR, TrapFrame,
+    DEVICE_VECTOR_BASE, DEVICE_VECTOR_COUNT, RESCHEDULE_VECTOR, SPURIOUS_VECTOR, TIMER_VECTOR,
+    TLB_VECTOR, TrapFrame,
 };
 use crate::event;
 use crate::sched;
@@ -134,6 +135,18 @@ pub fn handle(frame: &mut TrapFrame) {
             if let Some(lapic) = lapic::current() {
                 lapic.end_of_interrupt();
             }
+        }
+        vector
+            if vector >= u64::from(DEVICE_VECTOR_BASE)
+                && vector < u64::from(DEVICE_VECTOR_BASE) + u64::from(DEVICE_VECTOR_COUNT) =>
+        {
+            // Acknowledged before the binding is looked up: the controller has
+            // delivered it either way, and an interrupt for a binding that has
+            // gone must not leave the controller waiting.
+            if let Some(lapic) = lapic::current() {
+                lapic.end_of_interrupt();
+            }
+            crate::device::on_interrupt(vector as u8);
         }
         vector if vector == u64::from(SPURIOUS_VECTOR) => {
             // A spurious interrupt is not acknowledged.

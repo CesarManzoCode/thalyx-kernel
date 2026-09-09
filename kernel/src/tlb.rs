@@ -90,12 +90,6 @@ pub fn online_mask() -> u64 {
     ONLINE.load(Ordering::Acquire)
 }
 
-/// The generation currently published.
-#[must_use]
-pub fn generation() -> u64 {
-    GENERATION.load(Ordering::Acquire)
-}
-
 /// Publishes an invalidation and returns the generation that names it.
 ///
 /// The caller must already have written the page-table change. On this

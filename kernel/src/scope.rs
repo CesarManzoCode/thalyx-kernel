@@ -550,40 +550,6 @@ pub fn peak_running(table: &Table) -> u32 {
     table.iter().map(|node| node.running).max().unwrap_or(0)
 }
 
-/// True when ordinary work charged to `scope` may still be dispatched.
-///
-/// Every ancestor must have budget left and a free parallelism slot: a client
-/// gains nothing by creating more children or more threads.
-#[must_use]
-pub fn eligible(table: &Table, scope: ScopeId, recovery: bool) -> bool {
-    let mut ok = true;
-    ancestors(table, scope, |index| {
-        let node = &table[index];
-        if recovery {
-            if node.state == State::Retired || node.state == State::Empty {
-                ok = false;
-            }
-            if node.closure_used_ns >= node.limits.closure_reserve_ns {
-                ok = false;
-            }
-        } else {
-            // A barrier closes admissions, not the CPU. A scope that has been
-            // fenced keeps running what it already had: the contract is
-            // explicit that an operation admitted before the barrier may finish
-            // after it, and a drain that waited for threads it had already made
-            // unschedulable would wait forever. Quiescent and retired scopes
-            // have nothing left to run by construction.
-            if !matches!(node.state, State::Open | State::Fenced) {
-                ok = false;
-            }
-            if node.cpu_window_ns >= node.limits.cpu_budget_ns {
-                ok = false;
-            }
-        }
-    });
-    ok
-}
-
 /// True when `scope` and every ancestor have a free parallelism slot.
 ///
 /// The limit is checked when a thread starts charging a scope, not when it is

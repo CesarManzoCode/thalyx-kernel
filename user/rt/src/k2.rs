@@ -207,6 +207,8 @@ pub fn limits() -> Result<Limits, i64> {
         cpu_quantum_ns: 0,
         page_size: 0,
         boot_epoch: 0,
+        cpus_online: 0,
+        reserved0: 0,
     };
     // SAFETY: the pointer names this program's own `Limits`, which is exactly
     // the length passed, and the entry only writes it.

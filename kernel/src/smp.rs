@@ -190,6 +190,11 @@ fn install_trampoline(cr3: u64) -> Option<Frame> {
         return None;
     }
 
+    // The function *pointer*, not the zero-sized function item: casting the
+    // item's address would hand the trampoline the address of a temporary.
+    let entry: extern "C" fn(u64) -> ! = ap_entry;
+    let entry = entry as *const () as u64;
+
     let source = (&raw const ap::thalyx_ap_trampoline).cast::<u8>();
     let destination = frame.hhdm_ptr();
     // SAFETY: the blob is a contiguous run of bytes inside the kernel image and
@@ -219,7 +224,7 @@ fn install_trampoline(cr3: u64) -> Option<Frame> {
             .write(ap::Params {
                 cr3,
                 stack_top: 0,
-                entry: ap_entry as usize as u64,
+                entry,
                 cpu_index: 0,
             });
     }
@@ -392,6 +397,8 @@ pub fn start_all(platform: &Platform, x2apic: bool, tsc_hz: u64) {
         online_count(),
         if x2apic { "x2apic" } else { "xapic" }
     );
+
+    probe_absent_processor(platform, trampoline.addr());
 }
 
 /// Attempts to start a processor the firmware never described.
@@ -400,7 +407,7 @@ pub fn start_all(platform: &Platform, x2apic: bool, tsc_hz: u64) {
 /// nothing is there; what the run then shows is that the kernel waits, gives
 /// up, keeps the slot and its stack, and never adds the slot to the online set.
 /// Without it the timeout branch would be code no evidence had ever entered.
-pub fn probe_absent_processor(platform: &Platform, trampoline_page: u64) {
+fn probe_absent_processor(platform: &Platform, trampoline_page: u64) {
     let mut candidate = 0xF0u32;
     while platform.cpus[..platform.cpu_count]
         .iter()

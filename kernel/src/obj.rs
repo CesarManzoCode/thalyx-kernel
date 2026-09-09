@@ -49,6 +49,8 @@ pub enum ObjKind {
     Timer,
     /// Control-receipt ring.
     ControlLog,
+    /// An assigned device function.
+    Device,
 }
 
 impl ObjKind {
@@ -64,6 +66,7 @@ impl ObjKind {
             ObjKind::Signal => generated::object_type::SIGNAL,
             ObjKind::Timer => generated::object_type::TIMER,
             ObjKind::ControlLog => generated::object_type::CONTROL_LOG,
+            ObjKind::Device => generated::object_type::DEVICE,
         }
     }
 
@@ -79,6 +82,7 @@ impl ObjKind {
             ObjKind::Signal => "signal",
             ObjKind::Timer => "timer",
             ObjKind::ControlLog => "control_log",
+            ObjKind::Device => "device",
         }
     }
 
@@ -128,6 +132,9 @@ impl ObjKind {
             ObjKind::Signal => right::SIGNAL_RAISE | right::SIGNAL_WAIT,
             ObjKind::Timer => right::TIMER_ARM,
             ObjKind::ControlLog => right::LOG_READ | right::LOG_APPEND | right::LOG_ACK,
+            ObjKind::Device => {
+                right::DEVICE_MAP | right::DEVICE_IRQ | right::DEVICE_DMA | right::DEVICE_CONTROL
+            }
         };
         common | specific
     }

@@ -141,7 +141,9 @@ No existe: SMP, drivers propios, DMA, servicio de estado implementado, Thalyx so
 * `tlb.rs`: generación de invalidación, acuse por generación, refresco antes de ejecutar usuario, y cuarentena de marcos en `mm/frame.rs`.
 * Planificación: reserva de saldo y de simultaneidad en todos los ancestros **antes** de despachar, decisión y reclamación del hilo en una sola sección crítica, y publicación diferida del hilo saliente.
 
-**Siguiente paso exacto al reanudar:** conectar el shootdown a las operaciones que lo necesitan (`MEMORY_SEAL`, `DOMAIN_UNMAP`) sacándolas del despacho bajo cerrojo, y después el camino de dispositivos: PCI/ECAM, objeto `DEVICE`, MSI-X a señal, concesiones DMA y perfil de aislamiento.
+**Segundo hito, ya en el árbol:** el shootdown está conectado —`MEMORY_SEAL` y `DOMAIN_UNMAP` salen del despacho bajo cerrojo y no responden hasta que todos los procesadores acusan la invalidación— y existe el sustrato de dispositivos: `pci.rs` (ECAM, enumeración, BARs medidos con la decodificación apagada, capacidades con límite y detección de ciclos), `device.rs` (objeto `DEVICE`, validación de las estructuras virtio contra su BAR y contra la tabla MSI-X, sesión, cuarentena de concesiones) y `api/devops.rs` con las ocho operaciones nuevas. La interfaz pasa de 51 a **59** operaciones.
+
+**Siguiente paso exacto al reanudar:** el paquete K3: `k3super`, `k3worker` y `k3driver`; `tools/build_image.py --phase k3`, `tools/run_k3.py` y `tools/check_k3.py`; después evidencia y contratos.
 
 **Bugs encontrados por ejecución en este hito, ya corregidos:** dos, ambos invisibles al compilador y ambos fatales:
 

@@ -25,11 +25,13 @@ use thalyx_abi::generated::ReceiptRecord;
 use crate::arch::x86_64::fpu::FpuState;
 use crate::arch::x86_64::paging::AddressSpace;
 use crate::ctrl::ControlLog;
+use crate::device::{Device, DmaGrant, IrqBinding, MAX_DEVICE_MAPS};
 use crate::events::{Signal, Timer};
 use crate::ipc::{Endpoint, Invocation, Message};
 use crate::limits::{
-    MAX_CONTROL_LOGS, MAX_CPUS, MAX_ENDPOINTS, MAX_GRANTS, MAX_INVOCATIONS, MAX_MAPS,
-    MAX_MEMORY_OBJECTS, MAX_MESSAGES, MAX_SCOPES, MAX_SIGNALS, MAX_TIMERS,
+    MAX_CONTROL_LOGS, MAX_CPUS, MAX_DEVICES, MAX_DMA_GRANTS, MAX_ENDPOINTS, MAX_GRANTS,
+    MAX_INVOCATIONS, MAX_IRQ_BINDINGS, MAX_MAPS, MAX_MEMORY_OBJECTS, MAX_MESSAGES, MAX_SCOPES,
+    MAX_SIGNALS, MAX_TIMERS,
 };
 use crate::memobj::{MapRecord, MemoryObject};
 use crate::mm::frame::FrameAllocator;
@@ -504,6 +506,21 @@ pub struct Machine {
     pub timers: [Timer; MAX_TIMERS],
     /// Control-receipt rings.
     pub logs: [ControlLog; MAX_CONTROL_LOGS],
+    /// Assigned device functions.
+    pub devices: [Device; MAX_DEVICES],
+    /// Mappings of device register windows.
+    pub device_maps: [crate::device::MapRecord; MAX_DEVICE_MAPS],
+    /// Pages devices may reach.
+    pub dma_grants: [DmaGrant; MAX_DMA_GRANTS],
+    /// Device interrupts routed to signals.
+    pub irqs: [IrqBinding; MAX_IRQ_BINDINGS],
+    /// The configuration window, once it is mapped.
+    pub ecam: Option<crate::pci::Ecam>,
+    /// Whether firmware described a remapping unit at all.
+    pub iommu_described: bool,
+    /// Whether this kernel has translation enabled for assigned devices. It
+    /// does not, and the profile is refused rather than approximated.
+    pub iommu_translating: bool,
     /// Occupancy of the kernel stack slots.
     pub kstack_used: [bool; MAX_KSTACKS],
     /// Processors, dense-indexed. Slot zero is the bootstrap processor.
@@ -560,6 +577,13 @@ impl Machine {
             signals: [Signal::empty(); MAX_SIGNALS],
             timers: [Timer::empty(); MAX_TIMERS],
             logs: [const { ControlLog::empty() }; MAX_CONTROL_LOGS],
+            devices: [const { Device::empty() }; MAX_DEVICES],
+            device_maps: [crate::device::MapRecord::empty(); MAX_DEVICE_MAPS],
+            dma_grants: [DmaGrant::empty(); MAX_DMA_GRANTS],
+            irqs: [IrqBinding::empty(); MAX_IRQ_BINDINGS],
+            ecam: None,
+            iommu_described: false,
+            iommu_translating: false,
             kstack_used: [false; MAX_KSTACKS],
             cpus: [CpuSlot::empty(); MAX_CPUS],
             cpus_online: 0,

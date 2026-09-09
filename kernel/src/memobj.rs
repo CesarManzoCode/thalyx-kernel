@@ -82,6 +82,10 @@ pub struct MemoryObject {
     pub map_count: u32,
     /// Mappings currently installed that permit writing.
     pub writable_maps: u32,
+    /// DMA grants naming these pages. A device that can write is a writer, so
+    /// a sealed object may have none, and pages a device can reach are not
+    /// returned to the allocator while one exists.
+    pub dma_grants: u32,
     /// Diagnostic label. A name grants nothing.
     pub label: [u8; 16],
     /// Capability entries naming this object.
@@ -102,6 +106,7 @@ impl MemoryObject {
             sponsor: 0,
             map_count: 0,
             writable_maps: 0,
+            dma_grants: 0,
             label: [0; 16],
             refs: 0,
         }

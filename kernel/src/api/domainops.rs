@@ -12,6 +12,7 @@
 //! reaching into a running domain's table would be a second, unaccounted path
 //! for the same thing.
 
+use thalyx_abi::generated::OpSpec;
 use thalyx_abi::generated::{
     DomainCreateRequest, DomainInfo, FaultChannelRequest, InstallCapRequest, MapRequest,
     ThreadCreateRequest, UnmapRequest, object_type, right, status,
@@ -25,7 +26,7 @@ use crate::memobj::State as MemState;
 use crate::mm::Owner;
 use crate::obj::{NO_GRANT, ObjKind, ObjRef};
 use crate::scope::{self, Resource};
-use crate::state::{DomainState, ExitReason, Machine};
+use crate::state::{DomainState, ExitReason, MACHINE, Machine};
 use crate::ucopy::Staging;
 
 /// Page-table pages reserved for one mapping operation.
@@ -265,29 +266,66 @@ pub fn map(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u6
 }
 
 /// Withdraws a mapping and its translations.
-pub fn unmap(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u64, i64> {
+/// Withdraws one mapping and does not answer until every processor has retired
+/// the translation.
+///
+/// Unmapping is how authority over a page is taken back, and taking it back
+/// means nothing while another processor still holds the translation. So this
+/// owns its own locking, like the seal: the entries are removed and the
+/// invalidation published under the lock, the lock is released, and the answer
+/// waits for every online processor to acknowledge.
+///
+/// An unacknowledged invalidation is reported as an incomplete drain. The
+/// mapping is gone from the tables either way — this is not an undo — but the
+/// caller is not told the withdrawal is complete when it has not been observed
+/// to be.
+pub fn unmap(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64> {
     let request: UnmapRequest = staging.read(BODY);
     if request.reserved0 != 0 {
         return Err(status::INVALID_ARGUMENT);
     }
-    let target = ctx.cap.object.index as usize;
-    let generation = machine.domains[target].generation;
-    let record = machine.maps.iter().position(|record| {
-        record.used
-            && record.domain as usize == target
-            && record.domain_generation == generation
-            && record.vaddr == request.vaddr
-            && record.pages == request.page_count
-    });
-    let Some(record_index) = record else {
-        return Err(status::INVALID_ARGUMENT);
+    let (target, pages) = {
+        let mut machine = MACHINE.lock();
+        let cap = resolve(
+            &machine,
+            ctx.domain,
+            ctx.handle,
+            spec.object_type,
+            spec.rights,
+            crate::api::now_ns(),
+        )?;
+        let target = cap.object.index as usize;
+        let generation = machine.domains[target].generation;
+        let record = machine.maps.iter().position(|record| {
+            record.used
+                && record.domain as usize == target
+                && record.domain_generation == generation
+                && record.vaddr == request.vaddr
+                && record.pages == request.page_count
+        });
+        let Some(record_index) = record else {
+            return Err(status::INVALID_ARGUMENT);
+        };
+        (
+            target,
+            crate::api::memops::withdraw_map(&mut machine, record_index),
+        )
     };
-    let pages = crate::api::memops::withdraw_map(machine, record_index);
+
+    let ack = crate::tlb::shootdown();
     event!(
         "mem.unmapped",
-        "domain={target} vaddr=0x{:x} pages={pages}",
-        request.vaddr
+        "domain={target} vaddr=0x{:x} pages={pages} invalidation_generation={} \
+         acknowledged_cpus={} expected_cpus={} acknowledged={}",
+        request.vaddr,
+        ack.generation,
+        ack.acknowledged,
+        ack.expected,
+        u8::from(!ack.timed_out)
     );
+    if ack.timed_out {
+        return Err(status::DRAIN_INCOMPLETE);
+    }
     Ok(u64::from(pages))
 }
 

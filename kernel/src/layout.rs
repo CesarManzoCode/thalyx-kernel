@@ -12,9 +12,16 @@ pub const DEVICE_AREA: u64 = KERNEL_DYNAMIC_BASE;
 /// Local APIC register page.
 pub const LAPIC_VADDR: u64 = DEVICE_AREA;
 
+/// The firmware's configuration-space window, mapped with one large entry.
+/// Two mebibytes cover the first two buses, which is where every device this
+/// revision assigns lives.
+pub const ECAM_VADDR: u64 = KERNEL_DYNAMIC_BASE + (16 << 20);
+/// Buses that window covers.
+pub const ECAM_BUSES: u8 = 2;
+
 /// Device registers the kernel maps for itself: the parts of a device's
 /// configuration a driver is not allowed to reach directly.
-pub const MMIO_AREA: u64 = KERNEL_DYNAMIC_BASE + (16 << 20);
+pub const MMIO_AREA: u64 = KERNEL_DYNAMIC_BASE + (32 << 20);
 /// Pages of that window.
 pub const MMIO_PAGES: u64 = 64;
 

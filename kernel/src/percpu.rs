@@ -193,9 +193,3 @@ pub fn index_by_apic_id(apic_id: u32) -> Option<usize> {
     let claimed = CLAIMED.load(Ordering::Acquire).min(MAX_CPUS);
     (0..claimed).find(|&index| APIC_IDS[index].load(Ordering::Acquire) == apic_id)
 }
-
-/// Slots claimed so far.
-#[must_use]
-pub fn claimed() -> usize {
-    CLAIMED.load(Ordering::Acquire).min(MAX_CPUS)
-}

@@ -186,6 +186,7 @@ fn image_object(
         sponsor,
         map_count: 0,
         writable_maps: 0,
+        dma_grants: 0,
         label,
         refs: 0,
     };
@@ -330,6 +331,43 @@ pub fn establish_supervisor(
         own,
     )?;
 
+    // Devices before modules, at fixed slots. A supervisor that receives none
+    // is told so by their absence, and asks no question of the kernel to find
+    // out: there is no call that opens a device by name.
+    let mut devices = 0;
+    for index in 0..crate::limits::MAX_DEVICES {
+        if !machine.devices[index].used {
+            continue;
+        }
+        let slot = boot_slot::FIRST_DEVICE + devices;
+        if slot >= boot_slot::FIRST_MODULE {
+            break;
+        }
+        let object = ObjRef::new(
+            ObjKind::Device,
+            index as u16,
+            machine.devices[index].generation,
+        );
+        if install(
+            machine,
+            index,
+            slot,
+            object,
+            ObjKind::Device.rights_mask(),
+            system,
+        )
+        .is_none()
+        {
+            event!(
+                "k2.device_rejected",
+                "device={} reason=no_capability_slot",
+                machine.devices[index].id
+            );
+            continue;
+        }
+        devices += 1;
+    }
+
     let mut slot = boot_slot::FIRST_MODULE;
     let mut installed = 0;
     for module in modules {
@@ -364,7 +402,7 @@ pub fn establish_supervisor(
     event!(
         "k2.supervisor_built",
         "domain={index} id={} scope={} system_scope={} images={installed} \
-         boot_slots={} fault_channel=absent role=root_supervisor",
+         devices={devices} boot_slots={} fault_channel=absent role=root_supervisor",
         machine.domains[index].id,
         machine.scopes[own as usize].id,
         machine.scopes[system as usize].id,

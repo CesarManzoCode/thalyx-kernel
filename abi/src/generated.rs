@@ -78,6 +78,8 @@ pub mod object_type {
     pub const TIMER: u32 = 7;
     /// Bounded control-receipt ring with reserved cells.
     pub const CONTROL_LOG: u32 = 8;
+    /// A device function the kernel has validated and assigned: its authorised register regions, its interrupt, its DMA grants and its session.
+    pub const DEVICE: u32 = 9;
 }
 
 /// Rights bits. Bits 0..7 are common to every type; bits 8 and above are
@@ -155,6 +157,15 @@ pub mod right {
     pub const LOG_APPEND: u32 = 1 << 9;
     /// Acknowledge consumption.
     pub const LOG_ACK: u32 = 1 << 10;
+    // DEVICE
+    /// Map an authorised register region of this device into a domain.
+    pub const DEVICE_MAP: u32 = 1 << 8;
+    /// Bind this device's interrupt to a signal.
+    pub const DEVICE_IRQ: u32 = 1 << 9;
+    /// Create and revoke DMA grants over memory objects.
+    pub const DEVICE_DMA: u32 = 1 << 10;
+    /// Bus mastering, reset and the session. Recovery authority, not driver authority.
+    pub const DEVICE_CONTROL: u32 = 1 << 11;
 }
 
 /// Operation codes: `(object type << 16) | ordinal`.
@@ -261,6 +272,22 @@ pub mod op {
     pub const LOG_ACK: u32 = 0x00080003;
     /// Report capacity, reservation and loss.
     pub const LOG_QUERY: u32 = 0x00080004;
+    /// Report identity, state, authorised regions and isolation profile.
+    pub const DEVICE_QUERY: u32 = 0x00090001;
+    /// Map one authorised region of this device into a domain, uncacheable.
+    pub const DEVICE_MAP_REGION: u32 = 0x00090002;
+    /// Withdraw that mapping and wait for every processor to retire it.
+    pub const DEVICE_UNMAP_REGION: u32 = 0x00090003;
+    /// Route one device interrupt to a signal. The kernel programs the vector; the driver never reaches the table that holds it.
+    pub const DEVICE_BIND_IRQ: u32 = 0x00090004;
+    /// Enable or disable bus mastering. Recovery authority, deliberately separate from the driver's.
+    pub const DEVICE_SET_MASTER: u32 = 0x00090005;
+    /// Pin pages and grant the device access to them under the current session.
+    pub const DEVICE_DMA_MAP: u32 = 0x00090006;
+    /// Revoke a grant once the device can no longer be issuing requests against it.
+    pub const DEVICE_DMA_UNMAP: u32 = 0x00090007;
+    /// Stop the device, revoke what it could reach and start a new session.
+    pub const DEVICE_RESET: u32 = 0x00090008;
 }
 
 /// Flags accepted in the flags register. Unknown bits are refused.
@@ -375,6 +402,22 @@ pub mod op_rights {
     pub const LOG_ACK: u32 = 0x00000400;
     /// Rights required by `op::LOG_QUERY`.
     pub const LOG_QUERY: u32 = 0x00000001;
+    /// Rights required by `op::DEVICE_QUERY`.
+    pub const DEVICE_QUERY: u32 = 0x00000001;
+    /// Rights required by `op::DEVICE_MAP_REGION`.
+    pub const DEVICE_MAP_REGION: u32 = 0x00000100;
+    /// Rights required by `op::DEVICE_UNMAP_REGION`.
+    pub const DEVICE_UNMAP_REGION: u32 = 0x00000100;
+    /// Rights required by `op::DEVICE_BIND_IRQ`.
+    pub const DEVICE_BIND_IRQ: u32 = 0x00000200;
+    /// Rights required by `op::DEVICE_SET_MASTER`.
+    pub const DEVICE_SET_MASTER: u32 = 0x00000800;
+    /// Rights required by `op::DEVICE_DMA_MAP`.
+    pub const DEVICE_DMA_MAP: u32 = 0x00000400;
+    /// Rights required by `op::DEVICE_DMA_UNMAP`.
+    pub const DEVICE_DMA_UNMAP: u32 = 0x00000400;
+    /// Rights required by `op::DEVICE_RESET`.
+    pub const DEVICE_RESET: u32 = 0x00000800;
 }
 
 /// Descriptor sizes every operation expects, header included.
@@ -481,6 +524,22 @@ pub mod op_sizes {
     pub const LOG_ACK: u32 = 40;
     /// Descriptor bytes for `op::LOG_QUERY`; zero when it takes none.
     pub const LOG_QUERY: u32 = 72;
+    /// Descriptor bytes for `op::DEVICE_QUERY`; zero when it takes none.
+    pub const DEVICE_QUERY: u32 = 264;
+    /// Descriptor bytes for `op::DEVICE_MAP_REGION`; zero when it takes none.
+    pub const DEVICE_MAP_REGION: u32 = 56;
+    /// Descriptor bytes for `op::DEVICE_UNMAP_REGION`; zero when it takes none.
+    pub const DEVICE_UNMAP_REGION: u32 = 56;
+    /// Descriptor bytes for `op::DEVICE_BIND_IRQ`; zero when it takes none.
+    pub const DEVICE_BIND_IRQ: u32 = 56;
+    /// Descriptor bytes for `op::DEVICE_SET_MASTER`; zero when it takes none.
+    pub const DEVICE_SET_MASTER: u32 = 40;
+    /// Descriptor bytes for `op::DEVICE_DMA_MAP`; zero when it takes none.
+    pub const DEVICE_DMA_MAP: u32 = 72;
+    /// Descriptor bytes for `op::DEVICE_DMA_UNMAP`; zero when it takes none.
+    pub const DEVICE_DMA_UNMAP: u32 = 56;
+    /// Descriptor bytes for `op::DEVICE_RESET`; zero when it takes none.
+    pub const DEVICE_RESET: u32 = 264;
 }
 
 /// What one operation requires, looked up before anything is validated.
@@ -505,7 +564,7 @@ pub struct OpSpec {
 }
 
 /// Every operation this revision assigns, ordered by code.
-pub const OPERATIONS: [OpSpec; 51] = [
+pub const OPERATIONS: [OpSpec; 59] = [
     OpSpec {
         code: 0x00000001,
         object_type: 0,
@@ -914,6 +973,70 @@ pub const OPERATIONS: [OpSpec; 51] = [
         writes_response: true,
         name: "LOG_QUERY",
     },
+    OpSpec {
+        code: 0x00090001,
+        object_type: 9,
+        rights: 0x00000001,
+        descriptor_len: 264,
+        writes_response: true,
+        name: "DEVICE_QUERY",
+    },
+    OpSpec {
+        code: 0x00090002,
+        object_type: 9,
+        rights: 0x00000100,
+        descriptor_len: 56,
+        writes_response: false,
+        name: "DEVICE_MAP_REGION",
+    },
+    OpSpec {
+        code: 0x00090003,
+        object_type: 9,
+        rights: 0x00000100,
+        descriptor_len: 56,
+        writes_response: false,
+        name: "DEVICE_UNMAP_REGION",
+    },
+    OpSpec {
+        code: 0x00090004,
+        object_type: 9,
+        rights: 0x00000200,
+        descriptor_len: 56,
+        writes_response: false,
+        name: "DEVICE_BIND_IRQ",
+    },
+    OpSpec {
+        code: 0x00090005,
+        object_type: 9,
+        rights: 0x00000800,
+        descriptor_len: 40,
+        writes_response: false,
+        name: "DEVICE_SET_MASTER",
+    },
+    OpSpec {
+        code: 0x00090006,
+        object_type: 9,
+        rights: 0x00000400,
+        descriptor_len: 72,
+        writes_response: true,
+        name: "DEVICE_DMA_MAP",
+    },
+    OpSpec {
+        code: 0x00090007,
+        object_type: 9,
+        rights: 0x00000400,
+        descriptor_len: 56,
+        writes_response: false,
+        name: "DEVICE_DMA_UNMAP",
+    },
+    OpSpec {
+        code: 0x00090008,
+        object_type: 9,
+        rights: 0x00000800,
+        descriptor_len: 264,
+        writes_response: true,
+        name: "DEVICE_RESET",
+    },
 ];
 
 /// Looks up an operation code, or `None` when the number is not assigned.
@@ -976,6 +1099,8 @@ pub mod status {
     pub const DRAIN_INCOMPLETE: i64 = -19;
     /// The operation exists but this revision does not implement it.
     pub const NOT_SUPPORTED: i64 = -20;
+    /// The isolation profile the caller required is not the one this machine can satisfy. Refused before any effect, never downgraded silently.
+    pub const UNSUPPORTED_PROFILE: i64 = -21;
 }
 
 /// `ScopeState` values crossing the boundary as integers.
@@ -1098,6 +1223,38 @@ pub mod cap_lineage {
     pub const EXPIRED: u32 = 3;
 }
 
+/// `DmaProfile` values crossing the boundary as integers.
+pub mod dma_profile {
+    /// `DmaProfile::WEAK_TRUSTED_DRIVER`.
+    pub const WEAK_TRUSTED_DRIVER: u32 = 1;
+    /// `DmaProfile::STRONG_IOMMU`.
+    pub const STRONG_IOMMU: u32 = 2;
+}
+
+/// `DeviceState` values crossing the boundary as integers.
+pub mod device_state {
+    /// `DeviceState::READY`.
+    pub const READY: u32 = 1;
+    /// `DeviceState::RUNNING`.
+    pub const RUNNING: u32 = 2;
+    /// `DeviceState::STOPPING`.
+    pub const STOPPING: u32 = 3;
+    /// `DeviceState::STOPPED`.
+    pub const STOPPED: u32 = 4;
+}
+
+/// `DeviceRegionKind` values crossing the boundary as integers.
+pub mod device_region_kind {
+    /// `DeviceRegionKind::VIRTIO_COMMON`.
+    pub const VIRTIO_COMMON: u32 = 1;
+    /// `DeviceRegionKind::VIRTIO_NOTIFY`.
+    pub const VIRTIO_NOTIFY: u32 = 2;
+    /// `DeviceRegionKind::VIRTIO_ISR`.
+    pub const VIRTIO_ISR: u32 = 3;
+    /// `DeviceRegionKind::VIRTIO_DEVICE`.
+    pub const VIRTIO_DEVICE: u32 = 4;
+}
+
 /// Slots the kernel installs the first supervisor's boot capabilities in.
 pub mod boot_slot {
     /// The supervisor's own domain: build, map, install and activate children through it.
@@ -1106,8 +1263,10 @@ pub mod boot_slot {
     pub const SELF_SCOPE: u32 = 2;
     /// Control receipts: read, append and acknowledge.
     pub const CONTROL_LOG: u32 = 3;
+    /// First assigned device, if the machine has one. Devices follow in enumeration order; DEVICE_QUERY reports which.
+    pub const FIRST_DEVICE: u32 = 4;
     /// First sealed image object. Modules follow in package order; MEMORY_QUERY reports the label.
-    pub const FIRST_MODULE: u32 = 4;
+    pub const FIRST_MODULE: u32 = 8;
 }
 
 /// Common descriptor header fixed by vault/architecture/abi.md.
@@ -1192,9 +1351,13 @@ pub struct Limits {
     pub page_size: u64,
     /// Schema field `boot_epoch`, little-endian `u64`.
     pub boot_epoch: u64,
+    /// Processors that completed the kernel's handshake and can be scheduled on.
+    pub cpus_online: u32,
+    /// Reserved, must be zero.
+    pub reserved0: u32,
 }
 
-const _: () = assert!(core::mem::size_of::<Limits>() == 80);
+const _: () = assert!(core::mem::size_of::<Limits>() == 88);
 const _: () = assert!(core::mem::align_of::<Limits>() == 8);
 const _: () = assert!(core::mem::offset_of!(Limits, major) == 0);
 const _: () = assert!(core::mem::offset_of!(Limits, minor) == 2);
@@ -1213,12 +1376,14 @@ const _: () = assert!(core::mem::offset_of!(Limits, cpu_window_ns) == 48);
 const _: () = assert!(core::mem::offset_of!(Limits, cpu_quantum_ns) == 56);
 const _: () = assert!(core::mem::offset_of!(Limits, page_size) == 64);
 const _: () = assert!(core::mem::offset_of!(Limits, boot_epoch) == 72);
+const _: () = assert!(core::mem::offset_of!(Limits, cpus_online) == 80);
+const _: () = assert!(core::mem::offset_of!(Limits, reserved0) == 84);
 
 impl Limits {
     /// Size in bytes, as fixed by the schema.
-    pub const SIZE: usize = 80;
+    pub const SIZE: usize = 88;
     /// Size of a descriptor carrying this body, header included.
-    pub const DESCRIPTOR_LEN: u32 = 112;
+    pub const DESCRIPTOR_LEN: u32 = 120;
     /// A zeroed value.
     #[must_use]
     pub const fn zeroed() -> Self {
@@ -2773,6 +2938,358 @@ impl FaultReport {
     pub const SIZE: usize = 72;
     /// Size of a descriptor carrying this body, header included.
     pub const DESCRIPTOR_LEN: u32 = 104;
+    /// A zeroed value.
+    #[must_use]
+    pub const fn zeroed() -> Self {
+        // SAFETY: every field is an integer or an array of integers, so the
+        // all-zero bit pattern is a valid value of this type.
+        unsafe { core::mem::zeroed() }
+    }
+}
+
+/// One register region of a device the driver may be given. Offsets and lengths are the kernel's, validated against the base address register they live in.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeviceRegion {
+    /// DeviceRegionKind.
+    pub kind: u32,
+    /// Base address register the region lives in.
+    pub bar: u32,
+    /// Byte offset inside that register's window.
+    pub offset: u64,
+    /// Schema field `length`, little-endian `u64`.
+    pub length: u64,
+    /// Bit 0: currently mapped into some domain.
+    pub flags: u32,
+    /// Meaningful for the notify region only.
+    pub notify_off_multiplier: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<DeviceRegion>() == 32);
+const _: () = assert!(core::mem::align_of::<DeviceRegion>() == 8);
+const _: () = assert!(core::mem::offset_of!(DeviceRegion, kind) == 0);
+const _: () = assert!(core::mem::offset_of!(DeviceRegion, bar) == 4);
+const _: () = assert!(core::mem::offset_of!(DeviceRegion, offset) == 8);
+const _: () = assert!(core::mem::offset_of!(DeviceRegion, length) == 16);
+const _: () = assert!(core::mem::offset_of!(DeviceRegion, flags) == 24);
+const _: () = assert!(core::mem::offset_of!(DeviceRegion, notify_off_multiplier) == 28);
+
+impl DeviceRegion {
+    /// Size in bytes, as fixed by the schema.
+    pub const SIZE: usize = 32;
+    /// Size of a descriptor carrying this body, header included.
+    pub const DESCRIPTOR_LEN: u32 = 64;
+    /// A zeroed value.
+    #[must_use]
+    pub const fn zeroed() -> Self {
+        // SAFETY: every field is an integer or an array of integers, so the
+        // all-zero bit pattern is a valid value of this type.
+        unsafe { core::mem::zeroed() }
+    }
+}
+
+/// Identity, state, authorised regions and isolation profile of one assigned device.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeviceInfo {
+    /// DeviceState.
+    pub state: u32,
+    /// Incremented by every reset. An operation naming an older session is refused.
+    pub session: u32,
+    /// Segment, bus, device and function packed as (segment<<16)|(bus<<8)|(device<<3)|function.
+    pub bdf: u32,
+    /// Schema field `vendor_id`, little-endian `u32`.
+    pub vendor_id: u32,
+    /// Schema field `device_id`, little-endian `u32`.
+    pub device_id: u32,
+    /// Class, subclass and programming interface.
+    pub class_code: u32,
+    /// Schema field `region_count`, little-endian `u32`.
+    pub region_count: u32,
+    /// Interrupts currently bound to a signal.
+    pub irq_bound: u32,
+    /// Schema field `dma_grants`, little-endian `u32`.
+    pub dma_grants: u32,
+    /// DmaProfile: what this machine can actually sustain, not what was asked for.
+    pub dma_profile: u32,
+    /// Firmware describes a remapping unit.
+    pub iommu_described: u32,
+    /// This kernel has translation enabled for this device's group.
+    pub iommu_translating: u32,
+    /// The device negotiated platform-mediated access for its DMA.
+    pub access_platform: u32,
+    /// Bus mastering is enabled in configuration space.
+    pub bus_master: u32,
+    /// Address width the kernel will hand the device.
+    pub dma_address_bits: u32,
+    /// Group this device shares an isolation boundary with.
+    pub isolation_group: u32,
+    /// Functions in that group. A group with more than one member is not a boundary of its own.
+    pub group_members: u32,
+    /// Reserved, must be zero.
+    pub reserved0: u32,
+    /// Schema field `object_id`, little-endian `u64`.
+    pub object_id: u64,
+    /// Schema field `sponsor_scope_id`, little-endian `u64`.
+    pub sponsor_scope_id: u64,
+    /// Schema field `label`, little-endian `u8[16]`.
+    pub label: [u8; 16],
+    /// Schema field `regions`, little-endian `struct:DeviceRegion[4]`.
+    pub regions: [DeviceRegion; 4],
+}
+
+const _: () = assert!(core::mem::size_of::<DeviceInfo>() == 232);
+const _: () = assert!(core::mem::align_of::<DeviceInfo>() == 8);
+const _: () = assert!(core::mem::offset_of!(DeviceInfo, state) == 0);
+const _: () = assert!(core::mem::offset_of!(DeviceInfo, session) == 4);
+const _: () = assert!(core::mem::offset_of!(DeviceInfo, bdf) == 8);
+const _: () = assert!(core::mem::offset_of!(DeviceInfo, vendor_id) == 12);
+const _: () = assert!(core::mem::offset_of!(DeviceInfo, device_id) == 16);
+const _: () = assert!(core::mem::offset_of!(DeviceInfo, class_code) == 20);
+const _: () = assert!(core::mem::offset_of!(DeviceInfo, region_count) == 24);
+const _: () = assert!(core::mem::offset_of!(DeviceInfo, irq_bound) == 28);
+const _: () = assert!(core::mem::offset_of!(DeviceInfo, dma_grants) == 32);
+const _: () = assert!(core::mem::offset_of!(DeviceInfo, dma_profile) == 36);
+const _: () = assert!(core::mem::offset_of!(DeviceInfo, iommu_described) == 40);
+const _: () = assert!(core::mem::offset_of!(DeviceInfo, iommu_translating) == 44);
+const _: () = assert!(core::mem::offset_of!(DeviceInfo, access_platform) == 48);
+const _: () = assert!(core::mem::offset_of!(DeviceInfo, bus_master) == 52);
+const _: () = assert!(core::mem::offset_of!(DeviceInfo, dma_address_bits) == 56);
+const _: () = assert!(core::mem::offset_of!(DeviceInfo, isolation_group) == 60);
+const _: () = assert!(core::mem::offset_of!(DeviceInfo, group_members) == 64);
+const _: () = assert!(core::mem::offset_of!(DeviceInfo, reserved0) == 68);
+const _: () = assert!(core::mem::offset_of!(DeviceInfo, object_id) == 72);
+const _: () = assert!(core::mem::offset_of!(DeviceInfo, sponsor_scope_id) == 80);
+const _: () = assert!(core::mem::offset_of!(DeviceInfo, label) == 88);
+const _: () = assert!(core::mem::offset_of!(DeviceInfo, regions) == 104);
+
+impl DeviceInfo {
+    /// Size in bytes, as fixed by the schema.
+    pub const SIZE: usize = 232;
+    /// Size of a descriptor carrying this body, header included.
+    pub const DESCRIPTOR_LEN: u32 = 264;
+    /// A zeroed value.
+    #[must_use]
+    pub const fn zeroed() -> Self {
+        // SAFETY: every field is an integer or an array of integers, so the
+        // all-zero bit pattern is a valid value of this type.
+        unsafe { core::mem::zeroed() }
+    }
+}
+
+/// Install or withdraw a mapping of one device region in a domain.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeviceMapRequest {
+    /// Domain to map into; needs DOMAIN_BUILD through this handle.
+    pub domain_handle: u64,
+    /// Schema field `vaddr`, little-endian `u64`.
+    pub vaddr: u64,
+    /// Schema field `region_index`, little-endian `u32`.
+    pub region_index: u32,
+    /// Session the caller believes the device is in.
+    pub session: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<DeviceMapRequest>() == 24);
+const _: () = assert!(core::mem::align_of::<DeviceMapRequest>() == 8);
+const _: () = assert!(core::mem::offset_of!(DeviceMapRequest, domain_handle) == 0);
+const _: () = assert!(core::mem::offset_of!(DeviceMapRequest, vaddr) == 8);
+const _: () = assert!(core::mem::offset_of!(DeviceMapRequest, region_index) == 16);
+const _: () = assert!(core::mem::offset_of!(DeviceMapRequest, session) == 20);
+
+impl DeviceMapRequest {
+    /// Size in bytes, as fixed by the schema.
+    pub const SIZE: usize = 24;
+    /// Size of a descriptor carrying this body, header included.
+    pub const DESCRIPTOR_LEN: u32 = 56;
+    /// A zeroed value.
+    #[must_use]
+    pub const fn zeroed() -> Self {
+        // SAFETY: every field is an integer or an array of integers, so the
+        // all-zero bit pattern is a valid value of this type.
+        unsafe { core::mem::zeroed() }
+    }
+}
+
+/// Bind one device interrupt to a signal.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeviceIrqRequest {
+    /// Signal to raise; needs SIGNAL_RAISE through this handle.
+    pub signal_handle: u64,
+    /// Bits to raise when the interrupt arrives.
+    pub bits: u64,
+    /// Interrupt of the device to bind.
+    pub vector_index: u32,
+    /// Schema field `session`, little-endian `u32`.
+    pub session: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<DeviceIrqRequest>() == 24);
+const _: () = assert!(core::mem::align_of::<DeviceIrqRequest>() == 8);
+const _: () = assert!(core::mem::offset_of!(DeviceIrqRequest, signal_handle) == 0);
+const _: () = assert!(core::mem::offset_of!(DeviceIrqRequest, bits) == 8);
+const _: () = assert!(core::mem::offset_of!(DeviceIrqRequest, vector_index) == 16);
+const _: () = assert!(core::mem::offset_of!(DeviceIrqRequest, session) == 20);
+
+impl DeviceIrqRequest {
+    /// Size in bytes, as fixed by the schema.
+    pub const SIZE: usize = 24;
+    /// Size of a descriptor carrying this body, header included.
+    pub const DESCRIPTOR_LEN: u32 = 56;
+    /// A zeroed value.
+    #[must_use]
+    pub const fn zeroed() -> Self {
+        // SAFETY: every field is an integer or an array of integers, so the
+        // all-zero bit pattern is a valid value of this type.
+        unsafe { core::mem::zeroed() }
+    }
+}
+
+/// Change bus mastering, or reset the device and its session.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeviceControlRequest {
+    /// For bus mastering: one to enable, zero to disable.
+    pub enable: u32,
+    /// Schema field `session`, little-endian `u32`.
+    pub session: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<DeviceControlRequest>() == 8);
+const _: () = assert!(core::mem::align_of::<DeviceControlRequest>() == 4);
+const _: () = assert!(core::mem::offset_of!(DeviceControlRequest, enable) == 0);
+const _: () = assert!(core::mem::offset_of!(DeviceControlRequest, session) == 4);
+
+impl DeviceControlRequest {
+    /// Size in bytes, as fixed by the schema.
+    pub const SIZE: usize = 8;
+    /// Size of a descriptor carrying this body, header included.
+    pub const DESCRIPTOR_LEN: u32 = 40;
+    /// A zeroed value.
+    #[must_use]
+    pub const fn zeroed() -> Self {
+        // SAFETY: every field is an integer or an array of integers, so the
+        // all-zero bit pattern is a valid value of this type.
+        unsafe { core::mem::zeroed() }
+    }
+}
+
+/// Grant a device access to the pages of a memory object.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DmaMapRequest {
+    /// Memory object to pin; needs the read or write rights being granted.
+    pub memory_handle: u64,
+    /// Schema field `offset_pages`, little-endian `u32`.
+    pub offset_pages: u32,
+    /// Schema field `page_count`, little-endian `u32`.
+    pub page_count: u32,
+    /// Subset of MEMORY_READ and MEMORY_WRITE, from the device's point of view.
+    pub rights: u32,
+    /// DmaProfile the caller requires. A machine that cannot sustain it refuses with UNSUPPORTED_PROFILE rather than granting a weaker one.
+    pub required_profile: u32,
+    /// Schema field `session`, little-endian `u32`.
+    pub session: u32,
+    /// Reserved, must be zero.
+    pub reserved0: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<DmaMapRequest>() == 32);
+const _: () = assert!(core::mem::align_of::<DmaMapRequest>() == 8);
+const _: () = assert!(core::mem::offset_of!(DmaMapRequest, memory_handle) == 0);
+const _: () = assert!(core::mem::offset_of!(DmaMapRequest, offset_pages) == 8);
+const _: () = assert!(core::mem::offset_of!(DmaMapRequest, page_count) == 12);
+const _: () = assert!(core::mem::offset_of!(DmaMapRequest, rights) == 16);
+const _: () = assert!(core::mem::offset_of!(DmaMapRequest, required_profile) == 20);
+const _: () = assert!(core::mem::offset_of!(DmaMapRequest, session) == 24);
+const _: () = assert!(core::mem::offset_of!(DmaMapRequest, reserved0) == 28);
+
+impl DmaMapRequest {
+    /// Size in bytes, as fixed by the schema.
+    pub const SIZE: usize = 32;
+    /// Size of a descriptor carrying this body, header included.
+    pub const DESCRIPTOR_LEN: u32 = 64;
+    /// A zeroed value.
+    #[must_use]
+    pub const fn zeroed() -> Self {
+        // SAFETY: every field is an integer or an array of integers, so the
+        // all-zero bit pattern is a valid value of this type.
+        unsafe { core::mem::zeroed() }
+    }
+}
+
+/// What a device may reach, and under which session.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DmaGrantInfo {
+    /// Address the device uses. Not a CPU address and not derived from one by arithmetic.
+    pub iova: u64,
+    /// Schema field `length`, little-endian `u64`.
+    pub length: u64,
+    /// Schema field `rights`, little-endian `u32`.
+    pub rights: u32,
+    /// DmaProfile actually granted.
+    pub profile: u32,
+    /// Schema field `session`, little-endian `u32`.
+    pub session: u32,
+    /// Schema field `grant_index`, little-endian `u32`.
+    pub grant_index: u32,
+    /// Schema field `memory_object_id`, little-endian `u64`.
+    pub memory_object_id: u64,
+}
+
+const _: () = assert!(core::mem::size_of::<DmaGrantInfo>() == 40);
+const _: () = assert!(core::mem::align_of::<DmaGrantInfo>() == 8);
+const _: () = assert!(core::mem::offset_of!(DmaGrantInfo, iova) == 0);
+const _: () = assert!(core::mem::offset_of!(DmaGrantInfo, length) == 8);
+const _: () = assert!(core::mem::offset_of!(DmaGrantInfo, rights) == 16);
+const _: () = assert!(core::mem::offset_of!(DmaGrantInfo, profile) == 20);
+const _: () = assert!(core::mem::offset_of!(DmaGrantInfo, session) == 24);
+const _: () = assert!(core::mem::offset_of!(DmaGrantInfo, grant_index) == 28);
+const _: () = assert!(core::mem::offset_of!(DmaGrantInfo, memory_object_id) == 32);
+
+impl DmaGrantInfo {
+    /// Size in bytes, as fixed by the schema.
+    pub const SIZE: usize = 40;
+    /// Size of a descriptor carrying this body, header included.
+    pub const DESCRIPTOR_LEN: u32 = 72;
+    /// A zeroed value.
+    #[must_use]
+    pub const fn zeroed() -> Self {
+        // SAFETY: every field is an integer or an array of integers, so the
+        // all-zero bit pattern is a valid value of this type.
+        unsafe { core::mem::zeroed() }
+    }
+}
+
+/// Revoke a DMA grant. Refused while the device can still be issuing requests against it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DmaUnmapRequest {
+    /// Schema field `iova`, little-endian `u64`.
+    pub iova: u64,
+    /// Schema field `length`, little-endian `u64`.
+    pub length: u64,
+    /// Schema field `session`, little-endian `u32`.
+    pub session: u32,
+    /// Reserved, must be zero.
+    pub reserved0: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<DmaUnmapRequest>() == 24);
+const _: () = assert!(core::mem::align_of::<DmaUnmapRequest>() == 8);
+const _: () = assert!(core::mem::offset_of!(DmaUnmapRequest, iova) == 0);
+const _: () = assert!(core::mem::offset_of!(DmaUnmapRequest, length) == 8);
+const _: () = assert!(core::mem::offset_of!(DmaUnmapRequest, session) == 16);
+const _: () = assert!(core::mem::offset_of!(DmaUnmapRequest, reserved0) == 20);
+
+impl DmaUnmapRequest {
+    /// Size in bytes, as fixed by the schema.
+    pub const SIZE: usize = 24;
+    /// Size of a descriptor carrying this body, header included.
+    pub const DESCRIPTOR_LEN: u32 = 56;
     /// A zeroed value.
     #[must_use]
     pub const fn zeroed() -> Self {

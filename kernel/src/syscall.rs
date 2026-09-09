@@ -124,7 +124,10 @@ fn limits_query(domain: usize, frame: &mut TrapFrame) {
         return;
     }
 
-    let boot_epoch = MACHINE.lock().boot_epoch;
+    let (boot_epoch, cpus_online) = {
+        let machine = MACHINE.lock();
+        (machine.boot_epoch, machine.cpus_online as u32)
+    };
     let limits = Limits {
         major: thalyx_abi::VERSION_MAJOR,
         minor: thalyx_abi::VERSION_MINOR,
@@ -143,6 +146,11 @@ fn limits_query(domain: usize, frame: &mut TrapFrame) {
         cpu_quantum_ns: limit::CPU_QUANTUM_NS,
         page_size: limit::PAGE_SIZE,
         boot_epoch,
+        // What the machine actually brought up and confirmed, not what the
+        // firmware described: a program sizing its work by this number is
+        // sizing it by processors it can really be scheduled on.
+        cpus_online,
+        reserved0: 0,
     };
 
     // SAFETY of the copy is `copy_out`'s: it walks the domain's own tables and

@@ -45,6 +45,7 @@
 #define THALYX_TYPE_SIGNAL 6u
 #define THALYX_TYPE_TIMER 7u
 #define THALYX_TYPE_CONTROL_LOG 8u
+#define THALYX_TYPE_DEVICE 9u
 
 #define THALYX_RIGHT_INSPECT (1u << 0)
 #define THALYX_RIGHT_DERIVE (1u << 1)
@@ -78,6 +79,10 @@
 #define THALYX_RIGHT_LOG_READ (1u << 8)
 #define THALYX_RIGHT_LOG_APPEND (1u << 9)
 #define THALYX_RIGHT_LOG_ACK (1u << 10)
+#define THALYX_RIGHT_DEVICE_MAP (1u << 8)
+#define THALYX_RIGHT_DEVICE_IRQ (1u << 9)
+#define THALYX_RIGHT_DEVICE_DMA (1u << 10)
+#define THALYX_RIGHT_DEVICE_CONTROL (1u << 11)
 
 #define THALYX_OP_CAP_INSPECT 0x00000001u
 #define THALYX_OP_CAP_DERIVE 0x00000002u
@@ -130,6 +135,14 @@
 #define THALYX_OP_LOG_APPEND 0x00080002u
 #define THALYX_OP_LOG_ACK 0x00080003u
 #define THALYX_OP_LOG_QUERY 0x00080004u
+#define THALYX_OP_DEVICE_QUERY 0x00090001u
+#define THALYX_OP_DEVICE_MAP_REGION 0x00090002u
+#define THALYX_OP_DEVICE_UNMAP_REGION 0x00090003u
+#define THALYX_OP_DEVICE_BIND_IRQ 0x00090004u
+#define THALYX_OP_DEVICE_SET_MASTER 0x00090005u
+#define THALYX_OP_DEVICE_DMA_MAP 0x00090006u
+#define THALYX_OP_DEVICE_DMA_UNMAP 0x00090007u
+#define THALYX_OP_DEVICE_RESET 0x00090008u
 
 #define THALYX_STATUS_OK (0)
 #define THALYX_STATUS_UNSUPPORTED_ENTRY (-1)
@@ -152,6 +165,7 @@
 #define THALYX_STATUS_STATE_CONFLICT (-18)
 #define THALYX_STATUS_DRAIN_INCOMPLETE (-19)
 #define THALYX_STATUS_NOT_SUPPORTED (-20)
+#define THALYX_STATUS_UNSUPPORTED_PROFILE (-21)
 
 #define THALYX_SCOPE_STATE_OPEN 1u
 #define THALYX_SCOPE_STATE_FENCED 2u
@@ -191,11 +205,22 @@
 #define THALYX_CAP_LINEAGE_LIVE 1u
 #define THALYX_CAP_LINEAGE_FENCED 2u
 #define THALYX_CAP_LINEAGE_EXPIRED 3u
+#define THALYX_DMA_PROFILE_WEAK_TRUSTED_DRIVER 1u
+#define THALYX_DMA_PROFILE_STRONG_IOMMU 2u
+#define THALYX_DEVICE_STATE_READY 1u
+#define THALYX_DEVICE_STATE_RUNNING 2u
+#define THALYX_DEVICE_STATE_STOPPING 3u
+#define THALYX_DEVICE_STATE_STOPPED 4u
+#define THALYX_DEVICE_REGION_KIND_VIRTIO_COMMON 1u
+#define THALYX_DEVICE_REGION_KIND_VIRTIO_NOTIFY 2u
+#define THALYX_DEVICE_REGION_KIND_VIRTIO_ISR 3u
+#define THALYX_DEVICE_REGION_KIND_VIRTIO_DEVICE 4u
 
 #define THALYX_BOOT_SLOT_SELF_DOMAIN 1u
 #define THALYX_BOOT_SLOT_SELF_SCOPE 2u
 #define THALYX_BOOT_SLOT_CONTROL_LOG 3u
-#define THALYX_BOOT_SLOT_FIRST_MODULE 4u
+#define THALYX_BOOT_SLOT_FIRST_DEVICE 4u
+#define THALYX_BOOT_SLOT_FIRST_MODULE 8u
 
 /* Common descriptor header fixed by vault/architecture/abi.md. */
 typedef struct {
@@ -236,8 +261,10 @@ typedef struct {
     uint64_t cpu_quantum_ns; /* Schema field `cpu_quantum_ns`, little-endian `u64`. */
     uint64_t page_size; /* Schema field `page_size`, little-endian `u64`. */
     uint64_t boot_epoch; /* Schema field `boot_epoch`, little-endian `u64`. */
+    uint32_t cpus_online; /* Processors that completed the kernel's handshake and can be scheduled on. */
+    uint32_t reserved0; /* Reserved, must be zero. */
 } thalyx_limits_t;
-_Static_assert(sizeof(thalyx_limits_t) == 80, "Limits size");
+_Static_assert(sizeof(thalyx_limits_t) == 88, "Limits size");
 _Static_assert(_Alignof(thalyx_limits_t) == 8, "Limits alignment");
 _Static_assert(offsetof(thalyx_limits_t, major) == 0, "Limits.major offset");
 _Static_assert(offsetof(thalyx_limits_t, minor) == 2, "Limits.minor offset");
@@ -256,6 +283,8 @@ _Static_assert(offsetof(thalyx_limits_t, cpu_window_ns) == 48, "Limits.cpu_windo
 _Static_assert(offsetof(thalyx_limits_t, cpu_quantum_ns) == 56, "Limits.cpu_quantum_ns offset");
 _Static_assert(offsetof(thalyx_limits_t, page_size) == 64, "Limits.page_size offset");
 _Static_assert(offsetof(thalyx_limits_t, boot_epoch) == 72, "Limits.boot_epoch offset");
+_Static_assert(offsetof(thalyx_limits_t, cpus_online) == 80, "Limits.cpus_online offset");
+_Static_assert(offsetof(thalyx_limits_t, reserved0) == 84, "Limits.reserved0 offset");
 
 /* What one capability names and what its lineage still permits. */
 typedef struct {
@@ -928,5 +957,165 @@ _Static_assert(offsetof(thalyx_fault_report_t, rsp) == 48, "FaultReport.rsp offs
 _Static_assert(offsetof(thalyx_fault_report_t, address) == 56, "FaultReport.address offset");
 _Static_assert(offsetof(thalyx_fault_report_t, class) == 64, "FaultReport.class offset");
 _Static_assert(offsetof(thalyx_fault_report_t, reserved0) == 68, "FaultReport.reserved0 offset");
+
+/* One register region of a device the driver may be given. Offsets and lengths are the kernel's, validated against the base address register they live in. */
+typedef struct {
+    uint32_t kind; /* DeviceRegionKind. */
+    uint32_t bar; /* Base address register the region lives in. */
+    uint64_t offset; /* Byte offset inside that register's window. */
+    uint64_t length; /* Schema field `length`, little-endian `u64`. */
+    uint32_t flags; /* Bit 0: currently mapped into some domain. */
+    uint32_t notify_off_multiplier; /* Meaningful for the notify region only. */
+} thalyx_device_region_t;
+_Static_assert(sizeof(thalyx_device_region_t) == 32, "DeviceRegion size");
+_Static_assert(_Alignof(thalyx_device_region_t) == 8, "DeviceRegion alignment");
+_Static_assert(offsetof(thalyx_device_region_t, kind) == 0, "DeviceRegion.kind offset");
+_Static_assert(offsetof(thalyx_device_region_t, bar) == 4, "DeviceRegion.bar offset");
+_Static_assert(offsetof(thalyx_device_region_t, offset) == 8, "DeviceRegion.offset offset");
+_Static_assert(offsetof(thalyx_device_region_t, length) == 16, "DeviceRegion.length offset");
+_Static_assert(offsetof(thalyx_device_region_t, flags) == 24, "DeviceRegion.flags offset");
+_Static_assert(offsetof(thalyx_device_region_t, notify_off_multiplier) == 28, "DeviceRegion.notify_off_multiplier offset");
+
+/* Identity, state, authorised regions and isolation profile of one assigned device. */
+typedef struct {
+    uint32_t state; /* DeviceState. */
+    uint32_t session; /* Incremented by every reset. An operation naming an older session is refused. */
+    uint32_t bdf; /* Segment, bus, device and function packed as (segment<<16)|(bus<<8)|(device<<3)|function. */
+    uint32_t vendor_id; /* Schema field `vendor_id`, little-endian `u32`. */
+    uint32_t device_id; /* Schema field `device_id`, little-endian `u32`. */
+    uint32_t class_code; /* Class, subclass and programming interface. */
+    uint32_t region_count; /* Schema field `region_count`, little-endian `u32`. */
+    uint32_t irq_bound; /* Interrupts currently bound to a signal. */
+    uint32_t dma_grants; /* Schema field `dma_grants`, little-endian `u32`. */
+    uint32_t dma_profile; /* DmaProfile: what this machine can actually sustain, not what was asked for. */
+    uint32_t iommu_described; /* Firmware describes a remapping unit. */
+    uint32_t iommu_translating; /* This kernel has translation enabled for this device's group. */
+    uint32_t access_platform; /* The device negotiated platform-mediated access for its DMA. */
+    uint32_t bus_master; /* Bus mastering is enabled in configuration space. */
+    uint32_t dma_address_bits; /* Address width the kernel will hand the device. */
+    uint32_t isolation_group; /* Group this device shares an isolation boundary with. */
+    uint32_t group_members; /* Functions in that group. A group with more than one member is not a boundary of its own. */
+    uint32_t reserved0; /* Reserved, must be zero. */
+    uint64_t object_id; /* Schema field `object_id`, little-endian `u64`. */
+    uint64_t sponsor_scope_id; /* Schema field `sponsor_scope_id`, little-endian `u64`. */
+    uint8_t label[16]; /* Schema field `label`, little-endian `u8[16]`. */
+    thalyx_device_region_t regions[4]; /* Schema field `regions`, little-endian `struct:DeviceRegion[4]`. */
+} thalyx_device_info_t;
+_Static_assert(sizeof(thalyx_device_info_t) == 232, "DeviceInfo size");
+_Static_assert(_Alignof(thalyx_device_info_t) == 8, "DeviceInfo alignment");
+_Static_assert(offsetof(thalyx_device_info_t, state) == 0, "DeviceInfo.state offset");
+_Static_assert(offsetof(thalyx_device_info_t, session) == 4, "DeviceInfo.session offset");
+_Static_assert(offsetof(thalyx_device_info_t, bdf) == 8, "DeviceInfo.bdf offset");
+_Static_assert(offsetof(thalyx_device_info_t, vendor_id) == 12, "DeviceInfo.vendor_id offset");
+_Static_assert(offsetof(thalyx_device_info_t, device_id) == 16, "DeviceInfo.device_id offset");
+_Static_assert(offsetof(thalyx_device_info_t, class_code) == 20, "DeviceInfo.class_code offset");
+_Static_assert(offsetof(thalyx_device_info_t, region_count) == 24, "DeviceInfo.region_count offset");
+_Static_assert(offsetof(thalyx_device_info_t, irq_bound) == 28, "DeviceInfo.irq_bound offset");
+_Static_assert(offsetof(thalyx_device_info_t, dma_grants) == 32, "DeviceInfo.dma_grants offset");
+_Static_assert(offsetof(thalyx_device_info_t, dma_profile) == 36, "DeviceInfo.dma_profile offset");
+_Static_assert(offsetof(thalyx_device_info_t, iommu_described) == 40, "DeviceInfo.iommu_described offset");
+_Static_assert(offsetof(thalyx_device_info_t, iommu_translating) == 44, "DeviceInfo.iommu_translating offset");
+_Static_assert(offsetof(thalyx_device_info_t, access_platform) == 48, "DeviceInfo.access_platform offset");
+_Static_assert(offsetof(thalyx_device_info_t, bus_master) == 52, "DeviceInfo.bus_master offset");
+_Static_assert(offsetof(thalyx_device_info_t, dma_address_bits) == 56, "DeviceInfo.dma_address_bits offset");
+_Static_assert(offsetof(thalyx_device_info_t, isolation_group) == 60, "DeviceInfo.isolation_group offset");
+_Static_assert(offsetof(thalyx_device_info_t, group_members) == 64, "DeviceInfo.group_members offset");
+_Static_assert(offsetof(thalyx_device_info_t, reserved0) == 68, "DeviceInfo.reserved0 offset");
+_Static_assert(offsetof(thalyx_device_info_t, object_id) == 72, "DeviceInfo.object_id offset");
+_Static_assert(offsetof(thalyx_device_info_t, sponsor_scope_id) == 80, "DeviceInfo.sponsor_scope_id offset");
+_Static_assert(offsetof(thalyx_device_info_t, label) == 88, "DeviceInfo.label offset");
+_Static_assert(offsetof(thalyx_device_info_t, regions) == 104, "DeviceInfo.regions offset");
+
+/* Install or withdraw a mapping of one device region in a domain. */
+typedef struct {
+    uint64_t domain_handle; /* Domain to map into; needs DOMAIN_BUILD through this handle. */
+    uint64_t vaddr; /* Schema field `vaddr`, little-endian `u64`. */
+    uint32_t region_index; /* Schema field `region_index`, little-endian `u32`. */
+    uint32_t session; /* Session the caller believes the device is in. */
+} thalyx_device_map_request_t;
+_Static_assert(sizeof(thalyx_device_map_request_t) == 24, "DeviceMapRequest size");
+_Static_assert(_Alignof(thalyx_device_map_request_t) == 8, "DeviceMapRequest alignment");
+_Static_assert(offsetof(thalyx_device_map_request_t, domain_handle) == 0, "DeviceMapRequest.domain_handle offset");
+_Static_assert(offsetof(thalyx_device_map_request_t, vaddr) == 8, "DeviceMapRequest.vaddr offset");
+_Static_assert(offsetof(thalyx_device_map_request_t, region_index) == 16, "DeviceMapRequest.region_index offset");
+_Static_assert(offsetof(thalyx_device_map_request_t, session) == 20, "DeviceMapRequest.session offset");
+
+/* Bind one device interrupt to a signal. */
+typedef struct {
+    uint64_t signal_handle; /* Signal to raise; needs SIGNAL_RAISE through this handle. */
+    uint64_t bits; /* Bits to raise when the interrupt arrives. */
+    uint32_t vector_index; /* Interrupt of the device to bind. */
+    uint32_t session; /* Schema field `session`, little-endian `u32`. */
+} thalyx_device_irq_request_t;
+_Static_assert(sizeof(thalyx_device_irq_request_t) == 24, "DeviceIrqRequest size");
+_Static_assert(_Alignof(thalyx_device_irq_request_t) == 8, "DeviceIrqRequest alignment");
+_Static_assert(offsetof(thalyx_device_irq_request_t, signal_handle) == 0, "DeviceIrqRequest.signal_handle offset");
+_Static_assert(offsetof(thalyx_device_irq_request_t, bits) == 8, "DeviceIrqRequest.bits offset");
+_Static_assert(offsetof(thalyx_device_irq_request_t, vector_index) == 16, "DeviceIrqRequest.vector_index offset");
+_Static_assert(offsetof(thalyx_device_irq_request_t, session) == 20, "DeviceIrqRequest.session offset");
+
+/* Change bus mastering, or reset the device and its session. */
+typedef struct {
+    uint32_t enable; /* For bus mastering: one to enable, zero to disable. */
+    uint32_t session; /* Schema field `session`, little-endian `u32`. */
+} thalyx_device_control_request_t;
+_Static_assert(sizeof(thalyx_device_control_request_t) == 8, "DeviceControlRequest size");
+_Static_assert(_Alignof(thalyx_device_control_request_t) == 4, "DeviceControlRequest alignment");
+_Static_assert(offsetof(thalyx_device_control_request_t, enable) == 0, "DeviceControlRequest.enable offset");
+_Static_assert(offsetof(thalyx_device_control_request_t, session) == 4, "DeviceControlRequest.session offset");
+
+/* Grant a device access to the pages of a memory object. */
+typedef struct {
+    uint64_t memory_handle; /* Memory object to pin; needs the read or write rights being granted. */
+    uint32_t offset_pages; /* Schema field `offset_pages`, little-endian `u32`. */
+    uint32_t page_count; /* Schema field `page_count`, little-endian `u32`. */
+    uint32_t rights; /* Subset of MEMORY_READ and MEMORY_WRITE, from the device's point of view. */
+    uint32_t required_profile; /* DmaProfile the caller requires. A machine that cannot sustain it refuses with UNSUPPORTED_PROFILE rather than granting a weaker one. */
+    uint32_t session; /* Schema field `session`, little-endian `u32`. */
+    uint32_t reserved0; /* Reserved, must be zero. */
+} thalyx_dma_map_request_t;
+_Static_assert(sizeof(thalyx_dma_map_request_t) == 32, "DmaMapRequest size");
+_Static_assert(_Alignof(thalyx_dma_map_request_t) == 8, "DmaMapRequest alignment");
+_Static_assert(offsetof(thalyx_dma_map_request_t, memory_handle) == 0, "DmaMapRequest.memory_handle offset");
+_Static_assert(offsetof(thalyx_dma_map_request_t, offset_pages) == 8, "DmaMapRequest.offset_pages offset");
+_Static_assert(offsetof(thalyx_dma_map_request_t, page_count) == 12, "DmaMapRequest.page_count offset");
+_Static_assert(offsetof(thalyx_dma_map_request_t, rights) == 16, "DmaMapRequest.rights offset");
+_Static_assert(offsetof(thalyx_dma_map_request_t, required_profile) == 20, "DmaMapRequest.required_profile offset");
+_Static_assert(offsetof(thalyx_dma_map_request_t, session) == 24, "DmaMapRequest.session offset");
+_Static_assert(offsetof(thalyx_dma_map_request_t, reserved0) == 28, "DmaMapRequest.reserved0 offset");
+
+/* What a device may reach, and under which session. */
+typedef struct {
+    uint64_t iova; /* Address the device uses. Not a CPU address and not derived from one by arithmetic. */
+    uint64_t length; /* Schema field `length`, little-endian `u64`. */
+    uint32_t rights; /* Schema field `rights`, little-endian `u32`. */
+    uint32_t profile; /* DmaProfile actually granted. */
+    uint32_t session; /* Schema field `session`, little-endian `u32`. */
+    uint32_t grant_index; /* Schema field `grant_index`, little-endian `u32`. */
+    uint64_t memory_object_id; /* Schema field `memory_object_id`, little-endian `u64`. */
+} thalyx_dma_grant_info_t;
+_Static_assert(sizeof(thalyx_dma_grant_info_t) == 40, "DmaGrantInfo size");
+_Static_assert(_Alignof(thalyx_dma_grant_info_t) == 8, "DmaGrantInfo alignment");
+_Static_assert(offsetof(thalyx_dma_grant_info_t, iova) == 0, "DmaGrantInfo.iova offset");
+_Static_assert(offsetof(thalyx_dma_grant_info_t, length) == 8, "DmaGrantInfo.length offset");
+_Static_assert(offsetof(thalyx_dma_grant_info_t, rights) == 16, "DmaGrantInfo.rights offset");
+_Static_assert(offsetof(thalyx_dma_grant_info_t, profile) == 20, "DmaGrantInfo.profile offset");
+_Static_assert(offsetof(thalyx_dma_grant_info_t, session) == 24, "DmaGrantInfo.session offset");
+_Static_assert(offsetof(thalyx_dma_grant_info_t, grant_index) == 28, "DmaGrantInfo.grant_index offset");
+_Static_assert(offsetof(thalyx_dma_grant_info_t, memory_object_id) == 32, "DmaGrantInfo.memory_object_id offset");
+
+/* Revoke a DMA grant. Refused while the device can still be issuing requests against it. */
+typedef struct {
+    uint64_t iova; /* Schema field `iova`, little-endian `u64`. */
+    uint64_t length; /* Schema field `length`, little-endian `u64`. */
+    uint32_t session; /* Schema field `session`, little-endian `u32`. */
+    uint32_t reserved0; /* Reserved, must be zero. */
+} thalyx_dma_unmap_request_t;
+_Static_assert(sizeof(thalyx_dma_unmap_request_t) == 24, "DmaUnmapRequest size");
+_Static_assert(_Alignof(thalyx_dma_unmap_request_t) == 8, "DmaUnmapRequest alignment");
+_Static_assert(offsetof(thalyx_dma_unmap_request_t, iova) == 0, "DmaUnmapRequest.iova offset");
+_Static_assert(offsetof(thalyx_dma_unmap_request_t, length) == 8, "DmaUnmapRequest.length offset");
+_Static_assert(offsetof(thalyx_dma_unmap_request_t, session) == 16, "DmaUnmapRequest.session offset");
+_Static_assert(offsetof(thalyx_dma_unmap_request_t, reserved0) == 20, "DmaUnmapRequest.reserved0 offset");
 
 #endif /* THALYX_ABI_H */
