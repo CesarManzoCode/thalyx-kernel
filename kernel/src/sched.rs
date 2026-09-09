@@ -77,10 +77,37 @@ fn candidate(machine: &Machine, cpu: usize, index: usize) -> bool {
         return false;
     }
     match thread.state {
-        ThreadState::Ready => true,
+        ThreadState::Ready => !standing_elsewhere(machine, cpu, index),
         ThreadState::Running => machine.cpus[cpu].current == index,
         _ => false,
     }
+}
+
+/// Whether another processor is still standing on this thread's context.
+///
+/// The state is not enough to answer this, and assuming it was is how a
+/// blocking call turns into two processors on one kernel stack. A thread that
+/// blocks voluntarily writes its own state under the lock, drops the lock, and
+/// only then reaches the switch that saves its context. Anything that wakes it
+/// inside that window -- a reply from the peer it just published to, on another
+/// processor -- makes it `Ready` while the context another processor would
+/// resume has not been written yet. On one processor the window does not exist,
+/// because nothing else runs during it.
+///
+/// `current` and `previous` are what actually say "this processor is still on
+/// it": the first until this processor plans a switch away, the second until
+/// the incoming context publishes the outgoing one. Between them they cover the
+/// window with no gap.
+fn standing_elsewhere(machine: &Machine, cpu: usize, index: usize) -> bool {
+    for other in 0..MAX_CPUS {
+        if other == cpu || !machine.cpus[other].online {
+            continue;
+        }
+        if machine.cpus[other].current == index || machine.cpus[other].previous == index {
+            return true;
+        }
+    }
+    false
 }
 
 /// Execution to promise one dispatch.
