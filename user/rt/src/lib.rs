@@ -9,6 +9,7 @@
 #![no_std]
 
 pub mod k2;
+pub mod k3;
 
 use thalyx_abi::{note, scaffold, status};
 

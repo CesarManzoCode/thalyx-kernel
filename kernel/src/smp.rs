@@ -137,6 +137,7 @@ pub fn bootstrap_online(apic_id: u32) {
     machine.cpus[0].idle_thread = idle_thread(0);
     machine.cpus[0].current = idle_thread(0);
     machine.cpus_online = 1;
+    machine.cpus_started = 1;
 }
 
 /// Builds the address space an application processor enables paging with.
@@ -531,6 +532,7 @@ extern "C" fn ap_entry(cpu_index: u64) -> ! {
         machine.cpus[cpu].apic_id = apic_id;
         machine.cpus[cpu].cursor = 0;
         machine.cpus_online += 1;
+        machine.cpus_started += 1;
         machine.threads[idle_thread(cpu)].dispatched_ns = time::monotonic_ns().unwrap_or(0);
     }
     tlb::mark_online(cpu);

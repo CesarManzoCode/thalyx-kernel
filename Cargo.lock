@@ -135,6 +135,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "thalyx-user-k3driver"
+version = "0.3.1"
+dependencies = [
+ "thalyx-abi",
+ "thalyx-user-rt",
+]
+
+[[package]]
+name = "thalyx-user-k3super"
+version = "0.3.1"
+dependencies = [
+ "thalyx-abi",
+ "thalyx-user-rt",
+]
+
+[[package]]
+name = "thalyx-user-k3worker"
+version = "0.3.1"
+dependencies = [
+ "thalyx-abi",
+ "thalyx-user-rt",
+]
+
+[[package]]
 name = "thalyx-user-rt"
 version = "0.3.1"
 dependencies = [

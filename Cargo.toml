@@ -12,6 +12,9 @@ members = [
     "user/k2super",
     "user/k2server",
     "user/k2client",
+    "user/k3super",
+    "user/k3worker",
+    "user/k3driver",
 ]
 
 [workspace.package]
