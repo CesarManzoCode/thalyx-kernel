@@ -7,11 +7,15 @@
 //! "probably fine".
 
 use crate::arch::x86_64::cpu;
+use crate::arch::x86_64::idt;
 use crate::arch::x86_64::lapic;
-use crate::arch::x86_64::trap::{SPURIOUS_VECTOR, TIMER_VECTOR, TrapFrame};
+use crate::arch::x86_64::trap::{
+    RESCHEDULE_VECTOR, SPURIOUS_VECTOR, TIMER_VECTOR, TLB_VECTOR, TrapFrame,
+};
 use crate::event;
 use crate::sched;
 use crate::state::{MACHINE, ThreadKind};
+use crate::tlb;
 
 const VECTOR_PAGE_FAULT: u64 = 14;
 
@@ -26,7 +30,7 @@ pub fn note_user_entry(frame: &TrapFrame) {
     }
     let announce = {
         let mut machine = MACHINE.lock();
-        let current = machine.current;
+        let current = machine.current();
         if machine.threads[current].kind != ThreadKind::User
             || machine.threads[current].ring3_confirmed
         {
@@ -40,8 +44,9 @@ pub fn note_user_entry(frame: &TrapFrame) {
         let name = crate::domain::domain_name(domain);
         event!(
             "user.ring3_confirmed",
-            "domain={domain} name={name} thread={thread} cs=0x{:x} ss=0x{:x} cpl={} \
+            "cpu={} domain={domain} name={name} thread={thread} cs=0x{:x} ss=0x{:x} cpl={} \
              rflags=0x{:x} iopl={} rip=0x{:x}",
+            crate::percpu::index(),
             frame.cs,
             frame.ss,
             frame.cpl(),
@@ -50,6 +55,46 @@ pub fn note_user_entry(frame: &TrapFrame) {
             frame.rip
         );
     }
+}
+
+/// The three vectors that may arrive with a `GS` base that is not this
+/// processor's.
+///
+/// They run on their own stacks and they can interrupt the two instructions of
+/// the `syscall` entry, before the exchange that installs the per-processor
+/// block. Nothing on this path reads that block: the processor identifies
+/// itself from its own interrupt controller instead, and the record is written
+/// without taking a lock, because the interrupted context may hold one.
+fn diverted(frame: &TrapFrame, cr2: u64) -> ! {
+    let apic_id = lapic::local_apic_id();
+    let cpu = crate::percpu::index_by_apic_id(apic_id);
+    // SAFETY: interrupts are masked by the gate. Another processor could in
+    // principle be writing the diagnostic plane; the alternative is taking a
+    // lock the interrupted context may already hold, which would hang instead
+    // of reporting. The observability contract permits a lossy diagnostic
+    // record and forbids a silent one.
+    unsafe {
+        crate::diag::emit_event_unlocked(
+            "kernel.fatal_vector",
+            format_args!(
+                "vector={} apic_id={apic_id} cpu={} error=0x{:x} cr2=0x{cr2:x} rip=0x{:x} \
+                 cs=0x{:x} rsp=0x{:x} gs_trusted=0",
+                frame.vector,
+                match cpu {
+                    Some(index) => index as i64,
+                    None => -1,
+                },
+                frame.error_code,
+                frame.rip,
+                frame.cs,
+                frame.rsp
+            ),
+        );
+    }
+    panic!(
+        "fatal vector={} error=0x{:x} cr2=0x{:x} rip=0x{:x}",
+        frame.vector, frame.error_code, cr2, frame.rip
+    );
 }
 
 /// Handles one interrupt or exception.
@@ -61,6 +106,15 @@ pub fn handle(frame: &mut TrapFrame) {
         0
     };
 
+    // Before anything that reads per-processor state, because these three are
+    // the entries that may arrive without it.
+    if matches!(
+        frame.vector as usize,
+        idt::VECTOR_NMI | idt::VECTOR_DOUBLE_FAULT | idt::VECTOR_MACHINE_CHECK
+    ) {
+        diverted(frame, cr2);
+    }
+
     note_user_entry(frame);
 
     match frame.vector {
@@ -69,6 +123,17 @@ pub fn handle(frame: &mut TrapFrame) {
                 lapic.end_of_interrupt();
             }
             sched::on_tick(frame);
+        }
+        vector if vector == u64::from(TLB_VECTOR) => {
+            tlb::on_shootdown_interrupt();
+        }
+        vector if vector == u64::from(RESCHEDULE_VECTOR) => {
+            // Nothing to do beyond returning: the processor re-enters its idle
+            // loop, which is where it reconsiders what to run and whether the
+            // run is over.
+            if let Some(lapic) = lapic::current() {
+                lapic.end_of_interrupt();
+            }
         }
         vector if vector == u64::from(SPURIOUS_VECTOR) => {
             // A spurious interrupt is not acknowledged.
@@ -80,7 +145,8 @@ pub fn handle(frame: &mut TrapFrame) {
             }
             event!(
                 "irq.unexpected",
-                "vector={vector} cpl={} rip=0x{:x}",
+                "cpu={} vector={vector} cpl={} rip=0x{:x}",
+                crate::percpu::index(),
                 frame.cpl(),
                 frame.rip
             );

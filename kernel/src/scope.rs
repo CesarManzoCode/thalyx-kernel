@@ -123,6 +123,17 @@ pub struct Scope {
     pub queue_bytes: u64,
     /// Ordinary execution charged in the current window.
     pub cpu_window_ns: u64,
+    /// Ordinary execution promised to dispatches that have not been settled.
+    ///
+    /// This is what stops two processors from spending one balance. Both read
+    /// the same remaining budget, but only one of them can turn it into a
+    /// reservation, and the other is refused before it dispatches rather than
+    /// after it has already run.
+    pub cpu_reserved_ns: u64,
+    /// Closing capacity promised to recovery dispatches not yet settled.
+    pub closure_dispatch_ns: u64,
+    /// Threads dispatched on some processor charging this scope right now.
+    pub running: u32,
     /// Ordinary execution charged since creation.
     pub cpu_total_ns: u64,
     /// Overrun carried into later windows. Never cleared by a window change.
@@ -176,6 +187,9 @@ impl Scope {
             metadata: 0,
             queue_bytes: 0,
             cpu_window_ns: 0,
+            cpu_reserved_ns: 0,
+            closure_dispatch_ns: 0,
+            running: 0,
             cpu_total_ns: 0,
             cpu_debt_ns: 0,
             closure_used_ns: 0,
@@ -380,6 +394,14 @@ pub fn roll_window(table: &mut Table, now_ns: u64) {
         node.cpu_debt_ns = node.cpu_debt_ns.saturating_add(overrun);
         node.cpu_window_ns = overrun;
         node.closure_used_ns = 0;
+        // A reservation belongs to the window it was made in. Carrying it
+        // across the boundary would credit the new window with capacity the old
+        // one had promised, which is the delayed-settlement mistake the
+        // scheduling groundwork names. The dispatch that made it settles
+        // against the window it is in when it settles, and finds nothing to
+        // return here.
+        node.cpu_reserved_ns = 0;
+        node.closure_dispatch_ns = 0;
         node.window_index = window;
     }
 }
@@ -407,6 +429,125 @@ pub fn charge_cpu(table: &mut Table, scope: ScopeId, ns: u64, recovery: bool) {
             node.cpu_window_ns = node.cpu_window_ns.saturating_add(ns);
         }
     }
+}
+
+/// Execution `scope` and its ancestors can still promise this window.
+///
+/// The minimum over the chain, because a reservation has to fit in every
+/// ancestor, and zero when any of them is closed to new work.
+#[must_use]
+pub fn available_ns(table: &Table, scope: ScopeId, recovery: bool) -> u64 {
+    let mut available = u64::MAX;
+    ancestors(table, scope, |index| {
+        let node = &table[index];
+        let usable = if recovery {
+            !matches!(node.state, State::Retired | State::Empty)
+        } else {
+            matches!(node.state, State::Open | State::Fenced)
+        };
+        if !usable {
+            available = 0;
+            return;
+        }
+        let (used, limit) = if recovery {
+            (
+                node.closure_used_ns
+                    .saturating_add(node.closure_dispatch_ns),
+                node.limits.closure_reserve_ns,
+            )
+        } else {
+            (
+                node.cpu_window_ns.saturating_add(node.cpu_reserved_ns),
+                node.limits.cpu_budget_ns,
+            )
+        };
+        let left = limit.saturating_sub(used);
+        if left < available {
+            available = left;
+        }
+    });
+    if available == u64::MAX { 0 } else { available }
+}
+
+/// Takes `amount` of execution and one simultaneity slot in `scope` and every
+/// ancestor, or takes nothing.
+///
+/// This is the reservation the resource contract requires before a dispatch.
+/// It is one critical section over the whole chain: checking first and
+/// committing afterwards, in two steps, is exactly how two processors end up
+/// spending the same balance.
+pub fn reserve_dispatch(table: &mut Table, scope: ScopeId, amount: u64, recovery: bool) -> bool {
+    if available_ns(table, scope, recovery) < amount {
+        return false;
+    }
+    let mut fits = true;
+    ancestors(table, scope, |index| {
+        if table[index].running >= table[index].limits.parallelism {
+            fits = false;
+        }
+    });
+    if !fits {
+        return false;
+    }
+    let mut chain = [usize::MAX; thalyx_abi::limit::MAX_SCOPE_DEPTH as usize + 1];
+    let mut count = 0;
+    ancestors(table, scope, |index| {
+        if count < chain.len() {
+            chain[count] = index;
+            count += 1;
+        }
+    });
+    for index in &chain[..count] {
+        let node = &mut table[*index];
+        node.running = node.running.saturating_add(1);
+        if recovery {
+            node.closure_dispatch_ns = node.closure_dispatch_ns.saturating_add(amount);
+        } else {
+            node.cpu_reserved_ns = node.cpu_reserved_ns.saturating_add(amount);
+        }
+    }
+    true
+}
+
+/// Settles a dispatch: charges what was executed and returns what was not.
+///
+/// `window` is the window the reservation was made in. If the window has moved
+/// on, the reservation was already discarded at the boundary and there is
+/// nothing to return; charging still happens, against the window the scope is
+/// in now.
+pub fn settle_dispatch(
+    table: &mut Table,
+    scope: ScopeId,
+    reserved: u64,
+    window: u64,
+    recovery: bool,
+) {
+    let mut chain = [usize::MAX; thalyx_abi::limit::MAX_SCOPE_DEPTH as usize + 1];
+    let mut count = 0;
+    ancestors(table, scope, |index| {
+        if count < chain.len() {
+            chain[count] = index;
+            count += 1;
+        }
+    });
+    for index in &chain[..count] {
+        let node = &mut table[*index];
+        node.running = node.running.saturating_sub(1);
+        if node.window_index != window {
+            continue;
+        }
+        if recovery {
+            node.closure_dispatch_ns = node.closure_dispatch_ns.saturating_sub(reserved);
+        } else {
+            node.cpu_reserved_ns = node.cpu_reserved_ns.saturating_sub(reserved);
+        }
+    }
+}
+
+/// Highest simultaneity any scope in the table is holding.
+#[must_use]
+pub fn peak_running(table: &Table) -> u32 {
+    table.iter().map(|node| node.running).max().unwrap_or(0)
 }
 
 /// True when ordinary work charged to `scope` may still be dispatched.

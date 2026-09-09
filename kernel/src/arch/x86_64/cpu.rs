@@ -19,6 +19,12 @@ pub const MSR_LSTAR: u32 = 0xC000_0082;
 pub const MSR_FMASK: u32 = 0xC000_0084;
 /// `IA32_APIC_BASE`.
 pub const MSR_APIC_BASE: u32 = 0x1B;
+/// `IA32_GS_BASE`: base of the `GS` segment at the current privilege level.
+pub const MSR_GS_BASE: u32 = 0xC000_0101;
+/// `IA32_KERNEL_GS_BASE`: the base `swapgs` exchanges with `IA32_GS_BASE`.
+pub const MSR_KERNEL_GS_BASE: u32 = 0xC000_0102;
+/// Base of the x2APIC register block in the model-specific register space.
+pub const MSR_X2APIC_BASE: u32 = 0x800;
 
 /// `IA32_EFER.SCE`, enables SYSCALL/SYSRET.
 pub const EFER_SCE: u64 = 1 << 0;
@@ -40,6 +46,9 @@ pub const CR0_WP: u64 = 1 << 16;
 pub const CR4_OSFXSR: u64 = 1 << 9;
 /// `CR4.OSXMMEXCPT`, unmasked SIMD exceptions report as #XM.
 pub const CR4_OSXMMEXCPT: u64 = 1 << 10;
+/// `CR4.PGE`, global page extension. Never enabled: this kernel marks no
+/// mapping global, which is what makes a `CR3` reload a complete invalidation.
+pub const CR4_PGE: u64 = 1 << 7;
 /// `CR4.SMEP`, supervisor mode execution prevention.
 pub const CR4_SMEP: u64 = 1 << 20;
 /// `CR4.SMAP`, supervisor mode access prevention.
@@ -136,6 +145,22 @@ pub fn cpuid(leaf: u32, subleaf: u32) -> Cpuid {
     }
 }
 
+/// The local APIC identifier of the processor executing this call, from
+/// `CPUID`.
+///
+/// Read here rather than from the controller's own register because it is
+/// available before anything is mapped or enabled, and because the two
+/// interfaces report the identifier differently: the eight-bit initial
+/// identifier of leaf 1 is not the 32-bit x2APIC identifier of leaf 0x0B, and
+/// treating one as the other renames processors above 255.
+#[must_use]
+pub fn apic_id_from_cpuid(x2apic: bool) -> u32 {
+    if x2apic && cpuid(0, 0).eax >= 0x0B {
+        return cpuid(0x0B, 0).edx;
+    }
+    cpuid(1, 0).ebx >> 24
+}
+
 /// Reads the time-stamp counter.
 #[inline]
 #[must_use]
@@ -221,6 +246,38 @@ pub fn halt_forever() -> ! {
         // terminal state of the machine.
         unsafe { asm!("cli", "hlt", options(nomem, nostack)) }
     }
+}
+
+/// Invalidates every translation this processor caches.
+///
+/// A `CR3` reload retires every non-global entry and every paging-structure
+/// cache entry for the space it names. This kernel marks no mapping global —
+/// `CR4.PGE` is never set and no leaf carries the global bit — so "non-global"
+/// is every mapping there is, and the reload is a complete invalidation rather
+/// than a partial one that needs a second mechanism for the rest.
+///
+/// # Safety
+///
+/// The value in `CR3` must still be the root of an address space in which the
+/// code and stack executing here are mapped, which holds for every address
+/// space this kernel builds because they all share the kernel's upper half.
+#[inline]
+pub unsafe fn flush_tlb_all() {
+    // SAFETY: writing back the value already loaded changes no translation and
+    // is the architecturally defined way to invalidate the cached ones.
+    unsafe { write_cr3(read_cr3()) }
+}
+
+/// Orders every earlier store and load before the next instruction.
+///
+/// `WRMSR` to an x2APIC register is not a serialising instruction, so a store
+/// that publishes a request in memory is not automatically ordered before the
+/// interrupt that announces it. The fence pair is the ordering the SDM
+/// prescribes for exactly that case.
+#[inline]
+pub fn fence_before_wrmsr() {
+    // SAFETY: fences change no architectural state beyond ordering.
+    unsafe { asm!("mfence", "lfence", options(nostack, preserves_flags)) }
 }
 
 /// Invalidates one TLB entry.

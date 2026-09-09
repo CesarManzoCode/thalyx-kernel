@@ -67,15 +67,15 @@ struct DescriptorPointer {
 
 static mut IDT: [Entry; 256] = [Entry::empty(); 256];
 
-/// Fills and loads the descriptor table.
+/// Fills the descriptor table and loads it on the calling processor.
 ///
 /// # Safety
 ///
-/// Must run once during bootstrap, after the GDT is installed and after the
-/// emergency stacks are mapped and registered in the TSS.
+/// Must run once, on the bootstrap processor, after the GDT is installed and
+/// after the emergency stacks are mapped and registered in the TSS.
 pub unsafe fn install() {
-    // SAFETY: uniprocessor bootstrap with interrupts masked; no other reference
-    // to the table exists.
+    // SAFETY: the bootstrap processor is the only context in the machine when
+    // this runs, so no other reference to the table exists.
     unsafe {
         let idt = &raw mut IDT;
         for vector in 0..256usize {
@@ -87,6 +87,27 @@ pub unsafe fn install() {
             };
             (*idt)[vector] = Entry::interrupt_gate(trap::stub_address(vector), ist);
         }
+        load();
+    }
+}
+
+/// Loads the already-built table on the calling processor.
+///
+/// The table itself is shared. Sharing it is correct and duplicating it would
+/// not be an improvement: it is written once, before any processor but the
+/// bootstrap one exists, and never again. What must *not* be shared is the
+/// interrupt stack table it names, and that lives in each processor's own task
+/// state segment.
+///
+/// # Safety
+///
+/// Must run once per processor, with interrupts masked, after that processor's
+/// emergency stacks are registered in its own task state segment.
+pub unsafe fn load() {
+    // SAFETY: the table is a static built before any other processor started,
+    // and is only read from here on.
+    unsafe {
+        let idt = &raw const IDT;
         let pointer = DescriptorPointer {
             limit: (core::mem::size_of::<[Entry; 256]>() - 1) as u16,
             base: idt as u64,

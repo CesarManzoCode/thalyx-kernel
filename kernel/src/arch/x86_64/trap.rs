@@ -5,13 +5,44 @@
 //! away from at any of those points and resumed later through the same code,
 //! and it means the kernel has exactly one place where control returns to ring
 //! 3.
+//!
+//! Both directions of that boundary exchange `GS`, and the exchange is
+//! conditional on where the entry came from. An entry from ring 3 swaps, so the
+//! per-processor block is reachable; an entry from ring 0 does not, because the
+//! block is already loaded and swapping would install the user's base inside
+//! the kernel. The condition is read from the code selector the processor
+//! itself pushed, which is the only account of the origin that ring 3 cannot
+//! write. The return path applies the same test to the selector it is about to
+//! restore.
+//!
+//! The `syscall` instruction performs no stack switch, so the kernel does it,
+//! and the two instructions that do it need somewhere to put the interrupted
+//! user stack pointer. That slot is per-processor, reached through `GS` after
+//! the swap, which is what makes the window safe with more than one processor
+//! in the machine.
 
 use crate::arch::x86_64::gdt;
+use crate::percpu;
 
 /// Vector the local APIC timer is programmed to raise.
 pub const TIMER_VECTOR: u8 = 0x40;
+/// Vector one processor sends another to make it invalidate translations.
+pub const TLB_VECTOR: u8 = 0x41;
+/// Vector one processor sends another to make it reconsider what to run.
+pub const RESCHEDULE_VECTOR: u8 = 0x42;
+/// First vector assigned to a device interrupt.
+///
+/// Device vectors are a separate range from the exceptions, the timer and the
+/// interprocessor vectors above, so a vector is never both a device's and the
+/// kernel's, and a stale device interrupt cannot be mistaken for either.
+pub const DEVICE_VECTOR_BASE: u8 = 0x50;
+/// Device vectors available.
+pub const DEVICE_VECTOR_COUNT: u8 = 8;
 /// Vector programmed into the local APIC spurious-interrupt register.
 pub const SPURIOUS_VECTOR: u8 = 0xFF;
+
+const _: () = assert!(DEVICE_VECTOR_BASE > RESCHEDULE_VECTOR);
+const _: () = assert!(DEVICE_VECTOR_BASE as u16 + DEVICE_VECTOR_COUNT as u16 <= 0xFF);
 /// Pseudo-vector recorded for a `syscall` entry. Deliberately outside the
 /// 0..=255 interrupt range so a frame's origin is never ambiguous.
 pub const SYSCALL_VECTOR: u64 = 0x100;
@@ -74,6 +105,10 @@ pub struct TrapFrame {
 }
 
 const _: () = assert!(core::mem::size_of::<TrapFrame>() == 176);
+/// Byte offset of [`TrapFrame::cs`] from the start of the frame, which is where
+/// the return path stands when it decides whether to exchange `GS`.
+const FRAME_CS_OFFSET: usize = 144;
+const _: () = assert!(core::mem::offset_of!(TrapFrame, cs) == FRAME_CS_OFFSET);
 // The entry stub pushes 22 quadwords onto a 16-byte-aligned stack, so the
 // System V requirement that RSP is 16-byte aligned at a `call` holds without a
 // fixup.
@@ -154,6 +189,13 @@ core::arch::global_asm!(
     ".endr",
 
     "thalyx_trap_common:",
+    // The vector and error code are already pushed, so the selector the
+    // processor pushed sits three quadwords up. Its low two bits are the
+    // privilege level the entry came from.
+    "test byte ptr [rsp + 24], 3",
+    "jz 2f",
+    "swapgs",
+    "2:",
     "push r15",
     "push r14",
     "push r13",
@@ -178,6 +220,10 @@ core::arch::global_asm!(
 
     ".global thalyx_trap_return",
     "thalyx_trap_return:",
+    "test byte ptr [rsp + {frame_cs}], 3",
+    "jz 3f",
+    "swapgs",
+    "3:",
     "pop rax",
     "pop rbx",
     "pop rcx",
@@ -197,15 +243,16 @@ core::arch::global_asm!(
     "iretq",
 
     // `syscall` performs no stack switch, so the kernel does it. Interrupts are
-    // masked here by IA32_FMASK, which is what makes the two-instruction window
-    // around the scratch slot safe on a uniprocessor machine. The slot is
-    // replaced by per-CPU state through GS when SMP arrives.
+    // masked here by IA32_FMASK, and the scratch slot the switch uses belongs
+    // to this processor alone, which is what keeps the window safe when other
+    // processors are running.
     ".balign 16",
     "thalyx_syscall_entry:",
-    "mov qword ptr [rip + {user_rsp}], rsp",
-    "mov rsp, qword ptr [rip + {kernel_rsp}]",
+    "swapgs",
+    "mov gs:[{user_rsp}], rsp",
+    "mov rsp, gs:[{kernel_rsp}]",
     "push {user_ss}",
-    "push qword ptr [rip + {user_rsp}]",
+    "push qword ptr gs:[{user_rsp}]",
     "push r11",
     "push {user_cs}",
     "push rcx",
@@ -233,33 +280,24 @@ core::arch::global_asm!(
 
     trap_dispatch = sym trap_dispatch,
     syscall_dispatch = sym crate::arch::x86_64::syscall::syscall_dispatch,
-    user_rsp = sym SYSCALL_USER_RSP,
-    kernel_rsp = sym SYSCALL_KERNEL_RSP,
+    user_rsp = const percpu::OFFSET_USER_RSP,
+    kernel_rsp = const percpu::OFFSET_KERNEL_RSP,
+    frame_cs = const FRAME_CS_OFFSET,
     user_ss = const gdt::USER_DATA as u64,
     user_cs = const gdt::USER_CODE as u64,
     syscall_vector = const SYSCALL_VECTOR,
 );
 
-/// Scratch slot holding the interrupted user stack pointer between the two
-/// instructions of the `syscall` stack switch. Uniprocessor only.
-#[unsafe(no_mangle)]
-static mut SYSCALL_USER_RSP: u64 = 0;
-
-/// Kernel stack top the `syscall` entry switches to. Kept equal to the TSS
-/// ring 0 stack pointer by the context switch.
-#[unsafe(no_mangle)]
-static mut SYSCALL_KERNEL_RSP: u64 = 0;
-
-/// Points the `syscall` entry at a thread's kernel stack.
+/// Points this processor's `syscall` entry at a thread's kernel stack.
 ///
 /// # Safety
 ///
-/// `top` must be the top of the mapped kernel stack of the thread about to run,
-/// and interrupts must be masked.
+/// `top` must be the top of the mapped kernel stack of the thread about to run
+/// on this processor, and interrupts must be masked.
 pub unsafe fn set_syscall_stack(top: u64) {
-    // SAFETY: uniprocessor with interrupts masked; the only other reader is the
-    // assembly entry, which cannot run concurrently.
-    unsafe { SYSCALL_KERNEL_RSP = top };
+    // SAFETY: writes this processor's own per-processor block, whose only other
+    // reader is this processor's own entry stub.
+    unsafe { percpu::set_kernel_rsp(top) };
 }
 
 /// Dispatches one interrupt or exception. Called from the shared entry stub

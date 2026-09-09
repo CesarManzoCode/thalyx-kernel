@@ -5,7 +5,7 @@ status: observed
 ---
 # Estado actual
 
-**2026-09-09 · Fundación 0.1.0 · K0, K1 y K2 completos. K3–K6 pendientes.**
+**2026-09-09 · Fundación 0.1.0 · K0, K1 y K2 completos. K3 en curso. K4–K6 pendientes.**
 
 > **Punto de reanudación.** Este documento es el checkpoint. La sección [Reanudar aquí](#reanudar-aquí) dice exactamente dónde empieza el trabajo siguiente; no hace falta reauditar K0, K1 ni K2.
 
@@ -128,32 +128,25 @@ No existe: SMP, drivers propios, DMA, servicio de estado implementado, Thalyx so
 
 ## Reanudar aquí
 
-**Último hito terminado y pusheado:** K2 está **completo y cerrado**. Rama `feat/k2-objects-authority-work`, árbol limpio, HEAD local igual al remoto. No queda trabajo K2 a medias, ni en el árbol ni pendiente de decidir.
+**Último hito terminado y pusheado:** K3, primer hito — **arranque de procesadores de aplicación y planificación multinúcleo**. Rama `feat/k3-smp-devices`.
 
-**Qué está verde, medido en este árbol:** puerta K2 21/21, cobertura 51/51 sin ninguna operación sin tocar, autocomprobación 28/28, puerta K1 13/13 contra el mismo binario de kernel, ABI 4/4, vault 41 notas PASS, modelos PASS, `fmt` limpio, cero resultados inesperados en la ejecución, y la imagen K2 reconstruida byte a byte borrando `build/cargo`.
+**Qué está verde, medido en este árbol:** puerta K1 13/13, puerta K2 21/21, autocomprobación K2 28/28, cobertura 51/51, ABI 4/4, vault PASS, modelos PASS, `fmt` limpio. Además, la imagen K2 **completa su vertical entera con cuatro procesadores** (`-smp 4`, backend x2APIC) y termina en `no_runnable_domain` con estado `complete`.
 
-**Siguiente paso exacto al reanudar:** empezar K3. No hay nada que terminar antes. El paquete está descrito abajo y en [la ruta](phases.md); el primer movimiento es arrancar los procesadores de aplicación, porque todo lo demás de K3 depende de que exista más de un núcleo al que referirse.
+**Qué existe ya de K3:**
 
-**Bugs o bloqueos conocidos:** ninguno abierto. Cuatro cosas que conviene recordar porque ya mordieron, y que K3 va a volver a tocar:
+* `acpi.rs`: RSDP/XSDT/MADT/MCFG/DMAR validados por firma, longitud y checksum; mapa explícito `cpu_index → APIC ID`, BSP por identidad real, duplicados y entradas truncadas rechazados.
+* `percpu.rs`, GDT/TSS/IST por procesador, `swapgs` condicionado al nivel de privilegio del marco, y ranura de pila de `syscall` por procesador.
+* `arch/x86_64/ap.rs` + `smp.rs`: trampolín 16→32→64 bits en una página bajo 1 MiB, INIT/SIPI/SIPI con los tiempos del SDM, handshake explícito, y recursos por AP que nunca se reutilizan tras un timeout.
+* `lapic.rs`: backends xAPIC y x2APIC con IPI, con la valla explícita antes del `WRMSR` del ICR.
+* `tlb.rs`: generación de invalidación, acuse por generación, refresco antes de ejecutar usuario, y cuarentena de marcos en `mm/frame.rs`.
+* Planificación: reserva de saldo y de simultaneidad en todos los ancestros **antes** de despachar, decisión y reclamación del hilo en una sola sección crítica, y publicación diferida del hilo saliente.
 
-* **Un control negativo debe fallar por el motivo que dice.** La comprobación de derechos ocurre antes que la del cuerpo y antes que la del linaje, así que un control tiene que hacerse con un handle que **sí** lleve el derecho, o solo se observa la falta de derecho. Lo mismo al revés: un rechazo que llega con el estado equivocado invita a arreglar lo que no está roto, y eso ya costó dos correcciones.
-* **Las mutaciones del `--self-test` deben ser por patrón, no por literal.** Dos dejaron de dañar nada cuando cambiaron los contadores de la ejecución y pasaron en silencio.
-* **Una operación que informa sobre un estado muerto no puede estar detrás de la puerta que ese estado cierra.** Fue el defecto que hizo inalcanzable `CAP_DRAIN_STATUS`. K3 añade barreras entre núcleos, donde la misma forma de error es fácil de repetir.
-* **La cobertura se cuenta en el despacho, antes de los derechos.** Sirve para saber qué no se ha tocado; no sirve como prueba de que algo funciona. Lo que prueba eso son las comprobaciones de los programas sobre el resultado.
+**Siguiente paso exacto al reanudar:** conectar el shootdown a las operaciones que lo necesitan (`MEMORY_SEAL`, `DOMAIN_UNMAP`) sacándolas del despacho bajo cerrojo, y después el camino de dispositivos: PCI/ECAM, objeto `DEVICE`, MSI-X a señal, concesiones DMA y perfil de aislamiento.
 
-**Cómo repetir el estado actual:**
+**Bugs encontrados por ejecución en este hito, ya corregidos:** dos, ambos invisibles al compilador y ambos fatales:
 
-```sh
-export PATH="$HOME/.cargo/bin:$PATH"                     # rustfmt y cargo de la toolchain fijada
-export THALYX_TOOL_PREFIX=~/.cache/thalyx-tools/prefix   # si QEMU/OVMF/mtools no están en el sistema
-python3 tools/build_image.py --phase k1 && python3 tools/run_k1.py && python3 tools/check_k1.py --json build/k1-gate.json
-python3 tools/build_image.py --phase k2 && python3 tools/run_k2.py && python3 tools/check_k2.py
-python3 tools/check_k2.py --self-test
-python3 tools/check_abi.py && python3 tools/check_vault.py && python3 research/models/check_models.py
-cargo fmt --all --check
-```
-
-El orden importa: la puerta K2 lee el veredicto K1 de `build/k1-gate.json`, así que K1 va primero o el criterio de regresión no tiene qué leer.
+* seleccionar un hilo y marcarlo en ejecución en dos secciones críticas distintas dejaba que dos procesadores tomaran el mismo hilo y ejecutaran sobre una sola pila de kernel;
+* la reclamación comprobaba solo el `CR3` del procesador que reclamaba, de modo que liberaba la pila o el espacio de direcciones que otro procesador todavía estaba usando.
 
 ## Siguiente trabajo: K3
 

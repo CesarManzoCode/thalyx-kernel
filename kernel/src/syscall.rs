@@ -35,7 +35,7 @@ pub fn handle(frame: &mut TrapFrame) {
 
     let (domain, thread) = {
         let mut machine = MACHINE.lock();
-        let current = machine.current;
+        let current = machine.current();
         machine.threads[current].syscalls += 1;
         if machine.threads[current].kind != ThreadKind::User {
             // Ring 0 cannot execute `syscall` in this kernel; reaching here

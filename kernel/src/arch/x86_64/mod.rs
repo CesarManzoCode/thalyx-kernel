@@ -4,6 +4,7 @@
 //! transitions, model-specific registers or the local APIC lives under this
 //! module. Nothing above it does.
 
+pub mod ap;
 pub mod context;
 pub mod cpu;
 pub mod fpu;

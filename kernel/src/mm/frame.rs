@@ -6,11 +6,19 @@
 //! "frames are handed out zeroed" a statement about the allocator rather than
 //! about whoever released the frame last.
 //!
-//! Every allocation names an owner and is counted against it. Nothing here
-//! implements the sponsorship transfer, retention accounting or reservation
-//! ordering the resource contract requires; those need scopes, which K1 does
-//! not have. What it does provide is the conservation check that a domain
-//! teardown returns exactly the frames the domain was charged.
+//! Every allocation names an owner and is counted against it. What that gives
+//! is the conservation check that a domain teardown returns exactly the frames
+//! the domain was charged.
+//!
+//! A frame is not returned to the pool the moment its last mapping is removed.
+//! Another processor may still hold the translation, and handing the frame to a
+//! new owner before every processor has invalidated is exactly the dangerous
+//! reuse the memory contract forbids. So a released frame goes to a quarantine
+//! stamped with the invalidation generation at which it was retired, and comes
+//! back only once every online processor has flushed at that generation or
+//! later. A quarantine that fills up retains its frames rather than releasing
+//! them early: a visible, counted leak is the conservative failure, and an
+//! unsafe reuse is not.
 
 use thalyx_boot_protocol::{MemoryRegion, PAGE_SIZE, region_kind};
 
@@ -27,6 +35,29 @@ pub enum AllocError {
     OutOfMemory,
 }
 
+/// Frames the quarantine can hold at once.
+const QUARANTINE_SLOTS: usize = 1024;
+
+/// A frame waiting for every processor to have invalidated its translations.
+#[derive(Clone, Copy)]
+struct Quarantined {
+    used: bool,
+    frame: Frame,
+    owner: Owner,
+    generation: u64,
+}
+
+impl Quarantined {
+    const fn empty() -> Self {
+        Self {
+            used: false,
+            frame: Frame::containing(0),
+            owner: Owner::Kernel,
+            generation: 0,
+        }
+    }
+}
+
 /// Bitmap frame allocator over `[0, limit)`.
 pub struct FrameAllocator {
     /// One bit per frame; set means allocated or permanently unavailable.
@@ -36,6 +67,11 @@ pub struct FrameAllocator {
     usable: usize,
     hint: usize,
     charged: [usize; OWNER_SLOTS],
+    quarantine: [Quarantined; QUARANTINE_SLOTS],
+    quarantined: usize,
+    quarantine_peak: usize,
+    quarantine_retained: usize,
+    quarantine_released: usize,
 }
 
 impl FrameAllocator {
@@ -86,6 +122,11 @@ impl FrameAllocator {
             usable: 0,
             hint: 0,
             charged: [0; OWNER_SLOTS],
+            quarantine: [Quarantined::empty(); QUARANTINE_SLOTS],
+            quarantined: 0,
+            quarantine_peak: 0,
+            quarantine_retained: 0,
+            quarantine_released: 0,
         };
 
         for region in regions {
@@ -151,12 +192,134 @@ impl FrameAllocator {
         self.charged[owner.slot()]
     }
 
+    /// Frames waiting for an invalidation before they can be handed out again.
+    #[must_use]
+    pub const fn quarantined(&self) -> usize {
+        self.quarantined
+    }
+
+    /// Frames of `owner` currently in quarantine.
+    ///
+    /// Reported next to the owner's remaining charge so the two can be compared:
+    /// a teardown that left frames charged to a dead domain is either deferred
+    /// reclamation, in which case these two numbers are equal, or a leak, in
+    /// which case they are not.
+    #[must_use]
+    pub fn quarantined_for(&self, owner: Owner) -> usize {
+        self.quarantine
+            .iter()
+            .filter(|slot| slot.used && slot.owner == owner)
+            .count()
+    }
+
+    /// Most frames the quarantine has held at once.
+    #[must_use]
+    pub const fn quarantine_peak(&self) -> usize {
+        self.quarantine_peak
+    }
+
+    /// Frames the quarantine could not accept and is therefore holding for the
+    /// rest of the run. They stay charged to their owner: a leak that is
+    /// counted is a cost, an early release would be a correctness failure.
+    #[must_use]
+    pub const fn quarantine_retained(&self) -> usize {
+        self.quarantine_retained
+    }
+
+    /// Frames the quarantine has released back into the pool.
+    #[must_use]
+    pub const fn quarantine_released(&self) -> usize {
+        self.quarantine_released
+    }
+
+    /// Hands a frame to the quarantine instead of to the pool.
+    ///
+    /// The stamp is a fresh invalidation generation, so the frame is released
+    /// only after every online processor has flushed at a point later than this
+    /// call — whether or not the caller published an invalidation of its own.
+    pub fn retire(&mut self, frame: Frame, owner: Owner) {
+        let generation = crate::tlb::retire_stamp();
+        for slot in &mut self.quarantine {
+            if slot.used {
+                continue;
+            }
+            *slot = Quarantined {
+                used: true,
+                frame,
+                owner,
+                generation,
+            };
+            self.quarantined += 1;
+            if self.quarantined > self.quarantine_peak {
+                self.quarantine_peak = self.quarantined;
+            }
+            return;
+        }
+        self.quarantine_retained += 1;
+    }
+
+    /// Releases every quarantined frame every processor has invalidated past.
+    ///
+    /// Returns how many frames came back. The condition is read from the
+    /// invalidation module rather than supplied by the caller, so there is no
+    /// argument to get wrong.
+    pub fn drain_quarantine(&mut self) -> usize {
+        let safe = crate::tlb::safe_generation();
+        let mut released = 0usize;
+        for index in 0..QUARANTINE_SLOTS {
+            let slot = self.quarantine[index];
+            if !slot.used || slot.generation > safe {
+                continue;
+            }
+            self.quarantine[index].used = false;
+            self.quarantined -= 1;
+            released += 1;
+            // SAFETY: every online processor has flushed at a generation later
+            // than the one this frame was retired at, so no cached translation
+            // can reach it, and the caller of `retire` had already removed
+            // every page-table entry naming it.
+            unsafe { self.release(slot.frame, slot.owner) };
+        }
+        self.quarantine_released += released;
+        released
+    }
+
+    /// Allocates one zeroed frame below `limit` and charges it to `owner`.
+    ///
+    /// The application-processor trampoline needs this: a start-up interrupt
+    /// names its entry page in one byte, so the page has to be below one
+    /// mebibyte, and an allocator that can only say "some frame" cannot answer.
+    pub fn alloc_below(&mut self, limit: u64, owner: Owner) -> Result<Frame, AllocError> {
+        let bound = ((limit / PAGE_SIZE) as usize).min(self.frames);
+        // Frame zero is skipped: a physical address of zero is the value this
+        // kernel uses to mean "none" in several places, and handing it out as a
+        // trampoline page would make the two indistinguishable.
+        for index in 1..bound {
+            if self.test(index) {
+                continue;
+            }
+            self.set(index);
+            self.free -= 1;
+            self.charged[owner.slot()] += 1;
+            let frame = Frame::containing((index as u64) * PAGE_SIZE);
+            // SAFETY: the frame was free, so no other owner holds a reference
+            // to it, and the direct map covers it because the bitmap only ever
+            // tracked frames below the map limit.
+            unsafe { core::ptr::write_bytes(frame.hhdm_ptr(), 0, PAGE_SIZE as usize) };
+            return Ok(frame);
+        }
+        Err(AllocError::OutOfMemory)
+    }
+
     /// Allocates one zeroed frame and charges it to `owner`.
     ///
     /// Zeroing happens here, on the way out, so a frame released by one owner
     /// cannot reach another owner carrying residual bytes even if the releasing
     /// path was interrupted.
     pub fn alloc(&mut self, owner: Owner) -> Result<Frame, AllocError> {
+        if self.free == 0 {
+            self.drain_quarantine();
+        }
         let start = self.hint;
         let mut index = start;
         loop {
@@ -198,6 +361,7 @@ impl FrameAllocator {
         if count == 0 {
             return Err(AllocError::OutOfMemory);
         }
+        self.drain_quarantine();
         let count = count as usize;
         let mut index = 0usize;
         while index + count <= self.frames {
