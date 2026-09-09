@@ -54,6 +54,8 @@ pub mod entry {
     pub const LIMITS_QUERY: u64 = 2;
     /// Terminate the calling domain. RSI carries an exit code. Authority over oneself needs no capability.
     pub const EXIT: u64 = 3;
+    /// Monotonic nanoseconds since boot, in RDX. No handle, no descriptor, no authority: every deadline in this interface is one of these, and a program that cannot read the clock cannot state one.
+    pub const CLOCK_QUERY: u64 = 4;
 }
 
 /// Object type codes. The high 16 bits of every operation code.

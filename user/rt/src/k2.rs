@@ -22,7 +22,7 @@ use thalyx_abi::generated::{
     InstallCapRequest, InvocationInfo, Limits, LogAppendRequest, LogInfo, MapRequest, MemoryBytes,
     MemoryCreateRequest, MemoryInfo, ReceiveResult, ReplyRequest, ResolveRequest,
     ScopeCreateRequest, ScopeInfo, ScopeLimits, SendRequest, SignalBits, SignalInfo,
-    ThreadCreateRequest, entry, op, spec, status,
+    ThreadCreateRequest, TimerArmRequest, TimerCreateRequest, TimerInfo, entry, op, spec, status,
 };
 
 /// Offset of a descriptor body: everything before it is the common header.
@@ -221,6 +221,61 @@ pub fn limits() -> Result<Limits, i64> {
         )
     };
     if st == status::OK { Ok(value) } else { Err(st) }
+}
+
+/// Reads the monotonic clock, in nanoseconds since boot.
+///
+/// Every deadline this interface takes is one of these. A program computes one
+/// by reading the clock and adding to it; there is no relative form, because a
+/// relative deadline would start whenever the kernel happened to look at it.
+#[must_use]
+pub fn now_ns() -> u64 {
+    // SAFETY: the clock entry takes no handle, no descriptor and no pointer.
+    let (st, value) = unsafe { thalyx_abi::invoke(entry::CLOCK_QUERY, 0, 0, 0, 0, 0, 0) };
+    if st == status::OK { value } else { 0 }
+}
+
+/// Creates a timer that raises `bits` on a signal when its deadline passes.
+pub fn scope_create_timer(scope: u64, signal_handle: u64, bits: u64) -> Outcome {
+    with(
+        scope,
+        op::SCOPE_CREATE_TIMER,
+        0,
+        TimerCreateRequest {
+            signal_handle,
+            bits,
+        },
+    )
+}
+
+/// Arms a timer for an absolute monotonic deadline.
+pub fn timer_arm(timer: u64, deadline_ns: u64) -> Outcome {
+    with(timer, op::TIMER_ARM, 0, TimerArmRequest { deadline_ns })
+}
+
+/// Disarms a timer.
+pub fn timer_cancel(timer: u64) -> Outcome {
+    call_bare(timer, op::TIMER_CANCEL)
+}
+
+/// Reads a timer's armed deadline and how many times it has fired.
+pub fn timer_query(timer: u64) -> Result<TimerInfo, i64> {
+    query::<TimerInfo>(timer, op::TIMER_QUERY).map(|(info, _)| info)
+}
+
+/// Charges the calling thread's execution to an invocation's origin scope.
+///
+/// A server that holds work does not thereby get to do it for free. Binding
+/// makes the time attributable: the worker adopts the effective scope the
+/// kernel stamped on the invocation, and competes against that scope's own
+/// budget and parallelism rather than adding a second one.
+pub fn invocation_bind_worker(invocation: u64) -> Outcome {
+    call_bare(invocation, op::INVOCATION_BIND_WORKER)
+}
+
+/// Returns the calling thread to its own scope.
+pub fn invocation_unbind_worker(invocation: u64) -> Outcome {
+    call_bare(invocation, op::INVOCATION_UNBIND_WORKER)
 }
 
 /// Terminates the calling domain.
@@ -1009,6 +1064,12 @@ pub mod report {
     pub const LOG_LOSS: u64 = 0x2010;
     /// A closing receipt was written while the log was full of ordinary ones.
     pub const CLOSURE_RECORDED: u64 = 0x2011;
+    /// A worker bound its execution to an invocation's origin scope.
+    pub const BOUND: u64 = 0x2012;
+    /// A timer fired and raised its bits. Value: times fired.
+    pub const TIMER_FIRED: u64 = 0x2013;
+    /// The monotonic clock advanced between two readings. Value: the delta.
+    pub const CLOCK_ADVANCED: u64 = 0x2014;
 }
 
 /// Reports one observation on the diagnostic plane.

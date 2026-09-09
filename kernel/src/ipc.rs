@@ -348,6 +348,8 @@ pub struct Invocation {
     pub effect: Effect,
     /// Recovery time reserved when the effect was admitted.
     pub closure_reserved_ns: u64,
+    /// Scope whose closure reserve is holding that capacity.
+    pub closure_service: ScopeId,
     /// Monotonic time of admission.
     pub admitted_ns: u64,
     /// Message holding the payload while it is queued.
@@ -397,6 +399,7 @@ impl Invocation {
             cancel: Cancel::Live,
             effect: Effect::None,
             closure_reserved_ns: 0,
+            closure_service: 0,
             admitted_ns: 0,
             message: NO_MESSAGE,
             receiver_domain: u16::MAX,

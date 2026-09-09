@@ -16,9 +16,9 @@ Una segunda imagen UEFI construida solo desde fuentes con el mismo script y el m
 | Artefacto | Comando | Resultado |
 |---|---|---|
 | Imagen | `python3 tools/build_image.py --phase k2` | `build/thalyx-k2.img`, manifiesto con digest de cada artefacto y herramienta |
-| Ejecución | `python3 tools/run_k2.py` | `exit_status=33` (`k1.terminal status=complete`), 368 registros, ~1.6 s |
-| Veredicto | `python3 tools/check_k2.py` | `K2 GATE PASSED: 16 of 16 criteria met` |
-| Autocomprobación | `python3 tools/check_k2.py --self-test` | `16 of 16 damaged runs were caught` |
+| Ejecución | `python3 tools/run_k2.py` | `exit_status=33` (`k1.terminal status=complete`), 375 registros, ~1.6 s |
+| Veredicto | `python3 tools/check_k2.py` | `K2 GATE PASSED: 18 of 18 criteria met` |
+| Autocomprobación | `python3 tools/check_k2.py --self-test` | `20 of 20 damaged runs were caught` |
 
 Toolchain fijada: `rustc 1.98.1`, targets `x86_64-unknown-uefi` y `x86_64-unknown-none`, QEMU 11.1.1 con OVMF, perfil de CPU `qemu64,+smep,+smap,+pdpe1gb`, un solo núcleo, 512 MiB. El runner de K2 reutiliza el del K1 en lugar de repetir esos parámetros: si las dos fases corrieran en máquinas distintas, la comparación entre ellas mediría también el entorno.
 
@@ -29,10 +29,10 @@ Los contadores temporales de una ejecución —ticks, número de preempciones, v
 Digests de la ejecución registrada:
 
 ```text
-image   a04114cabb09a8905ed7af56f4c8bb6ec948aa8063e47b3cbeddc059ae951086
-kernel  14301bb1545115e94f9ace2a8c1baa02ff538031828cf4190555f809af5eb2a8
+image   95b3240e6a2d2254ae8a875749582a78bd03e47574bd1c97641d3aa55e47140a
+kernel  3a4e91ab708128596668ab3538bcaf6d8d619b59914d030cc1f69c81d320d66a
 loader  669c530b353b8aba9dfa58147167c6879765b3cbaeb109204c41764a1f7bea83
-package 74e5e2418ee88b592efad4edc7f26b33f895a6d74055a30a7fb6b115edf06796
+package a50dffb31b82c9fbd334dd280d219cb37a5f418281e960fcd9ab84e2f0e609db
 ```
 
 ## Qué observó la ejecución
@@ -64,6 +64,16 @@ La retirada se pidió sobre el ámbito abierto y se rechazó como conflicto de e
 Después de la barrera, la capacidad que el cliente había **delegado a otro dominio** dejó de funcionar: el servidor, que no está en el perímetro cerrado y seguía teniendo el handle, fue rechazado con ámbito cerrado. El propio cliente fue rechazado al intentar una nueva llamada.
 
 La obligación, en cambio, sobrevivió. El efecto se admitió antes de la barrera reservando capacidad de cierre en el ámbito del **servidor** y no en el del cliente que estaba siendo cerrado, y se resolvió después de ella. El servidor observó la invocación como `origin_fenced` —no solo como origen muerto— porque el cliente cancelado sigue existiendo hasta que decide parar. La llamada del cliente volvió `CANCELLED`.
+
+### Trabajo atribuible y recuperación
+
+El servidor se vinculó al ticket antes de anunciar el efecto: adoptó el ámbito efectivo que el kernel había estampado en la invocación, de modo que el tiempo lo pagó quien pidió el trabajo y no se duplicó presupuesto. Después de la barrera se volvió a vincular, y esa segunda vinculación es de recuperación: la cuenta pasó al ámbito **del servicio**, contra la reserva de cierre que su propio efecto había apartado por adelantado. Los registros nombran las dos cuentas y son distintas.
+
+### Reloj y expiración
+
+V0 toma un plazo monotónico en seis operaciones. Esta ejecución añadió la entrada que faltaba para poder expresarlo: una lectura del reloj, sin handle, sin descriptor y sin autoridad, porque el paso del tiempo no es autoridad y negarse a exponerlo mientras se aceptan plazos no los hace seguros sino inservibles.
+
+El supervisor leyó el reloj, armó un timer contra esa lectura, esperó a que levantara sus bits en una señal, comprobó que el reloj había avanzado y que el timer constaba disparado y desarmado. Armar con plazo cero se rechazó: cero es como esta interfaz escribe «sin plazo».
 
 ### Contabilidad
 
@@ -119,8 +129,10 @@ Compilar los 60 manejadores no encontró ninguno de estos siete defectos; ejecut
 6. La retirada marcaba el ámbito y no liberaba nada, reportando como retenido lo que nadie había intentado liberar.
 7. El despacho descartaba la respuesta de toda operación que rechazara, de modo que el informe de `SCOPE_RETIRE` —los contadores que `DRAIN_INCOMPLETE` manda mirar— nunca llegaba a quien tenía que mirarlos.
 8. El límite de paralelismo de un ámbito estaba declarado, se reportaba en su informe y no se comprobaba nunca: los hilos propios de un dominio no tomaban ranura y ninguna toma consultaba el límite antes de ocuparla.
+9. Una vinculación de recuperación cargaba el ámbito del cliente cerrado en lugar del ámbito del servicio. El contrato dice lo contrario y la ejecución mostró por qué importa: el ámbito cerrado puede tener reserva de cierre cero, y entonces el hilo que debía terminar la obligación quedaba permanentemente inejecutable. La reserva se comprobaba además contra lo gastado y no contra lo gastado más lo que otros efectos siguen reteniendo, de modo que era una reserva por adelantado solo de nombre.
+10. La interfaz tomaba plazos monotónicos absolutos en seis operaciones y no ofrecía forma de leer el reloj, así que ninguno de esos plazos podía expresarse.
 
-Los tres primeros son fallos de autoridad, los cuatro siguientes de contabilidad, liveness e interfaz, y el último de un límite que existía solo como número. Ninguno era visible sin ejecutar.
+Los tres primeros son fallos de autoridad, los cinco siguientes de contabilidad, liveness e interfaz, y el último un agujero en la propia interfaz. Ninguno era visible sin ejecutar.
 
 La misma revisión convirtió en comprobación varios datos que el kernel registraba y nadie leía: la generación con la que un registro de mapeo nombra su objeto y su dominio, la coincidencia entre el objeto que nombra una entrada de capacidad y el que autoriza su concesión, y el endpoint que una invocación registró al ser admitida. Cada uno era estado redundante en un diseño basado en índices de tabla; ahora cada uno es un invariante que se verifica.
 

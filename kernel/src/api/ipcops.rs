@@ -388,6 +388,7 @@ fn admit(
         cancel: Cancel::Live,
         effect: Effect::None,
         closure_reserved_ns: 0,
+        closure_service: 0,
         admitted_ns: ctx.now,
         message: message_index as u16,
         receiver_domain: receiver as u16,
@@ -780,6 +781,15 @@ fn release_invocation(machine: &mut Machine, index: usize) {
         machine.scopes[scope_index].effects_pending = machine.scopes[scope_index]
             .effects_pending
             .saturating_sub(1);
+        // The closing capacity this effect was holding goes back to the service
+        // that reserved it. Holding a reservation past the obligation it was
+        // taken for would shrink a service's reserve a little with every
+        // request it ever answered.
+        let service = invocation.closure_service as usize;
+        machine.scopes[service].closure_reserved_ns = machine.scopes[service]
+            .closure_reserved_ns
+            .saturating_sub(invocation.closure_reserved_ns);
+        machine.invocations[index].closure_reserved_ns = 0;
         machine.invocations[index].effect = Effect::Resolved;
     }
     machine.scopes[scope_index].last_progress_ns = crate::api::now_ns();
@@ -943,12 +953,18 @@ pub fn begin_effect(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> 
     // of the client that is being closed.
     let service = machine.domains[ctx.domain].owner_scope;
     let reserve = request.closure_reserve_ns;
-    let limits = machine.scopes[service as usize].limits.closure_reserve_ns;
-    if machine.scopes[service as usize].closure_used_ns + reserve > limits {
+    let node = &machine.scopes[service as usize];
+    let limits = node.limits.closure_reserve_ns;
+    // Spent, plus what other effects are still holding, plus this one. Checking
+    // only what has been spent would let every outstanding effect pass the same
+    // test and the reserve would be an advance reservation in name only.
+    if node.closure_used_ns + node.closure_reserved_ns + reserve > limits {
         return Err(status::LIMIT_EXHAUSTED);
     }
 
+    machine.scopes[service as usize].closure_reserved_ns += reserve;
     machine.invocations[index].effect = Effect::Admitted;
+    machine.invocations[index].closure_service = service;
     machine.invocations[index].closure_reserved_ns = reserve;
     machine.scopes[invocation.origin_scope as usize].effects_pending += 1;
 
@@ -1089,28 +1105,52 @@ pub fn bind_worker(machine: &mut Machine, ctx: &Ctx) -> Result<u64, i64> {
         return Err(status::STATE_CONFLICT);
     }
     let recovery = !scope::is_open(&machine.scopes, invocation.origin_scope);
-    // A borrowed worker competes for the origin's parallelism slots like any
-    // thread the origin owns. The exception is a recovery binding: the
-    // obligation still has to be finished, and refusing to bind a worker to it
-    // because the closed scope is busy would leave it unfinishable.
-    if !recovery && !scope::has_parallelism(&machine.scopes, invocation.origin_scope) {
+
+    // Who pays. Ordinarily the origin does: the client asked for the work, so
+    // the worker adopts the client's scope and competes against its budget
+    // instead of adding a second one.
+    //
+    // Recovery is the exception the authority contract grants, and it names the
+    // account: the service reserved closing capacity **in its own scope** in
+    // advance, and that is where the cost of finishing goes. Charging it to the
+    // closed client would be charging a budget nobody is allowed to spend any
+    // more -- and, since a closed scope's closure reserve may legitimately be
+    // zero, it would leave the obligation unfinishable rather than paid for.
+    // The exception does not return authority to the client and does not change
+    // whose invocation this is; the origin stays on the record.
+    let charged = if recovery {
+        machine.domains[ctx.domain].owner_scope
+    } else {
+        invocation.origin_scope
+    };
+
+    // A borrowed worker competes for the paying scope's parallelism slots like
+    // any thread that scope owns.
+    if !recovery && !scope::has_parallelism(&machine.scopes, charged) {
         return Err(status::LIMIT_EXHAUSTED);
     }
     if let Some(previous) = machine.threads[thread].parallelism_scope.take() {
         scope::drop_parallelism(&mut machine.scopes, previous);
     }
-    machine.threads[thread].effective_scope = invocation.origin_scope;
+    machine.threads[thread].effective_scope = charged;
     machine.threads[thread].recovery = recovery;
     machine.threads[thread].bound_invocation = Some((index as u16, invocation.generation));
-    scope::take_parallelism(&mut machine.scopes, invocation.origin_scope);
-    machine.threads[thread].parallelism_scope = Some(invocation.origin_scope);
+    scope::take_parallelism(&mut machine.scopes, charged);
+    machine.threads[thread].parallelism_scope = Some(charged);
     machine.invocations[index].refs += 1;
     event!(
         "sched.bound",
-        "thread={thread} domain={} invocation={} effective_scope={} recovery={}",
+        "thread={thread} domain={} invocation={} effective_scope={} origin_scope={} \
+         account={} recovery={}",
         machine.domains[ctx.domain].id,
         invocation.id,
+        machine.scopes[charged as usize].id,
         machine.scopes[invocation.origin_scope as usize].id,
+        if recovery {
+            "closure_reserve"
+        } else {
+            "origin_budget"
+        },
         u8::from(recovery)
     );
     Ok(invocation.id)

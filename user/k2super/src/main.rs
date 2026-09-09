@@ -23,10 +23,14 @@
 //!    fence's own receipt must be written even though the log is full, because
 //!    the cells that carry it were reserved for exactly this and ordinary
 //!    traffic can never occupy them.
-//! 5. Wait for the server to discharge it, then read a third report and retire
-//!    the scope. Retirement must be refused while anything is still pending and
+//! 5. Wait for the server to discharge it, then keep asking for the scope to be
+//!    retired. Retirement must be refused while anything is still pending and
 //!    permitted once nothing is, which is the difference between a barrier and
 //!    a drain being real.
+//! 6. Arm a timer against the monotonic clock and wait for it to raise its bits
+//!    on a signal. Every deadline in this interface is an absolute monotonic
+//!    reading, so a program that could not read the clock could not state one,
+//!    and none of them would be usable.
 //!
 //! The supervisor has no supervisor. Its fault ends the run.
 
@@ -65,6 +69,12 @@ const CLIENT_BUFFER: u32 = slot::CLIENT_BUFFER;
 
 /// Work between polls while waiting for a state only another domain can reach.
 const POLL_WORK: u64 = 20_000;
+/// Signal bit the timer raises. Distinct from the bits the server speaks on, so
+/// waiting for one cannot be satisfied by the other.
+const TIMER_BIT: u64 = 1 << 8;
+/// How far ahead the timer is armed. Longer than a scheduling quantum, so the
+/// wait is a real wait rather than a deadline that had already passed.
+const TIMER_DELAY_NS: u64 = 5_000_000;
 /// Polls before the supervisor gives up on a state that should have arrived.
 const POLL_LIMIT: u64 = 4096;
 
@@ -545,9 +555,72 @@ fn run() -> ! {
     k2::note(report::DRAIN, packed(&final_report));
     k2::note(report::BUILT, 5);
 
+    expiry(own_scope, signal);
+
     let _ = k2::log_append(log, receipt_kind::SERVICE_NOTE, 0x5417_0002, spins, 0);
     k2::note(report::DONE, 5);
     k2::exit(0)
+}
+
+/// Arms a timer against the monotonic clock and waits for it.
+///
+/// The clock read is the point as much as the timer is. Six operations of this
+/// interface take a deadline and every one of them means an absolute monotonic
+/// nanosecond; a program with no way to read the clock could only ever pass
+/// zero or a value already in the past, and the whole parameter would be
+/// decorative.
+fn expiry(scope: u64, signal: u64) {
+    let start = k2::now_ns();
+    if start == 0 {
+        k2::note(report::UNEXPECTED, 0);
+        return;
+    }
+
+    let timer = match k2::scope_create_timer(scope, signal, TIMER_BIT) {
+        Ok(handle) => handle,
+        Err(code) => {
+            k2::note(report::UNEXPECTED, code as u64);
+            return;
+        }
+    };
+
+    // A deadline in the past is a valid deadline; a deadline of zero is not,
+    // because zero is how the interface spells "no deadline at all".
+    k2::expect_refusal(k2::timer_arm(timer, 0), status::INVALID_ARGUMENT);
+
+    if let Err(code) = k2::timer_arm(timer, start + TIMER_DELAY_NS) {
+        k2::note(report::UNEXPECTED, code as u64);
+        return;
+    }
+    match k2::signal_wait(signal, TIMER_BIT, 0) {
+        Ok(_) => {}
+        Err(code) => {
+            k2::note(report::UNEXPECTED, code as u64);
+            return;
+        }
+    }
+
+    let after = k2::now_ns();
+    if after <= start {
+        k2::note(report::UNEXPECTED, after);
+        return;
+    }
+    k2::note(report::CLOCK_ADVANCED, after - start);
+
+    match k2::timer_query(timer) {
+        Ok(info) if info.fired > 0 && info.armed == 0 => {
+            k2::note(report::TIMER_FIRED, info.fired);
+        }
+        Ok(info) => k2::note(report::UNEXPECTED, info.fired),
+        Err(code) => k2::note(report::UNEXPECTED, code as u64),
+    }
+
+    // Disarming one that has already fired is not an error; arming and
+    // cancelling are the two halves a service needs to withdraw a deadline it
+    // no longer wants.
+    if let Err(code) = k2::timer_cancel(timer) {
+        k2::note(report::UNEXPECTED, code as u64);
+    }
 }
 
 rt::entry!(run);

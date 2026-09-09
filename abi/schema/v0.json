@@ -59,6 +59,11 @@
       "name": "EXIT",
       "value": 3,
       "doc": "Terminate the calling domain. RSI carries an exit code. Authority over oneself needs no capability."
+    },
+    {
+      "name": "CLOCK_QUERY",
+      "value": 4,
+      "doc": "Monotonic nanoseconds since boot, in RDX. No handle, no descriptor, no authority: every deadline in this interface is one of these, and a program that cannot read the clock cannot state one."
     }
   ],
   "object_types": [

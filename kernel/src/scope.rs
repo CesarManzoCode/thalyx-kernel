@@ -129,6 +129,8 @@ pub struct Scope {
     pub cpu_debt_ns: u64,
     /// Execution charged to the closure reserve.
     pub closure_used_ns: u64,
+    /// Closing capacity admitted effects are still holding but have not spent.
+    pub closure_reserved_ns: u64,
     /// Window the charges above belong to.
     pub window_index: u64,
     /// Threads whose owning domain belongs to this scope.
@@ -177,6 +179,7 @@ impl Scope {
             cpu_total_ns: 0,
             cpu_debt_ns: 0,
             closure_used_ns: 0,
+            closure_reserved_ns: 0,
             window_index: 0,
             threads: 0,
             parallelism_used: 0,

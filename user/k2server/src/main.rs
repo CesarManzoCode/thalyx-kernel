@@ -17,6 +17,14 @@
 //! scope. Those two facts together are what "the barrier reaches derived
 //! authority, not retained obligations" means in practice.
 //!
+//! It also binds itself to the ticket. A server that holds work does not do it
+//! for free: binding makes the time attributable, because the worker adopts the
+//! effective scope the kernel stamped on the invocation and competes against
+//! that scope's budget rather than adding a second one. After the barrier the
+//! same binding becomes a recovery binding, charged to the service's own
+//! closure reserve -- which is the accounting exception the authority contract
+//! grants and the only way an obligation to a closed client can be finished.
+//!
 //! Last, with its obligations discharged, it fills its own capability table
 //! until the kernel refuses. A domain that can accumulate handles for free can
 //! make the kernel's tables grow without ever exceeding a limit it was given,
@@ -90,6 +98,16 @@ fn run() -> ! {
         k2::note(report::UNEXPECTED, u64::from(message.cap_count));
     }
 
+    // Charge this thread's execution to whoever the work came from, before
+    // announcing the effect. The client pays for the service it asked for.
+    match k2::invocation_bind_worker(invocation) {
+        Ok(_) => k2::note(report::BOUND, message.header.sender_scope_id),
+        Err(code) => {
+            k2::note(report::UNEXPECTED, code as u64);
+            k2::exit(7);
+        }
+    }
+
     // Announce the effect and hold it. From here until the resolution below,
     // this domain owes the system a discharge that no barrier may cancel.
     if let Err(code) = k2::invocation_begin_effect(invocation, EFFECT_KIND, CLOSURE_RESERVE_NS) {
@@ -136,6 +154,17 @@ fn run() -> ! {
             k2::memory_read(message.caps[0], 0, &mut buffer),
             status::SCOPE_CLOSED,
         );
+    }
+
+    // The origin is closed, so the work left to do is recovery. Rebinding says
+    // so explicitly: the time from here is charged to this service's closure
+    // reserve rather than to the budget of a client that no longer has one.
+    if let Err(code) = k2::invocation_unbind_worker(invocation) {
+        k2::note(report::UNEXPECTED, code as u64);
+    }
+    match k2::invocation_bind_worker(invocation) {
+        Ok(_) => k2::note(report::BOUND, 0),
+        Err(code) => k2::note(report::UNEXPECTED, code as u64),
     }
 
     // The obligation, however, is this domain's own, sponsored by this domain's

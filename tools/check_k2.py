@@ -80,6 +80,9 @@ NOTE = {
     "bounded": 0x200F,
     "log_loss": 0x2010,
     "closure_recorded": 0x2011,
+    "bound": 0x2012,
+    "timer_fired": 0x2013,
+    "clock_advanced": 0x2014,
 }
 
 # Mirrors `thalyx_abi::generated::cancel_state` and `scope_state`.
@@ -616,6 +619,124 @@ def check_obligation_survives(records: list[Record], run: dict) -> Result:
     return result
 
 
+def check_work_tickets(records: list[Record], run: dict) -> Result:
+    result = Result("tickets", "trabajo atribuible y recuperación en su propia cuenta")
+    bound = by_event(records, "sched.bound")
+    if not bound:
+        result.detail = "no worker bound itself to an invocation, so no work was attributable"
+        return result
+
+    ordinary = [record for record in bound if record.get("recovery") == "0"]
+    recovery = [record for record in bound if record.get("recovery") == "1"]
+    if not ordinary:
+        result.detail = "no worker charged its execution to the scope the work came from"
+        return result
+    if ordinary[0].get("effective_scope") != ordinary[0].get("origin_scope"):
+        result.detail = (
+            "an ordinary binding charged a scope other than the origin's: the client asked "
+            "for the work and must pay for it"
+        )
+        return result
+    if ordinary[0].get("account") != "origin_budget":
+        result.detail = f"an ordinary binding charged {ordinary[0].get('account')}"
+        return result
+
+    fenced = by_event(records, "scope.fenced")
+    if not fenced:
+        result.detail = "no barrier was placed, so no binding could become recovery"
+        return result
+    if not recovery:
+        result.detail = (
+            "no recovery binding happened, so finishing an obligation to a closed client was "
+            "never charged to anything"
+        )
+        return result
+    late = recovery[-1]
+    if late.seq < fenced[0].seq:
+        result.detail = "a recovery binding preceded the barrier that should have caused it"
+        return result
+    if late.get("account") != "closure_reserve":
+        result.detail = f"the recovery binding charged {late.get('account')}"
+        return result
+    if late.get("effective_scope") == late.get("origin_scope"):
+        result.detail = (
+            "the recovery binding charged the closed origin's scope; the service reserves "
+            "closing capacity in its own scope and that is where the cost belongs"
+        )
+        return result
+
+    # The effect had to have been reserved against that same account.
+    effects = by_event(records, "effect.admitted")
+    if not effects:
+        result.detail = "no effect was admitted, so nothing reserved closing capacity"
+        return result
+    if effects[0].get("service_scope") != late.get("effective_scope"):
+        result.detail = (
+            f"closure was reserved in scope {effects[0].get('service_scope')} but spent from "
+            f"{late.get('effective_scope')}"
+        )
+        return result
+
+    reported = notes(records, "bound", SERVER)
+    if len(reported) < 2:
+        result.detail = f"the server reported {len(reported)} bindings; expected two"
+        return result
+
+    result.passed = True
+    result.detail = (
+        f"an ordinary binding charged the origin's budget (scope {ordinary[0].get('origin_scope')}) "
+        f"and, after the barrier, a recovery binding charged the service's closure reserve "
+        f"(scope {late.get('effective_scope')}), which is where the effect reserved it"
+    )
+    result.evidence = [line_of(ordinary[0]), line_of(late), line_of(effects[0])]
+    return result
+
+
+def check_clock_and_timers(records: list[Record], run: dict) -> Result:
+    result = Result("clock", "reloj monotónico legible y expiración observada")
+    advanced = notes(records, "clock_advanced")
+    fired = notes(records, "timer_fired")
+    if not advanced:
+        result.detail = "no program read the monotonic clock twice, so it never advanced"
+        return result
+    if (advanced[0].number("b") or 0) == 0:
+        result.detail = "the clock reported no advance between two readings"
+        return result
+    if not fired:
+        result.detail = "no timer fired"
+        return result
+    if (fired[0].number("b") or 0) == 0:
+        result.detail = "a timer was reported as fired zero times"
+        return result
+
+    created = by_event(records, "event.timer_created")
+    if not created:
+        created = [record for record in records if record.event.startswith("event.timer")]
+    if not created:
+        result.detail = "no timer was created through the interface"
+        return result
+
+    # A deadline of zero means "no deadline", so arming with it must be refused
+    # rather than treated as an instant expiry.
+    refused = [
+        record
+        for record in by_event(records, "k2.refused")
+        if record.get("op") == "TIMER_ARM" and record.signed("status") == INVALID_ARGUMENT
+    ]
+    if not refused:
+        result.detail = "arming a timer with no deadline was never attempted, so never refused"
+        return result
+
+    result.passed = True
+    result.detail = (
+        f"the clock advanced {advanced[0].number('b')} ns between two readings; a timer armed "
+        f"against it fired {fired[0].number('b')} time(s) and raised its bits, and arming with "
+        "a zero deadline was refused"
+    )
+    result.evidence = [line_of(advanced[0]), line_of(fired[0]), line_of(refused[0])]
+    return result
+
+
 def check_charge_conservation(records: list[Record], run: dict) -> Result:
     result = Result("charges", "conservación de cargos en la retirada")
     retired = by_event(records, "scope.retired")
@@ -925,6 +1046,8 @@ CRITERIA = [
     check_barrier_not_drain,
     check_barrier_reaches_delegated,
     check_obligation_survives,
+    check_work_tickets,
+    check_clock_and_timers,
     check_charge_conservation,
     check_bounded_tables,
     check_closure_available,
@@ -1010,6 +1133,15 @@ MUTATIONS = [
     ),
     ("no boot capability manifest", drop_event("k2.boot_capability"), "boot"),
     ("a gap in the record sequence", drop_event("sched.preempt"), "reproducible"),
+    ("no worker bound to an invocation", drop_event("sched.bound"), "tickets"),
+    (
+        "recovery charged to the closed client instead of the service",
+        rewrite("effective_scope=14 origin_scope=16 account=closure_reserve",
+                "effective_scope=16 origin_scope=16 account=origin_budget"),
+        "tickets",
+    ),
+    ("no timer fired", rewrite("a=0x2013 b=", "a=0x20fe b="), "clock"),
+    ("a clock that never advanced", rewrite("a=0x2014 b=", "a=0x20fd b="), "clock"),
 ]
 
 

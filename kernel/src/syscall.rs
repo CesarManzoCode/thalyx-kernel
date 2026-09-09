@@ -1,12 +1,13 @@
 //! Kernel entry dispatch.
 //!
-//! K2 assigns four entries. [`entry::VERSION_QUERY`] and [`entry::LIMITS_QUERY`]
-//! describe the interface and need no authority: a program has to be able to
-//! learn what it is talking to before it holds anything. [`entry::EXIT`] ends
-//! the caller, which is authority over oneself and therefore needs no
-//! capability. Everything else in the interface arrives through
-//! [`entry::INVOKE`], which names a handle and an operation and is the only
-//! entry that touches an object.
+//! K2 assigns five entries. [`entry::VERSION_QUERY`], [`entry::LIMITS_QUERY`]
+//! and [`entry::CLOCK_QUERY`] describe the interface and the moment, and need
+//! no authority: a program has to be able to learn what it is talking to before
+//! it holds anything, and every deadline this interface takes is a monotonic
+//! reading it must be able to obtain. [`entry::EXIT`] ends the caller, which is
+//! authority over oneself and therefore needs no capability. Everything else in
+//! the interface arrives through [`entry::INVOKE`], which names a handle and an
+//! operation and is the only entry that touches an object.
 //!
 //! That single invoking entry is the point of the shape. Structure, authority
 //! and effect are checked in that order in exactly one place ([`crate::api`]),
@@ -59,6 +60,15 @@ pub fn handle(frame: &mut TrapFrame) {
             let (code, aux) = crate::api::invoke(domain, thread, frame);
             frame.rax = code as u64;
             frame.rdx = aux;
+        }
+        entry::CLOCK_QUERY => {
+            // The monotonic reading, and nothing else. It names no object, so
+            // it needs no handle, and it reveals nothing another domain owns:
+            // the passage of time is not authority. Refusing to expose it while
+            // taking deadlines in six operations would make those deadlines
+            // unusable rather than safe.
+            frame.rax = k2status::OK as u64;
+            frame.rdx = crate::api::now_ns();
         }
         entry::LIMITS_QUERY => {
             if domain == usize::MAX {
