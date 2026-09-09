@@ -5,7 +5,9 @@ status: observed
 ---
 # Estado actual
 
-**2026-09-08 · Fundación 0.1.0 · K0, K1 y K2 completos. K3–K6 pendientes.**
+**2026-09-08 · Fundación 0.1.0 · K0 y K1 completos. K2 sustancialmente completo y en pausa con puerta verde; queda ampliar la cobertura de operaciones. K3–K6 pendientes.**
+
+> **Punto de reanudación.** Este documento es el checkpoint. La sección [Reanudar aquí](#reanudar-aquí) dice exactamente qué estaba en curso y cuál es el siguiente paso; no hace falta reauditar K0, K1 ni lo que K2 ya tiene puerta.
 
 ## Qué existe
 
@@ -81,13 +83,68 @@ Ejecutar los mecanismos encontró diez defectos que compilar no encuentra, y los
 | Puerta K2 | PASS en 20 criterios decididos por separado, la mayoría desde los registros del kernel. [Detalle y límites](../evidence/k2-objects-authority-work.md). |
 | Autocomprobación de la puerta K2 | 25 ejecuciones dañadas de una forma cada una, las 25 detectadas por el criterio que les corresponde. |
 
+Todas ejecutadas en el estado actual del árbol, con los mismos binarios: `fmt` limpio, ninguna advertencia de compilación ni de clippy en ningún archivo K2, ABI 4/4, vault 41 notas PASS, modelos PASS, puerta K1 13/13, puerta K2 20/20, autocomprobación 25/25, y cero resultados inesperados en la ejecución K2. La imagen K2 se reconstruye byte a byte desde un árbol limpio.
+
+## Cobertura real de la interfaz
+
+El kernel cuenta cuáles de las 51 operaciones asignadas alcanza el despacho y emite `k2.coverage` con el total, más un `k2.operation_untouched` por cada una que no se tocó. La última ejecución alcanza **42 de 51**.
+
+Las nueve que faltan, con lo que haría falta para ejercerlas:
+
+| Operación | Qué falta para ejercerla |
+|---|---|
+| `CAP_FENCE` | Cercar un grant concreto —la faceta del cliente— en lugar del ámbito entero. La barrera por grant es un camino distinto del de ámbito y no se ha recorrido. |
+| `CAP_DRAIN_STATUS` | Leer el informe de drenaje de ese grant cercado. |
+| `SCOPE_SET_LIMITS` | Estrechar los límites de un ámbito hijo ya creado, y comprobar que solo se puede dar menos. |
+| `DOMAIN_ADD_THREAD` | Añadir un hilo a un dominio en construcción; el control negativo con punto de entrada no mapeado también la alcanzaría. |
+| `DOMAIN_TERMINATE` | Terminar un dominio desde fuera. Lo limpio es un dominio de repuesto que se construye y se termina sin activarse nunca. |
+| `DOMAIN_QUERY` | Consultar el estado, hilos y fallos de un dominio. |
+| `SIGNAL_QUERY` | Consultar bits y secuencia de una señal. |
+| `LOG_READ` | Leer recibos por capacidad. El contrato de observabilidad afirma que el log es alcanzable por capacidad y **nada lo ha leído todavía**; esta es la más importante de las nueve. |
+| `LOG_ACK` | Reconocer recibos hasta una secuencia y ver que el log los suelta. |
+
+Ninguna de las nueve está sin implementar: todas tienen manejador y se despachan. Lo que falta es ejecutarlas.
+
 ## Qué no existe todavía
 
-Lo que K2 demuestra está acotado por lo que una vertical puede demostrar. Los mecanismos tienen más caminos de los que una ejecución recorre: los 51 manejadores del esquema no están todos ejercidos, y los que lo están lo están por un camino cada uno. EXP-02, EXP-03, EXP-04 y EXP-06 quedan ejecutados **en su alcance K2** —uniprocesador, sin dispositivos, sin estado durable— y sus partes de K3 y K4 siguen pendientes.
+Lo que K2 demuestra está acotado por lo que una vertical puede demostrar. Los mecanismos tienen más caminos de los que una ejecución recorre: 42 de las 51 operaciones están ejercidas, y las que lo están lo están por un camino cada una. EXP-02, EXP-03, EXP-04 y EXP-06 quedan ejecutados **en su alcance K2** —uniprocesador, sin dispositivos, sin estado durable— y sus partes de K3 y K4 siguen pendientes.
 
 No existe: SMP, drivers propios, DMA, servicio de estado implementado, Thalyx sobre este kernel, pruebas de hardware físico, mediciones de rendimiento o prueba formal general. El plano de diagnóstico de K1 sigue presente, sigue sin ser el plano de recibos, y sus dos entradas de andamiaje permanecen para que la regresión de K1 se siga ejecutando. El primer supervisor no tiene supervisor: su fallo termina la ejecución. No se ha retirado ni reemplazado Linux.
 
-## Siguiente trabajo
+## Reanudar aquí
+
+**Último hito terminado y pusheado:** `feat(k2): measure interface coverage, and answer an ordinary request`. Rama `feat/k2-objects-authority-work`, árbol limpio, HEAD local igual al remoto.
+
+**Qué se estaba implementando exactamente al pausar:** ampliar la vertical para alcanzar las nueve operaciones que la tabla de arriba enumera. Se llegó a añadir `DOMAIN_UNMAP` dentro de la publicación de la página sellada y la petición/respuesta ordinaria; lo demás no se empezó. Se retiró una edición a medias en `user/k2super/src/main.rs` que llamaba a tres funciones aún inexistentes, de modo que **no queda código a medias en el árbol**.
+
+**Siguiente paso exacto al reanudar:** en `user/k2super/src/main.rs`, añadir tres funciones y llamarlas desde `run` justo después de `budget(own_scope, server_scope);`:
+
+1. `receipts(log)` — `k2::log_read` sobre el log de control, comprobar que devuelve recibos y que sus orígenes son los que el kernel estampó; después `k2::log_acknowledge` hasta una secuencia y un segundo `log_read` que devuelva menos. Alcanza `LOG_READ` y `LOG_ACK`.
+2. `grant_barrier(facet)` — derivar de la faceta, `k2::cap_fence` sobre esa derivación y `k2::cap_drain_status` sobre ella, comprobando que la faceta original sigue viva. Alcanza `CAP_FENCE` y `CAP_DRAIN_STATUS`, y demuestra que la barrera por grant no es la barrera por ámbito.
+3. `spare_domain(own_scope, image)` — crear un dominio de repuesto desde la imagen del cliente en el ámbito `system`, `k2::domain_query` sobre él, `k2::domain_add_thread` con un punto de entrada no mapeado como control negativo (`INVALID_ARGUMENT`), y `k2::domain_terminate`. Nunca se activa. Alcanza `DOMAIN_QUERY`, `DOMAIN_ADD_THREAD` y `DOMAIN_TERMINATE`.
+
+Falta también `SCOPE_SET_LIMITS`: estrechar los límites del ámbito `srv` antes de crear el servidor, y comprobar que pedir más de lo que el padre tiene se rechaza.
+
+Los bindings de runtime para las nueve ya existen en `user/rt/src/k2.rs` (`log_read`, `log_acknowledge`, `cap_fence`, `cap_drain_status`, `domain_query`, `signal_query`, `scope_set_limits`, `domain_add_thread`, `domain_terminate`). No hay que escribirlos.
+
+Después: subir el criterio de cobertura a la puerta —exigir que `k2.coverage` alcance las 51— con su mutación en `--self-test`, y actualizar la tabla de arriba, la evidencia y el CHANGELOG.
+
+**Bugs o bloqueos conocidos:** ninguno abierto. Dos cosas que conviene recordar porque ya mordieron una vez:
+
+* Un control negativo debe fallar por el motivo que dice. Varios rechazos llegaron con el estado equivocado porque la comprobación de derechos ocurre antes que la del cuerpo: si se prueba un descriptor malformado hay que hacerlo con una operación sobre la que el llamante **sí** tiene derecho, o solo se observa la falta de derecho.
+* Las mutaciones del `--self-test` deben ser por patrón, no por literal. Dos dejaron de dañar nada cuando cambiaron los contadores de la ejecución y pasaron en silencio.
+
+**Cómo repetir el estado actual:**
+
+```sh
+export THALYX_TOOL_PREFIX=~/.cache/thalyx-tools/prefix   # si QEMU/OVMF/mtools no están en el sistema
+python3 tools/build_image.py --phase k1 && python3 tools/run_k1.py && python3 tools/check_k1.py --json build/k1-gate.json
+python3 tools/build_image.py --phase k2 && python3 tools/run_k2.py && python3 tools/check_k2.py
+python3 tools/check_k2.py --self-test
+python3 tools/check_abi.py && python3 tools/check_vault.py && python3 research/models/check_models.py
+```
+
+## Siguiente trabajo (después de cerrar K2)
 
 Ejecutar el paquete K3 descrito en [la ruta](phases.md): arranque de procesadores de aplicación, planificación con presupuesto agregado entre núcleos, sincronización, invalidación de TLB entre núcleos y reclamación diferida; después el primer driver propio con IRQ y buffers separados, y el perfil de aislamiento que declare honestamente sus dependencias de IOMMU.
 
