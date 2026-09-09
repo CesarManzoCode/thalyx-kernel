@@ -1,0 +1,2409 @@
+{
+  "schema": "thalyx-abi/v0",
+  "comment": [
+    "Single source of the Thalyx-Kernel V0 binary interface. The Rust bindings,",
+    "the C header and the layout fixtures are generated from this file by",
+    "tools/gen_abi.py; nothing in abi/src/generated.rs, abi/src/fixture.rs or",
+    "abi/include/thalyx_abi.h is written by hand. vault/architecture/abi.md fixes",
+    "the register contract, the 32-byte descriptor header, the 4 KiB descriptor",
+    "bound and the 256-byte inline payload bound; this file assigns the numbers",
+    "K2 needs and nothing beyond them.",
+    "Every structure is little-endian with explicit padding: the generator",
+    "refuses a structure that would need implicit padding, so no uninitialised",
+    "byte ever crosses the boundary."
+  ],
+  "version": {
+    "major": 0,
+    "minor": 2
+  },
+  "limits": {
+    "max_descriptor_len": 4096,
+    "max_inline_payload": 256,
+    "max_caps_per_message": 4,
+    "max_scope_depth": 16,
+    "max_derive_depth": 32,
+    "max_handles_per_domain": 32,
+    "max_endpoint_queue": 8,
+    "max_memory_pages_per_object": 512,
+    "cpu_window_ns": 10000000,
+    "cpu_quantum_ns": 1000000,
+    "page_size": 4096,
+    "control_log_capacity": 64,
+    "control_log_reserved": 8,
+    "receipt_batch": 4
+  },
+  "flags": [
+    {
+      "name": "NONBLOCKING",
+      "bit": 0,
+      "doc": "Refuse to wait: an operation that would have blocked returns WOULD_BLOCK instead. Carried in the flags register, never in the descriptor."
+    }
+  ],
+  "entries": [
+    {
+      "name": "VERSION_QUERY",
+      "value": 0,
+      "doc": "Reserved version query. No handle, no descriptor, no authority."
+    },
+    {
+      "name": "INVOKE",
+      "value": 1,
+      "doc": "Operation addressed to a handle. RDI handle, RSI operation, RDX descriptor, R10 length, R8 flags, R9 deadline."
+    },
+    {
+      "name": "LIMITS_QUERY",
+      "value": 2,
+      "doc": "Effective interface limits. No handle; writes a Limits descriptor."
+    },
+    {
+      "name": "EXIT",
+      "value": 3,
+      "doc": "Terminate the calling domain. RSI carries an exit code. Authority over oneself needs no capability."
+    },
+    {
+      "name": "CLOCK_QUERY",
+      "value": 4,
+      "doc": "Monotonic nanoseconds since boot, in RDX. No handle, no descriptor, no authority: every deadline in this interface is one of these, and a program that cannot read the clock cannot state one."
+    }
+  ],
+  "object_types": [
+    {
+      "name": "NONE",
+      "value": 0,
+      "doc": "Common operations valid on any typed handle."
+    },
+    {
+      "name": "SCOPE",
+      "value": 1,
+      "doc": "Resource principal: limits, accounting, fence, drain, retire."
+    },
+    {
+      "name": "DOMAIN",
+      "value": 2,
+      "doc": "Protection boundary: address space and capability table."
+    },
+    {
+      "name": "MEMORY",
+      "value": 3,
+      "doc": "Sequence of physical pages with maximum rights and a seal state."
+    },
+    {
+      "name": "ENDPOINT",
+      "value": 4,
+      "doc": "Bounded message queue with one owner and explicit facets."
+    },
+    {
+      "name": "INVOCATION",
+      "value": 5,
+      "doc": "Admitted work: origin, grant, reply, effect admission and resolution."
+    },
+    {
+      "name": "SIGNAL",
+      "value": 6,
+      "doc": "Coalescing bits with a sequence number."
+    },
+    {
+      "name": "TIMER",
+      "value": 7,
+      "doc": "Monotonic expiry bound to a signal."
+    },
+    {
+      "name": "CONTROL_LOG",
+      "value": 8,
+      "doc": "Bounded control-receipt ring with reserved cells."
+    }
+  ],
+  "rights": {
+    "common": [
+      {
+        "name": "INSPECT",
+        "bit": 0,
+        "doc": "Query the object's own state."
+      },
+      {
+        "name": "DERIVE",
+        "bit": 1,
+        "doc": "Create attenuated children of this grant."
+      },
+      {
+        "name": "TRANSFER",
+        "bit": 2,
+        "doc": "Send this capability through IPC or install it into a domain."
+      },
+      {
+        "name": "DESTROY",
+        "bit": 3,
+        "doc": "Destroy the object itself, not merely the handle."
+      },
+      {
+        "name": "ADMIN",
+        "bit": 4,
+        "doc": "Fence this grant lineage and read its drain status."
+      }
+    ],
+    "by_type": {
+      "SCOPE": [
+        {
+          "name": "SCOPE_CREATE",
+          "bit": 8,
+          "doc": "Factory right: create objects charged to this scope."
+        },
+        {
+          "name": "SCOPE_LIMIT",
+          "bit": 9,
+          "doc": "Change ceilings and create children."
+        },
+        {
+          "name": "SCOPE_FENCE",
+          "bit": 10,
+          "doc": "Fence, drain and retire this scope."
+        },
+        {
+          "name": "SCOPE_EXEC",
+          "bit": 11,
+          "doc": "Run work charged to this scope."
+        }
+      ],
+      "DOMAIN": [
+        {
+          "name": "DOMAIN_BUILD",
+          "bit": 8,
+          "doc": "Install maps, capabilities and threads while building."
+        },
+        {
+          "name": "DOMAIN_ACTIVATE",
+          "bit": 9,
+          "doc": "Cross the activation gate once."
+        },
+        {
+          "name": "DOMAIN_STOP",
+          "bit": 10,
+          "doc": "Terminate the domain."
+        },
+        {
+          "name": "DOMAIN_WAIT",
+          "bit": 11,
+          "doc": "Observe state, faults and exit."
+        }
+      ],
+      "MEMORY": [
+        {
+          "name": "MEMORY_READ",
+          "bit": 8,
+          "doc": "Read the bytes, directly or through a mediated copy."
+        },
+        {
+          "name": "MEMORY_WRITE",
+          "bit": 9,
+          "doc": "Write the bytes. Does not imply MEMORY_READ."
+        },
+        {
+          "name": "MEMORY_EXECUTE",
+          "bit": 10,
+          "doc": "Map executable."
+        },
+        {
+          "name": "MEMORY_MAP",
+          "bit": 11,
+          "doc": "Install a hardware mapping in an authorised domain."
+        },
+        {
+          "name": "MEMORY_SEAL",
+          "bit": 12,
+          "doc": "Withdraw writers and publish the sealed state."
+        }
+      ],
+      "ENDPOINT": [
+        {
+          "name": "ENDPOINT_SEND",
+          "bit": 8,
+          "doc": "Asynchronous bounded send."
+        },
+        {
+          "name": "ENDPOINT_CALL",
+          "bit": 9,
+          "doc": "Synchronous call with a one-shot reply."
+        },
+        {
+          "name": "ENDPOINT_RECEIVE",
+          "bit": 10,
+          "doc": "Receive admitted messages."
+        },
+        {
+          "name": "ENDPOINT_BIND",
+          "bit": 11,
+          "doc": "Administration: mint a send capability carrying a facet."
+        }
+      ],
+      "INVOCATION": [
+        {
+          "name": "INVOCATION_REPLY",
+          "bit": 8,
+          "doc": "Consume the one-shot reply."
+        },
+        {
+          "name": "INVOCATION_EFFECT",
+          "bit": 9,
+          "doc": "Admit one effect against the original lineage."
+        },
+        {
+          "name": "INVOCATION_RESOLVE",
+          "bit": 10,
+          "doc": "Resolve the retained obligation."
+        },
+        {
+          "name": "INVOCATION_BIND",
+          "bit": 11,
+          "doc": "Bind a worker's effective scope to this ticket."
+        }
+      ],
+      "SIGNAL": [
+        {
+          "name": "SIGNAL_RAISE",
+          "bit": 8,
+          "doc": "Set bits."
+        },
+        {
+          "name": "SIGNAL_WAIT",
+          "bit": 9,
+          "doc": "Wait for bits and consume them."
+        }
+      ],
+      "TIMER": [
+        {
+          "name": "TIMER_ARM",
+          "bit": 8,
+          "doc": "Arm and cancel a monotonic expiry."
+        }
+      ],
+      "CONTROL_LOG": [
+        {
+          "name": "LOG_READ",
+          "bit": 8,
+          "doc": "Read control receipts."
+        },
+        {
+          "name": "LOG_APPEND",
+          "bit": 9,
+          "doc": "Append a receipt whose origin the kernel stamps."
+        },
+        {
+          "name": "LOG_ACK",
+          "bit": 10,
+          "doc": "Acknowledge consumption."
+        }
+      ]
+    }
+  },
+  "operations": [
+    {
+      "name": "CAP_INSPECT",
+      "type": "NONE",
+      "ordinal": 1,
+      "request": null,
+      "response": "CapInfo",
+      "rights": [],
+      "doc": "Report type, rights, lineage and lifetime of one capability."
+    },
+    {
+      "name": "CAP_DERIVE",
+      "type": "NONE",
+      "ordinal": 2,
+      "request": "DeriveRequest",
+      "response": null,
+      "rights": [
+        "DERIVE"
+      ],
+      "doc": "Create a child grant that only removes rights or brings the deadline forward."
+    },
+    {
+      "name": "CAP_COPY",
+      "type": "NONE",
+      "ordinal": 3,
+      "request": null,
+      "response": null,
+      "rights": [],
+      "doc": "Install a second handle on the same grant. No new lineage."
+    },
+    {
+      "name": "CAP_CLOSE",
+      "type": "NONE",
+      "ordinal": 4,
+      "request": null,
+      "response": null,
+      "rights": [],
+      "doc": "Release the local table entry. Never frees the object by itself."
+    },
+    {
+      "name": "CAP_FENCE",
+      "type": "NONE",
+      "ordinal": 5,
+      "request": null,
+      "response": null,
+      "rights": [
+        "ADMIN"
+      ],
+      "doc": "Fence this grant and every copy and derivation below it."
+    },
+    {
+      "name": "CAP_DRAIN_STATUS",
+      "type": "NONE",
+      "ordinal": 6,
+      "request": null,
+      "response": "DrainReport",
+      "rights": [
+        "ADMIN"
+      ],
+      "doc": "Report what this grant lineage still holds."
+    },
+    {
+      "name": "SCOPE_CREATE_CHILD",
+      "type": "SCOPE",
+      "ordinal": 1,
+      "request": "ScopeCreateRequest",
+      "response": null,
+      "rights": [
+        "SCOPE_LIMIT"
+      ],
+      "doc": "Create a child scope whose every limit fits inside this one."
+    },
+    {
+      "name": "SCOPE_QUERY",
+      "type": "SCOPE",
+      "ordinal": 2,
+      "request": null,
+      "response": "ScopeInfo",
+      "rights": [
+        "INSPECT"
+      ],
+      "doc": "Report limits, consumption and debt."
+    },
+    {
+      "name": "SCOPE_SET_LIMITS",
+      "type": "SCOPE",
+      "ordinal": 3,
+      "request": "ScopeLimits",
+      "response": null,
+      "rights": [
+        "SCOPE_LIMIT"
+      ],
+      "doc": "Change ceilings of an open scope within the parent's."
+    },
+    {
+      "name": "SCOPE_FENCE",
+      "type": "SCOPE",
+      "ordinal": 4,
+      "request": null,
+      "response": null,
+      "rights": [
+        "SCOPE_FENCE"
+      ],
+      "doc": "Refuse every new admission under this scope and its descendants."
+    },
+    {
+      "name": "SCOPE_DRAIN_STATUS",
+      "type": "SCOPE",
+      "ordinal": 5,
+      "request": null,
+      "response": "DrainReport",
+      "rights": [
+        "INSPECT"
+      ],
+      "doc": "Report obligations still inside the closing perimeter."
+    },
+    {
+      "name": "SCOPE_RETIRE",
+      "type": "SCOPE",
+      "ordinal": 6,
+      "request": null,
+      "response": "DrainReport",
+      "rights": [
+        "SCOPE_FENCE"
+      ],
+      "doc": "Release resources once quiescent; refused while obligations remain."
+    },
+    {
+      "name": "SCOPE_CREATE_DOMAIN",
+      "type": "SCOPE",
+      "ordinal": 7,
+      "request": "DomainCreateRequest",
+      "response": null,
+      "rights": [
+        "SCOPE_CREATE"
+      ],
+      "doc": "Build a domain from a validated image object. Leaves it unable to execute."
+    },
+    {
+      "name": "SCOPE_CREATE_MEMORY",
+      "type": "SCOPE",
+      "ordinal": 8,
+      "request": "MemoryCreateRequest",
+      "response": null,
+      "rights": [
+        "SCOPE_CREATE"
+      ],
+      "doc": "Reserve pages and create a memory object sponsored by this scope."
+    },
+    {
+      "name": "SCOPE_CREATE_ENDPOINT",
+      "type": "SCOPE",
+      "ordinal": 9,
+      "request": "EndpointCreateRequest",
+      "response": null,
+      "rights": [
+        "SCOPE_CREATE"
+      ],
+      "doc": "Create an endpoint with a fixed queue capacity."
+    },
+    {
+      "name": "SCOPE_CREATE_SIGNAL",
+      "type": "SCOPE",
+      "ordinal": 10,
+      "request": null,
+      "response": null,
+      "rights": [
+        "SCOPE_CREATE"
+      ],
+      "doc": "Create a coalescing signal."
+    },
+    {
+      "name": "SCOPE_CREATE_TIMER",
+      "type": "SCOPE",
+      "ordinal": 11,
+      "request": "TimerCreateRequest",
+      "response": null,
+      "rights": [
+        "SCOPE_CREATE"
+      ],
+      "doc": "Create a timer bound to a signal and bits."
+    },
+    {
+      "name": "DOMAIN_MAP",
+      "type": "DOMAIN",
+      "ordinal": 1,
+      "request": "MapRequest",
+      "response": null,
+      "rights": [
+        "DOMAIN_BUILD"
+      ],
+      "doc": "Install a mapping of a memory object in this domain."
+    },
+    {
+      "name": "DOMAIN_UNMAP",
+      "type": "DOMAIN",
+      "ordinal": 2,
+      "request": "UnmapRequest",
+      "response": null,
+      "rights": [
+        "DOMAIN_BUILD"
+      ],
+      "doc": "Withdraw a mapping and its translations."
+    },
+    {
+      "name": "DOMAIN_INSTALL_CAP",
+      "type": "DOMAIN",
+      "ordinal": 3,
+      "request": "InstallCapRequest",
+      "response": null,
+      "rights": [
+        "DOMAIN_BUILD"
+      ],
+      "doc": "Install a capability into a chosen slot of the domain's table."
+    },
+    {
+      "name": "DOMAIN_ADD_THREAD",
+      "type": "DOMAIN",
+      "ordinal": 4,
+      "request": "ThreadCreateRequest",
+      "response": null,
+      "rights": [
+        "DOMAIN_BUILD"
+      ],
+      "doc": "Create a thread with an entry point and a mapped stack."
+    },
+    {
+      "name": "DOMAIN_SET_FAULT_CHANNEL",
+      "type": "DOMAIN",
+      "ordinal": 5,
+      "request": "FaultChannelRequest",
+      "response": null,
+      "rights": [
+        "DOMAIN_BUILD"
+      ],
+      "doc": "Install the supervisor channel a fault is reported on, with its reserved record."
+    },
+    {
+      "name": "DOMAIN_ACTIVATE",
+      "type": "DOMAIN",
+      "ordinal": 6,
+      "request": null,
+      "response": null,
+      "rights": [
+        "DOMAIN_ACTIVATE"
+      ],
+      "doc": "The single transition after which user code may run."
+    },
+    {
+      "name": "DOMAIN_TERMINATE",
+      "type": "DOMAIN",
+      "ordinal": 7,
+      "request": null,
+      "response": null,
+      "rights": [
+        "DOMAIN_STOP"
+      ],
+      "doc": "Stop every thread and withdraw direct access. Retained obligations survive."
+    },
+    {
+      "name": "DOMAIN_QUERY",
+      "type": "DOMAIN",
+      "ordinal": 8,
+      "request": null,
+      "response": "DomainInfo",
+      "rights": [
+        "DOMAIN_WAIT"
+      ],
+      "doc": "Report lifecycle state, faults and exit."
+    },
+    {
+      "name": "MEMORY_QUERY",
+      "type": "MEMORY",
+      "ordinal": 1,
+      "request": null,
+      "response": "MemoryInfo",
+      "rights": [
+        "INSPECT"
+      ],
+      "doc": "Report size, maximum rights, seal state and sponsorship."
+    },
+    {
+      "name": "MEMORY_COPY",
+      "type": "MEMORY",
+      "ordinal": 2,
+      "request": "MemoryCopyRequest",
+      "response": null,
+      "rights": [
+        "MEMORY_WRITE"
+      ],
+      "doc": "Copy bytes from a readable object into this writable one."
+    },
+    {
+      "name": "MEMORY_SEAL",
+      "type": "MEMORY",
+      "ordinal": 3,
+      "request": null,
+      "response": "MemoryInfo",
+      "rights": [
+        "MEMORY_SEAL"
+      ],
+      "doc": "Refuse new writers, withdraw existing ones, then publish the seal."
+    },
+    {
+      "name": "MEMORY_WRITE",
+      "type": "MEMORY",
+      "ordinal": 4,
+      "request": "MemoryBytes",
+      "response": null,
+      "rights": [
+        "MEMORY_WRITE"
+      ],
+      "doc": "Mediated write that reveals none of the previous bytes."
+    },
+    {
+      "name": "MEMORY_READ",
+      "type": "MEMORY",
+      "ordinal": 5,
+      "request": "MemoryBytes",
+      "response": "MemoryBytes",
+      "rights": [
+        "MEMORY_READ"
+      ],
+      "doc": "Mediated read of a bounded range."
+    },
+    {
+      "name": "ENDPOINT_BIND_FACET",
+      "type": "ENDPOINT",
+      "ordinal": 1,
+      "request": "BindFacetRequest",
+      "response": null,
+      "rights": [
+        "ENDPOINT_BIND"
+      ],
+      "doc": "Mint a send capability carrying an immutable facet."
+    },
+    {
+      "name": "ENDPOINT_CALL",
+      "type": "ENDPOINT",
+      "ordinal": 2,
+      "request": "SendRequest",
+      "response": "CallResult",
+      "rights": [
+        "ENDPOINT_CALL"
+      ],
+      "doc": "Admit a message and block for its one-shot reply."
+    },
+    {
+      "name": "ENDPOINT_SEND",
+      "type": "ENDPOINT",
+      "ordinal": 3,
+      "request": "SendRequest",
+      "response": null,
+      "rights": [
+        "ENDPOINT_SEND"
+      ],
+      "doc": "Admit a message without blocking for a reply."
+    },
+    {
+      "name": "ENDPOINT_RECEIVE",
+      "type": "ENDPOINT",
+      "ordinal": 4,
+      "request": null,
+      "response": "ReceiveResult",
+      "rights": [
+        "ENDPOINT_RECEIVE"
+      ],
+      "doc": "Take the oldest admitted message with its authenticated header."
+    },
+    {
+      "name": "ENDPOINT_QUERY",
+      "type": "ENDPOINT",
+      "ordinal": 5,
+      "request": null,
+      "response": "EndpointInfo",
+      "rights": [
+        "INSPECT"
+      ],
+      "doc": "Report queue occupancy and epoch."
+    },
+    {
+      "name": "INVOCATION_REPLY",
+      "type": "INVOCATION",
+      "ordinal": 1,
+      "request": "ReplyRequest",
+      "response": null,
+      "rights": [
+        "INVOCATION_REPLY"
+      ],
+      "doc": "Consume the reply exactly once."
+    },
+    {
+      "name": "INVOCATION_BEGIN_EFFECT",
+      "type": "INVOCATION",
+      "ordinal": 2,
+      "request": "EffectRequest",
+      "response": null,
+      "rights": [
+        "INVOCATION_EFFECT"
+      ],
+      "doc": "Revalidate the admitting lineage and reserve closure capacity."
+    },
+    {
+      "name": "INVOCATION_RESOLVE",
+      "type": "INVOCATION",
+      "ordinal": 3,
+      "request": "ResolveRequest",
+      "response": null,
+      "rights": [
+        "INVOCATION_RESOLVE"
+      ],
+      "doc": "Discharge the obligation with an explicit outcome."
+    },
+    {
+      "name": "INVOCATION_QUERY",
+      "type": "INVOCATION",
+      "ordinal": 4,
+      "request": null,
+      "response": "InvocationInfo",
+      "rights": [
+        "INSPECT"
+      ],
+      "doc": "Report origin, cancellation and effect state."
+    },
+    {
+      "name": "INVOCATION_BIND_WORKER",
+      "type": "INVOCATION",
+      "ordinal": 5,
+      "request": null,
+      "response": null,
+      "rights": [
+        "INVOCATION_BIND"
+      ],
+      "doc": "Charge this thread's work to the invocation's originating scope."
+    },
+    {
+      "name": "INVOCATION_UNBIND_WORKER",
+      "type": "INVOCATION",
+      "ordinal": 6,
+      "request": null,
+      "response": null,
+      "rights": [
+        "INVOCATION_BIND"
+      ],
+      "doc": "Return the thread to its owning scope."
+    },
+    {
+      "name": "SIGNAL_RAISE",
+      "type": "SIGNAL",
+      "ordinal": 1,
+      "request": "SignalBits",
+      "response": null,
+      "rights": [
+        "SIGNAL_RAISE"
+      ],
+      "doc": "Set bits and advance the sequence."
+    },
+    {
+      "name": "SIGNAL_WAIT",
+      "type": "SIGNAL",
+      "ordinal": 2,
+      "request": "SignalBits",
+      "response": "SignalInfo",
+      "rights": [
+        "SIGNAL_WAIT"
+      ],
+      "doc": "Wait for any masked bit, consuming what was observed."
+    },
+    {
+      "name": "SIGNAL_QUERY",
+      "type": "SIGNAL",
+      "ordinal": 3,
+      "request": null,
+      "response": "SignalInfo",
+      "rights": [
+        "INSPECT"
+      ],
+      "doc": "Read bits and sequence without waiting."
+    },
+    {
+      "name": "TIMER_ARM",
+      "type": "TIMER",
+      "ordinal": 1,
+      "request": "TimerArmRequest",
+      "response": null,
+      "rights": [
+        "TIMER_ARM"
+      ],
+      "doc": "Arm a monotonic expiry."
+    },
+    {
+      "name": "TIMER_CANCEL",
+      "type": "TIMER",
+      "ordinal": 2,
+      "request": null,
+      "response": null,
+      "rights": [
+        "TIMER_ARM"
+      ],
+      "doc": "Cancel an armed expiry."
+    },
+    {
+      "name": "TIMER_QUERY",
+      "type": "TIMER",
+      "ordinal": 3,
+      "request": null,
+      "response": "TimerInfo",
+      "rights": [
+        "INSPECT"
+      ],
+      "doc": "Report the armed deadline and fire count."
+    },
+    {
+      "name": "LOG_READ",
+      "type": "CONTROL_LOG",
+      "ordinal": 1,
+      "request": null,
+      "response": "LogReadResult",
+      "rights": [
+        "LOG_READ"
+      ],
+      "doc": "Read a bounded batch of receipts and the loss count."
+    },
+    {
+      "name": "LOG_APPEND",
+      "type": "CONTROL_LOG",
+      "ordinal": 2,
+      "request": "LogAppendRequest",
+      "response": null,
+      "rights": [
+        "LOG_APPEND"
+      ],
+      "doc": "Append a receipt. Origin and time come from the kernel, never from the payload."
+    },
+    {
+      "name": "LOG_ACK",
+      "type": "CONTROL_LOG",
+      "ordinal": 3,
+      "request": "LogAckRequest",
+      "response": null,
+      "rights": [
+        "LOG_ACK"
+      ],
+      "doc": "Acknowledge consumption up to a sequence."
+    },
+    {
+      "name": "LOG_QUERY",
+      "type": "CONTROL_LOG",
+      "ordinal": 4,
+      "request": null,
+      "response": "LogInfo",
+      "rights": [
+        "INSPECT"
+      ],
+      "doc": "Report capacity, reservation and loss."
+    }
+  ],
+  "errors": [
+    {
+      "name": "OK",
+      "value": 0,
+      "doc": "Operation completed."
+    },
+    {
+      "name": "UNSUPPORTED_ENTRY",
+      "value": -1,
+      "doc": "The entry identifier is not implemented by this revision."
+    },
+    {
+      "name": "INVALID_ARGUMENT",
+      "value": -2,
+      "doc": "Structurally rejected before any effect."
+    },
+    {
+      "name": "INCOMPATIBLE_VERSION",
+      "value": -3,
+      "doc": "Descriptor major version not supported. Rejected before effects."
+    },
+    {
+      "name": "INVALID_HANDLE",
+      "value": -4,
+      "doc": "No live entry names that index and generation."
+    },
+    {
+      "name": "WRONG_TYPE",
+      "value": -5,
+      "doc": "The operation does not belong to the object's type."
+    },
+    {
+      "name": "INSUFFICIENT_RIGHTS",
+      "value": -6,
+      "doc": "The grant does not carry every right the operation requires."
+    },
+    {
+      "name": "EXPIRED",
+      "value": -7,
+      "doc": "A monotonic deadline in the lineage has passed."
+    },
+    {
+      "name": "SCOPE_CLOSED",
+      "value": -8,
+      "doc": "A scope or grant in the lineage is fenced."
+    },
+    {
+      "name": "LIMIT_EXHAUSTED",
+      "value": -9,
+      "doc": "A reservation did not fit in every ancestor."
+    },
+    {
+      "name": "QUEUE_FULL",
+      "value": -10,
+      "doc": "The bounded queue has no room and no slot is reserved for this traffic."
+    },
+    {
+      "name": "INVALID_ADDRESS",
+      "value": -11,
+      "doc": "A user address is unmapped or lacks the required rights."
+    },
+    {
+      "name": "PEER_DEAD",
+      "value": -12,
+      "doc": "The other end of the operation no longer exists."
+    },
+    {
+      "name": "CANCELLED",
+      "value": -13,
+      "doc": "The wait ended because its authority was closed."
+    },
+    {
+      "name": "PENDING",
+      "value": -14,
+      "doc": "The obligation is admitted and not yet resolved."
+    },
+    {
+      "name": "WOULD_BLOCK",
+      "value": -15,
+      "doc": "The operation would have waited and no deadline allowed it."
+    },
+    {
+      "name": "TIMED_OUT",
+      "value": -16,
+      "doc": "The deadline passed before the wait completed. Not a proof of absence of effect."
+    },
+    {
+      "name": "ALREADY_RESOLVED",
+      "value": -17,
+      "doc": "A one-shot object was already consumed."
+    },
+    {
+      "name": "STATE_CONFLICT",
+      "value": -18,
+      "doc": "The object's state forbids the operation."
+    },
+    {
+      "name": "DRAIN_INCOMPLETE",
+      "value": -19,
+      "doc": "Obligations remain inside the closing perimeter."
+    },
+    {
+      "name": "NOT_SUPPORTED",
+      "value": -20,
+      "doc": "The operation exists but this revision does not implement it."
+    }
+  ],
+  "enums": {
+    "ScopeState": [
+      {
+        "name": "OPEN",
+        "value": 1
+      },
+      {
+        "name": "FENCED",
+        "value": 2
+      },
+      {
+        "name": "QUIESCENT",
+        "value": 3
+      },
+      {
+        "name": "RETIRED",
+        "value": 4
+      }
+    ],
+    "MemoryState": [
+      {
+        "name": "MUTABLE",
+        "value": 1
+      },
+      {
+        "name": "SEALING",
+        "value": 2
+      },
+      {
+        "name": "SEALED",
+        "value": 3
+      }
+    ],
+    "DomainState": [
+      {
+        "name": "BUILDING",
+        "value": 1
+      },
+      {
+        "name": "RUNNABLE",
+        "value": 2
+      },
+      {
+        "name": "FAULTED",
+        "value": 3
+      },
+      {
+        "name": "STOPPING",
+        "value": 4
+      },
+      {
+        "name": "DEAD",
+        "value": 5
+      }
+    ],
+    "InvocationState": [
+      {
+        "name": "ADMITTED",
+        "value": 1
+      },
+      {
+        "name": "DELIVERED",
+        "value": 2
+      },
+      {
+        "name": "RESOLVED",
+        "value": 3
+      }
+    ],
+    "EffectState": [
+      {
+        "name": "NONE",
+        "value": 0
+      },
+      {
+        "name": "ADMITTED",
+        "value": 1
+      },
+      {
+        "name": "REFUSED",
+        "value": 2
+      },
+      {
+        "name": "RESOLVED",
+        "value": 3
+      }
+    ],
+    "CancelState": [
+      {
+        "name": "LIVE",
+        "value": 0
+      },
+      {
+        "name": "ORIGIN_FENCED",
+        "value": 1
+      },
+      {
+        "name": "ORIGIN_DEAD",
+        "value": 2
+      }
+    ],
+    "Outcome": [
+      {
+        "name": "COMMITTED",
+        "value": 1
+      },
+      {
+        "name": "ABORTED",
+        "value": 2
+      },
+      {
+        "name": "UNKNOWN",
+        "value": 3
+      }
+    ],
+    "CapOp": [
+      {
+        "name": "COPY",
+        "value": 0
+      },
+      {
+        "name": "MOVE",
+        "value": 1
+      }
+    ],
+    "MessageKind": [
+      {
+        "name": "REQUEST",
+        "value": 1
+      },
+      {
+        "name": "FAULT",
+        "value": 2
+      }
+    ],
+    "ReceiptKind": [
+      {
+        "name": "ADMIT",
+        "value": 1
+      },
+      {
+        "name": "EFFECT",
+        "value": 2
+      },
+      {
+        "name": "FENCE",
+        "value": 3
+      },
+      {
+        "name": "RETIRE",
+        "value": 4
+      },
+      {
+        "name": "SERVICE_NOTE",
+        "value": 5
+      },
+      {
+        "name": "OBJECT_LIFE",
+        "value": 6
+      }
+    ],
+    "CapLineage": [
+      {
+        "name": "LIVE",
+        "value": 1
+      },
+      {
+        "name": "FENCED",
+        "value": 2
+      },
+      {
+        "name": "EXPIRED",
+        "value": 3
+      }
+    ]
+  },
+  "structs": [
+    {
+      "name": "DescriptorHeader",
+      "doc": "Common descriptor header fixed by vault/architecture/abi.md.",
+      "fields": [
+        {
+          "name": "major",
+          "type": "u16",
+          "doc": "Descriptor major version. A mismatch is refused before effects."
+        },
+        {
+          "name": "minor",
+          "type": "u16",
+          "doc": "Descriptor minor version."
+        },
+        {
+          "name": "opcode",
+          "type": "u32",
+          "doc": "Operation selector. Must equal the operation passed in RSI."
+        },
+        {
+          "name": "flags",
+          "type": "u32",
+          "doc": "Operation flags. Unknown bits are refused, never ignored."
+        },
+        {
+          "name": "total_len",
+          "type": "u32",
+          "doc": "Whole descriptor length including this header. Must equal R10."
+        },
+        {
+          "name": "cookie",
+          "type": "u64",
+          "doc": "Client correlation value. Not authorisation and not durable dedupe."
+        },
+        {
+          "name": "reserved",
+          "type": "u64",
+          "doc": "Reserved, must be zero."
+        }
+      ]
+    },
+    {
+      "name": "Limits",
+      "doc": "Effective interface limits reported by the LIMITS_QUERY entry.",
+      "fields": [
+        {
+          "name": "major",
+          "type": "u16"
+        },
+        {
+          "name": "minor",
+          "type": "u16"
+        },
+        {
+          "name": "max_descriptor_len",
+          "type": "u32"
+        },
+        {
+          "name": "max_inline_payload",
+          "type": "u32"
+        },
+        {
+          "name": "max_caps_per_message",
+          "type": "u32"
+        },
+        {
+          "name": "max_scope_depth",
+          "type": "u32"
+        },
+        {
+          "name": "max_derive_depth",
+          "type": "u32"
+        },
+        {
+          "name": "max_handles_per_domain",
+          "type": "u32"
+        },
+        {
+          "name": "max_endpoint_queue",
+          "type": "u32"
+        },
+        {
+          "name": "max_memory_pages_per_object",
+          "type": "u32"
+        },
+        {
+          "name": "control_log_capacity",
+          "type": "u32"
+        },
+        {
+          "name": "control_log_reserved",
+          "type": "u32"
+        },
+        {
+          "name": "receipt_batch",
+          "type": "u32"
+        },
+        {
+          "name": "cpu_window_ns",
+          "type": "u64"
+        },
+        {
+          "name": "cpu_quantum_ns",
+          "type": "u64"
+        },
+        {
+          "name": "page_size",
+          "type": "u64"
+        },
+        {
+          "name": "boot_epoch",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "CapInfo",
+      "doc": "What one capability names and what its lineage still permits.",
+      "fields": [
+        {
+          "name": "object_type",
+          "type": "u32"
+        },
+        {
+          "name": "rights",
+          "type": "u32",
+          "doc": "Effective rights: never larger than any ancestor's."
+        },
+        {
+          "name": "derive_depth",
+          "type": "u32"
+        },
+        {
+          "name": "lineage_state",
+          "type": "u32",
+          "doc": "CapLineage: what the lineage between this grant and its root still permits."
+        },
+        {
+          "name": "grant_id",
+          "type": "u64"
+        },
+        {
+          "name": "parent_grant_id",
+          "type": "u64"
+        },
+        {
+          "name": "deadline_ns",
+          "type": "u64",
+          "doc": "Zero means no deadline."
+        },
+        {
+          "name": "life_scope_id",
+          "type": "u64"
+        },
+        {
+          "name": "object_id",
+          "type": "u64"
+        },
+        {
+          "name": "facet",
+          "type": "u64",
+          "doc": "Immutable endpoint facet, zero when the grant carries none."
+        }
+      ]
+    },
+    {
+      "name": "DeriveRequest",
+      "doc": "Attenuation request. Rights outside the parent's and deadlines beyond it are refused.",
+      "fields": [
+        {
+          "name": "rights_mask",
+          "type": "u32",
+          "doc": "Requested rights. Must be a subset of the parent's."
+        },
+        {
+          "name": "reserved0",
+          "type": "u32"
+        },
+        {
+          "name": "deadline_ns",
+          "type": "u64",
+          "doc": "Zero keeps the parent's deadline; otherwise must not be later."
+        },
+        {
+          "name": "life_scope",
+          "type": "u64",
+          "doc": "Optional extra scope handle bounding the child's life. Zero for none."
+        }
+      ]
+    },
+    {
+      "name": "ScopeLimits",
+      "doc": "Ceilings of one scope. Every one must fit inside every ancestor's.",
+      "fields": [
+        {
+          "name": "memory_pages",
+          "type": "u64"
+        },
+        {
+          "name": "metadata_objects",
+          "type": "u64"
+        },
+        {
+          "name": "cpu_budget_ns",
+          "type": "u64",
+          "doc": "Aggregate execution per fixed window."
+        },
+        {
+          "name": "queue_bytes",
+          "type": "u64"
+        },
+        {
+          "name": "closure_reserve_ns",
+          "type": "u64",
+          "doc": "Recovery reserve untouchable by ordinary work."
+        },
+        {
+          "name": "parallelism",
+          "type": "u32"
+        },
+        {
+          "name": "reserved0",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "ScopeCreateRequest",
+      "doc": "Create a child scope with its own ceilings and a diagnostic label.",
+      "fields": [
+        {
+          "name": "limits",
+          "type": "struct:ScopeLimits"
+        },
+        {
+          "name": "label",
+          "type": "u8[16]",
+          "doc": "Diagnostic only. A name grants nothing."
+        }
+      ]
+    },
+    {
+      "name": "ScopeInfo",
+      "doc": "Limits, consumption and debt of one scope.",
+      "fields": [
+        {
+          "name": "limits",
+          "type": "struct:ScopeLimits"
+        },
+        {
+          "name": "state",
+          "type": "u32"
+        },
+        {
+          "name": "depth",
+          "type": "u32"
+        },
+        {
+          "name": "parallelism_used",
+          "type": "u32"
+        },
+        {
+          "name": "threads",
+          "type": "u32"
+        },
+        {
+          "name": "scope_id",
+          "type": "u64"
+        },
+        {
+          "name": "parent_scope_id",
+          "type": "u64"
+        },
+        {
+          "name": "memory_pages_used",
+          "type": "u64"
+        },
+        {
+          "name": "metadata_used",
+          "type": "u64"
+        },
+        {
+          "name": "queue_bytes_used",
+          "type": "u64"
+        },
+        {
+          "name": "cpu_window_used_ns",
+          "type": "u64"
+        },
+        {
+          "name": "cpu_total_ns",
+          "type": "u64"
+        },
+        {
+          "name": "cpu_debt_ns",
+          "type": "u64"
+        },
+        {
+          "name": "closure_used_ns",
+          "type": "u64"
+        },
+        {
+          "name": "window_index",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "DrainReport",
+      "doc": "What a closing perimeter still holds. A timeout is not quiescence.",
+      "fields": [
+        {
+          "name": "state",
+          "type": "u32"
+        },
+        {
+          "name": "threads_running",
+          "type": "u32"
+        },
+        {
+          "name": "invocations_pending",
+          "type": "u32"
+        },
+        {
+          "name": "effects_pending",
+          "type": "u32"
+        },
+        {
+          "name": "maps_pending",
+          "type": "u32"
+        },
+        {
+          "name": "undelivered_cancelled",
+          "type": "u32"
+        },
+        {
+          "name": "external_unknown",
+          "type": "u32"
+        },
+        {
+          "name": "reserved0",
+          "type": "u32"
+        },
+        {
+          "name": "retained_pages",
+          "type": "u64"
+        },
+        {
+          "name": "retained_metadata",
+          "type": "u64"
+        },
+        {
+          "name": "last_progress_ns",
+          "type": "u64"
+        },
+        {
+          "name": "token",
+          "type": "u64",
+          "doc": "Stable progress token; equal tokens mean no progress was made."
+        }
+      ]
+    },
+    {
+      "name": "DomainCreateRequest",
+      "doc": "Build a domain from an image object the caller may read.",
+      "fields": [
+        {
+          "name": "image_handle",
+          "type": "u64"
+        },
+        {
+          "name": "name",
+          "type": "u8[16]",
+          "doc": "Diagnostic only."
+        }
+      ]
+    },
+    {
+      "name": "MapRequest",
+      "doc": "Install one mapping. Rights are checked against the capability and the platform.",
+      "fields": [
+        {
+          "name": "memory_handle",
+          "type": "u64"
+        },
+        {
+          "name": "vaddr",
+          "type": "u64"
+        },
+        {
+          "name": "offset_pages",
+          "type": "u32"
+        },
+        {
+          "name": "page_count",
+          "type": "u32"
+        },
+        {
+          "name": "rights",
+          "type": "u32",
+          "doc": "Subset of MEMORY_READ/WRITE/EXECUTE."
+        },
+        {
+          "name": "reserved0",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "UnmapRequest",
+      "doc": "Withdraw a mapping range and its translations.",
+      "fields": [
+        {
+          "name": "vaddr",
+          "type": "u64"
+        },
+        {
+          "name": "page_count",
+          "type": "u32"
+        },
+        {
+          "name": "reserved0",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "InstallCapRequest",
+      "doc": "Install a capability into a building domain's table at a chosen slot.",
+      "fields": [
+        {
+          "name": "source_handle",
+          "type": "u64"
+        },
+        {
+          "name": "deadline_ns",
+          "type": "u64",
+          "doc": "Zero keeps the source deadline."
+        },
+        {
+          "name": "target_slot",
+          "type": "u32"
+        },
+        {
+          "name": "rights_mask",
+          "type": "u32",
+          "doc": "Attenuation applied while installing; never an amplification."
+        }
+      ]
+    },
+    {
+      "name": "ThreadCreateRequest",
+      "doc": "Create one thread of a building domain.",
+      "fields": [
+        {
+          "name": "entry",
+          "type": "u64"
+        },
+        {
+          "name": "stack_top",
+          "type": "u64",
+          "doc": "Must be inside a writable mapping of the domain."
+        },
+        {
+          "name": "argument",
+          "type": "u64",
+          "doc": "Passed to the thread in RDI."
+        },
+        {
+          "name": "reserved0",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "FaultChannelRequest",
+      "doc": "Endpoint a fault of this domain is reported on, with a record reserved in advance.",
+      "fields": [
+        {
+          "name": "endpoint_handle",
+          "type": "u64"
+        },
+        {
+          "name": "reserved0",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "DomainInfo",
+      "doc": "Lifecycle, faults and exit of one domain.",
+      "fields": [
+        {
+          "name": "state",
+          "type": "u32"
+        },
+        {
+          "name": "threads",
+          "type": "u32"
+        },
+        {
+          "name": "faults",
+          "type": "u32"
+        },
+        {
+          "name": "reserved0",
+          "type": "u32"
+        },
+        {
+          "name": "domain_id",
+          "type": "u64"
+        },
+        {
+          "name": "owner_scope_id",
+          "type": "u64"
+        },
+        {
+          "name": "exit_code",
+          "type": "u64"
+        },
+        {
+          "name": "fault_vector",
+          "type": "u64"
+        },
+        {
+          "name": "fault_rip",
+          "type": "u64"
+        },
+        {
+          "name": "charged_pages",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "MemoryCreateRequest",
+      "doc": "Reserve resident pages before the object becomes visible.",
+      "fields": [
+        {
+          "name": "pages",
+          "type": "u64"
+        },
+        {
+          "name": "max_rights",
+          "type": "u32"
+        },
+        {
+          "name": "reserved0",
+          "type": "u32"
+        },
+        {
+          "name": "label",
+          "type": "u8[16]"
+        }
+      ]
+    },
+    {
+      "name": "MemoryInfo",
+      "doc": "Size, maximum rights, seal state and alias counts of one memory object.",
+      "fields": [
+        {
+          "name": "state",
+          "type": "u32"
+        },
+        {
+          "name": "max_rights",
+          "type": "u32"
+        },
+        {
+          "name": "map_count",
+          "type": "u32"
+        },
+        {
+          "name": "writable_maps",
+          "type": "u32"
+        },
+        {
+          "name": "pages",
+          "type": "u64"
+        },
+        {
+          "name": "object_id",
+          "type": "u64"
+        },
+        {
+          "name": "sponsor_scope_id",
+          "type": "u64"
+        },
+        {
+          "name": "label",
+          "type": "u8[16]"
+        }
+      ]
+    },
+    {
+      "name": "MemoryCopyRequest",
+      "doc": "Copy a bounded range between two memory objects.",
+      "fields": [
+        {
+          "name": "source_handle",
+          "type": "u64"
+        },
+        {
+          "name": "source_offset",
+          "type": "u64"
+        },
+        {
+          "name": "dest_offset",
+          "type": "u64"
+        },
+        {
+          "name": "length",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "MemoryBytes",
+      "doc": "Mediated read or write of a bounded range.",
+      "fields": [
+        {
+          "name": "offset",
+          "type": "u64"
+        },
+        {
+          "name": "length",
+          "type": "u64"
+        },
+        {
+          "name": "bytes",
+          "type": "u8[256]"
+        }
+      ]
+    },
+    {
+      "name": "EndpointCreateRequest",
+      "doc": "Create an endpoint with fixed queue capacity.",
+      "fields": [
+        {
+          "name": "queue_capacity",
+          "type": "u32"
+        },
+        {
+          "name": "reserved0",
+          "type": "u32"
+        },
+        {
+          "name": "label",
+          "type": "u8[16]"
+        }
+      ]
+    },
+    {
+      "name": "BindFacetRequest",
+      "doc": "Administration that mints a send capability bound to one logical object.",
+      "fields": [
+        {
+          "name": "facet",
+          "type": "u64",
+          "doc": "Opaque, immutable, unique within the endpoint epoch."
+        },
+        {
+          "name": "deadline_ns",
+          "type": "u64"
+        },
+        {
+          "name": "rights_mask",
+          "type": "u32"
+        },
+        {
+          "name": "reserved0",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "EndpointInfo",
+      "doc": "Queue occupancy and epoch of one endpoint.",
+      "fields": [
+        {
+          "name": "queue_capacity",
+          "type": "u32"
+        },
+        {
+          "name": "queued",
+          "type": "u32"
+        },
+        {
+          "name": "reserved_cells",
+          "type": "u32"
+        },
+        {
+          "name": "facets",
+          "type": "u32"
+        },
+        {
+          "name": "epoch",
+          "type": "u64"
+        },
+        {
+          "name": "object_id",
+          "type": "u64"
+        },
+        {
+          "name": "admitted",
+          "type": "u64"
+        },
+        {
+          "name": "delivered",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "MessageHeader",
+      "doc": "Built by the kernel. A payload cannot overwrite any field of it.",
+      "fields": [
+        {
+          "name": "epoch",
+          "type": "u64"
+        },
+        {
+          "name": "invocation_id",
+          "type": "u64"
+        },
+        {
+          "name": "sender_domain_id",
+          "type": "u64"
+        },
+        {
+          "name": "sender_scope_id",
+          "type": "u64"
+        },
+        {
+          "name": "parent_invocation_id",
+          "type": "u64"
+        },
+        {
+          "name": "facet",
+          "type": "u64"
+        },
+        {
+          "name": "grant_id",
+          "type": "u64"
+        },
+        {
+          "name": "sent_ns",
+          "type": "u64"
+        },
+        {
+          "name": "rights_transferred",
+          "type": "u32"
+        },
+        {
+          "name": "cancel_state",
+          "type": "u32"
+        },
+        {
+          "name": "kind",
+          "type": "u32"
+        },
+        {
+          "name": "payload_len",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "SendRequest",
+      "doc": "One message: bounded payload plus at most four capabilities, all or nothing.",
+      "fields": [
+        {
+          "name": "payload_len",
+          "type": "u32"
+        },
+        {
+          "name": "cap_count",
+          "type": "u32"
+        },
+        {
+          "name": "caps",
+          "type": "u64[4]"
+        },
+        {
+          "name": "cap_ops",
+          "type": "u32[4]",
+          "doc": "COPY or MOVE per capability."
+        },
+        {
+          "name": "payload",
+          "type": "u8[256]"
+        }
+      ]
+    },
+    {
+      "name": "CallResult",
+      "doc": "Reply of a synchronous call. Absence of a reply never means absence of effect.",
+      "fields": [
+        {
+          "name": "payload_len",
+          "type": "u32"
+        },
+        {
+          "name": "cap_count",
+          "type": "u32"
+        },
+        {
+          "name": "caps",
+          "type": "u64[4]"
+        },
+        {
+          "name": "result",
+          "type": "u64"
+        },
+        {
+          "name": "invocation_id",
+          "type": "u64"
+        },
+        {
+          "name": "payload",
+          "type": "u8[256]"
+        }
+      ]
+    },
+    {
+      "name": "ReceiveResult",
+      "doc": "An authenticated header, untrusted bytes and installed capabilities.",
+      "fields": [
+        {
+          "name": "header",
+          "type": "struct:MessageHeader"
+        },
+        {
+          "name": "cap_count",
+          "type": "u32"
+        },
+        {
+          "name": "reserved0",
+          "type": "u32"
+        },
+        {
+          "name": "caps",
+          "type": "u64[4]"
+        },
+        {
+          "name": "payload",
+          "type": "u8[256]"
+        }
+      ]
+    },
+    {
+      "name": "ReplyRequest",
+      "doc": "One-shot reply bound to one invocation.",
+      "fields": [
+        {
+          "name": "payload_len",
+          "type": "u32"
+        },
+        {
+          "name": "cap_count",
+          "type": "u32"
+        },
+        {
+          "name": "caps",
+          "type": "u64[4]"
+        },
+        {
+          "name": "cap_ops",
+          "type": "u32[4]"
+        },
+        {
+          "name": "result",
+          "type": "u64"
+        },
+        {
+          "name": "payload",
+          "type": "u8[256]"
+        }
+      ]
+    },
+    {
+      "name": "EffectRequest",
+      "doc": "Effect admission: the same lineage checked again under the same synchronisation.",
+      "fields": [
+        {
+          "name": "closure_reserve_ns",
+          "type": "u64",
+          "doc": "Recovery budget reserved before the effect is permitted."
+        },
+        {
+          "name": "effect_kind",
+          "type": "u32"
+        },
+        {
+          "name": "reserved0",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "ResolveRequest",
+      "doc": "Discharge of a retained obligation with an explicit outcome.",
+      "fields": [
+        {
+          "name": "outcome",
+          "type": "u32"
+        },
+        {
+          "name": "reserved0",
+          "type": "u32"
+        },
+        {
+          "name": "detail",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "InvocationInfo",
+      "doc": "Origin, cancellation and effect state of admitted work.",
+      "fields": [
+        {
+          "name": "state",
+          "type": "u32"
+        },
+        {
+          "name": "cancel_state",
+          "type": "u32"
+        },
+        {
+          "name": "effect_state",
+          "type": "u32"
+        },
+        {
+          "name": "reserved0",
+          "type": "u32"
+        },
+        {
+          "name": "invocation_id",
+          "type": "u64"
+        },
+        {
+          "name": "origin_domain_id",
+          "type": "u64"
+        },
+        {
+          "name": "origin_scope_id",
+          "type": "u64"
+        },
+        {
+          "name": "facet",
+          "type": "u64"
+        },
+        {
+          "name": "grant_id",
+          "type": "u64"
+        },
+        {
+          "name": "admitted_ns",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "SignalBits",
+      "doc": "Bit set raised or waited on.",
+      "fields": [
+        {
+          "name": "bits",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "SignalInfo",
+      "doc": "Coalesced bits with a sequence, so a consumer can re-arm without losing a race.",
+      "fields": [
+        {
+          "name": "bits",
+          "type": "u64"
+        },
+        {
+          "name": "sequence",
+          "type": "u64"
+        },
+        {
+          "name": "object_id",
+          "type": "u64"
+        },
+        {
+          "name": "waiters",
+          "type": "u32"
+        },
+        {
+          "name": "reserved0",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "TimerCreateRequest",
+      "doc": "Timer bound to the signal and bits it raises on expiry.",
+      "fields": [
+        {
+          "name": "signal_handle",
+          "type": "u64"
+        },
+        {
+          "name": "bits",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "TimerArmRequest",
+      "doc": "Monotonic expiry.",
+      "fields": [
+        {
+          "name": "deadline_ns",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "TimerInfo",
+      "doc": "Armed deadline and fire count.",
+      "fields": [
+        {
+          "name": "armed",
+          "type": "u32"
+        },
+        {
+          "name": "reserved0",
+          "type": "u32"
+        },
+        {
+          "name": "deadline_ns",
+          "type": "u64"
+        },
+        {
+          "name": "fired",
+          "type": "u64"
+        },
+        {
+          "name": "object_id",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "ReceiptRecord",
+      "doc": "One control receipt. Origin and time are the kernel's; a and b are the caller's untrusted values.",
+      "fields": [
+        {
+          "name": "schema",
+          "type": "u32"
+        },
+        {
+          "name": "kind",
+          "type": "u32"
+        },
+        {
+          "name": "sequence",
+          "type": "u64"
+        },
+        {
+          "name": "epoch",
+          "type": "u64"
+        },
+        {
+          "name": "ns",
+          "type": "u64"
+        },
+        {
+          "name": "origin_domain_id",
+          "type": "u64"
+        },
+        {
+          "name": "origin_scope_id",
+          "type": "u64"
+        },
+        {
+          "name": "object_id",
+          "type": "u64"
+        },
+        {
+          "name": "grant_id",
+          "type": "u64"
+        },
+        {
+          "name": "parent_invocation_id",
+          "type": "u64"
+        },
+        {
+          "name": "result",
+          "type": "i64"
+        },
+        {
+          "name": "a",
+          "type": "u64"
+        },
+        {
+          "name": "b",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "LogReadResult",
+      "doc": "A bounded batch of receipts and an explicit loss count.",
+      "fields": [
+        {
+          "name": "count",
+          "type": "u32"
+        },
+        {
+          "name": "lost",
+          "type": "u32",
+          "doc": "Receipts dropped since the last read. Coverage is never assumed complete."
+        },
+        {
+          "name": "next_sequence",
+          "type": "u64"
+        },
+        {
+          "name": "records",
+          "type": "struct:ReceiptRecord[4]"
+        }
+      ]
+    },
+    {
+      "name": "LogAppendRequest",
+      "doc": "Service note. The kernel stamps origin; the payload cannot claim another.",
+      "fields": [
+        {
+          "name": "kind",
+          "type": "u32"
+        },
+        {
+          "name": "reserved0",
+          "type": "u32"
+        },
+        {
+          "name": "a",
+          "type": "u64"
+        },
+        {
+          "name": "b",
+          "type": "u64"
+        },
+        {
+          "name": "claimed_origin_domain_id",
+          "type": "u64",
+          "doc": "Ignored by the kernel. Present so a forged origin can be observed being overwritten."
+        }
+      ]
+    },
+    {
+      "name": "LogAckRequest",
+      "doc": "Acknowledge consumption up to a sequence.",
+      "fields": [
+        {
+          "name": "through_sequence",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "LogInfo",
+      "doc": "Capacity, reservation and loss of one control log.",
+      "fields": [
+        {
+          "name": "capacity",
+          "type": "u32"
+        },
+        {
+          "name": "reserved_cells",
+          "type": "u32"
+        },
+        {
+          "name": "used",
+          "type": "u32"
+        },
+        {
+          "name": "lost",
+          "type": "u32"
+        },
+        {
+          "name": "next_sequence",
+          "type": "u64"
+        },
+        {
+          "name": "oldest_sequence",
+          "type": "u64"
+        },
+        {
+          "name": "object_id",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "FaultReport",
+      "doc": "Bounded fault payload delivered to a supervisor. Carries no kernel address.",
+      "fields": [
+        {
+          "name": "domain_id",
+          "type": "u64"
+        },
+        {
+          "name": "thread_id",
+          "type": "u64"
+        },
+        {
+          "name": "generation",
+          "type": "u64"
+        },
+        {
+          "name": "vector",
+          "type": "u64"
+        },
+        {
+          "name": "error_code",
+          "type": "u64"
+        },
+        {
+          "name": "rip",
+          "type": "u64"
+        },
+        {
+          "name": "rsp",
+          "type": "u64"
+        },
+        {
+          "name": "address",
+          "type": "u64"
+        },
+        {
+          "name": "class",
+          "type": "u32"
+        },
+        {
+          "name": "reserved0",
+          "type": "u32"
+        }
+      ]
+    }
+  ],
+  "boot_slots": [
+    {
+      "name": "SELF_DOMAIN",
+      "slot": 1,
+      "doc": "The supervisor's own domain: build, map, install and activate children through it."
+    },
+    {
+      "name": "SELF_SCOPE",
+      "slot": 2,
+      "doc": "The supervisor's scope: the only factory authority it starts with."
+    },
+    {
+      "name": "CONTROL_LOG",
+      "slot": 3,
+      "doc": "Control receipts: read, append and acknowledge."
+    },
+    {
+      "name": "FIRST_MODULE",
+      "slot": 4,
+      "doc": "First sealed image object. Modules follow in package order; MEMORY_QUERY reports the label."
+    }
+  ]
+}

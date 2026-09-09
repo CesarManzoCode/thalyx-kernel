@@ -16,9 +16,9 @@ use thalyx_boot_protocol::{MemoryRegion, PAGE_SIZE, region_kind};
 
 use super::{Frame, Owner};
 
-/// Owners the allocator can count separately: the kernel plus every domain
-/// slot.
-const OWNER_SLOTS: usize = 1 + crate::state::MAX_DOMAINS;
+/// Owners the allocator can count separately: the kernel, every domain slot and
+/// every scope slot.
+const OWNER_SLOTS: usize = 1 + crate::limits::MAX_DOMAINS + crate::limits::MAX_SCOPES;
 
 /// Why an allocation failed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -184,6 +184,46 @@ impl FrameAllocator {
                 return Err(AllocError::OutOfMemory);
             }
         }
+    }
+
+    /// Allocates `count` physically contiguous zeroed frames.
+    ///
+    /// Memory objects are contiguous in V0. That is an implementation choice,
+    /// not a property of the contract: it lets the kernel read an object's
+    /// bytes as one slice through the direct map, which is what the ELF reader
+    /// and the mediated copies need. Fragmentation therefore shows up as a
+    /// refused reservation rather than as a partial object, which is the
+    /// behaviour the resource contract already requires of an exhausted pool.
+    pub fn alloc_contiguous(&mut self, count: u64, owner: Owner) -> Result<Frame, AllocError> {
+        if count == 0 {
+            return Err(AllocError::OutOfMemory);
+        }
+        let count = count as usize;
+        let mut index = 0usize;
+        while index + count <= self.frames {
+            let mut run = 0usize;
+            while run < count && !self.test(index + run) {
+                run += 1;
+            }
+            if run == count {
+                for offset in 0..count {
+                    let frame = index + offset;
+                    self.set(frame);
+                    self.free -= 1;
+                    self.charged[owner.slot()] += 1;
+                    let frame = Frame::containing((frame as u64) * PAGE_SIZE);
+                    // SAFETY: the frame was free, so no other owner holds a
+                    // reference to it, and the direct map covers it because the
+                    // bitmap only ever tracked frames below the map limit.
+                    unsafe { core::ptr::write_bytes(frame.hhdm_ptr(), 0, PAGE_SIZE as usize) };
+                }
+                return Ok(Frame::containing((index as u64) * PAGE_SIZE));
+            }
+            // `index + run` is the first frame that is taken, so the next run
+            // cannot start before the frame after it.
+            index += run + 1;
+        }
+        Err(AllocError::OutOfMemory)
     }
 
     /// Returns a frame charged to `owner`.

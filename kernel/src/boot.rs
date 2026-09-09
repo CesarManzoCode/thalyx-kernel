@@ -17,9 +17,11 @@ use crate::arch::x86_64::serial::{COM1, Uart};
 use crate::arch::x86_64::{cpu, fpu, gdt, idt, lapic, paging::AddressSpace, pic, syscall, trap};
 use crate::event;
 use crate::harness;
+use crate::k2boot;
 use crate::layout;
 use crate::mm::frame::FrameAllocator;
 use crate::mm::{Frame, Owner, Rights};
+use crate::obj::ScopeId;
 use crate::state::{IDLE_THREAD, MACHINE, ThreadKind, ThreadState};
 use crate::{domain, sched, time};
 
@@ -280,19 +282,31 @@ pub unsafe fn start(bootinfo_phys: u64) -> ! {
 
     start_timer(lapic_phys);
     establish_idle_thread(&info);
-    let created = create_initial_domains();
+
+    // The resource tree exists before the first domain does. Nothing the kernel
+    // creates from here on is unaccounted: every object is charged to a scope,
+    // starting with the root scope that owns the machine.
+    let root = {
+        let mut machine = MACHINE.lock();
+        machine.boot_epoch = info.boot_epoch;
+        let root = k2boot::establish_root(&mut machine);
+        k2boot::establish_control_log(&mut machine, root);
+        root
+    };
+
+    let created = create_initial_domains(root);
 
     reclaim_boot_memory(&info);
 
     if created == 0 {
-        event!("k1.terminal", "reason=no_domain_created");
+        event!("k2.terminal", "reason=no_domain_created status=incomplete");
         harness::finish(harness::STATUS_PANIC);
     }
 
-    sched::run_until_idle();
+    let terminal = sched::run_until_idle();
     domain::reap_dead();
 
-    summarize();
+    summarize(terminal);
     harness::finish(harness::STATUS_COMPLETE)
 }
 
@@ -566,7 +580,83 @@ fn establish_idle_thread(info: &BootInfo) {
     );
 }
 
-fn create_initial_domains() -> usize {
+/// Builds the initial package.
+///
+/// A package that carries a supervisor module selects the K2 path: the kernel
+/// builds exactly that one domain, hands it an explicit capability manifest and
+/// creates nothing else. A package without one is the K1 regression image, in
+/// which the kernel instantiates every module itself. Keeping both paths on one
+/// kernel is what lets the K1 evidence stay executable while K2 exists.
+fn create_initial_domains(root: ScopeId) -> usize {
+    let supervisor = modules()
+        .iter()
+        .find(|module| module.kind == module_kind::SUPERVISOR);
+    match supervisor {
+        Some(module) => create_supervisor(root, module),
+        None => create_k1_domains(root),
+    }
+}
+
+fn create_supervisor(root: ScopeId, supervisor: &thalyx_boot_protocol::BootModule) -> usize {
+    let images: [thalyx_boot_protocol::BootModule; MAX_MODULES] = {
+        let mut buffer = [EMPTY_MODULE; MAX_MODULES];
+        let mut count = 0;
+        for module in modules() {
+            if module.kind == module_kind::USER_ELF && count < MAX_MODULES {
+                buffer[count] = *module;
+                count += 1;
+            }
+        }
+        let _ = count;
+        buffer
+    };
+    let count = modules()
+        .iter()
+        .filter(|module| module.kind == module_kind::USER_ELF)
+        .count();
+
+    let index = {
+        let mut machine = MACHINE.lock();
+        // The package chose this path, and the run records which one it took.
+        // Two images built from one kernel differ only here, so a log that did
+        // not say which it was would be ambiguous about the thing that matters.
+        machine.managed_boot = true;
+        k2boot::establish_supervisor(&mut machine, root, supervisor, &images[..count])
+    };
+    let Some(index) = index else {
+        event!("k2.terminal", "reason=no_supervisor status=incomplete");
+        return 0;
+    };
+    report_domain(index, "supervisor");
+    match domain::activate(index) {
+        Ok(()) => {
+            let (entry, segments, thread) = {
+                let machine = MACHINE.lock();
+                (
+                    machine.domains[index].entry,
+                    machine.domains[index].segments,
+                    machine.domains[index].first_thread().unwrap_or(usize::MAX),
+                )
+            };
+            event!(
+                "domain.activated",
+                "domain={index} name=supervisor thread={thread} entry=0x{entry:x} \
+                 segments={segments} state=runnable role=root_supervisor fault_channel=absent"
+            );
+            1
+        }
+        Err(refusal) => {
+            event!(
+                "domain.activation_refused",
+                "domain={index} name=supervisor reason={}",
+                refusal.name()
+            );
+            0
+        }
+    }
+}
+
+fn create_k1_domains(root: ScopeId) -> usize {
     let mut created = 0usize;
     for module in modules() {
         let name_len = module.name.iter().position(|byte| *byte == 0).unwrap_or(32);
@@ -593,7 +683,7 @@ fn create_initial_domains() -> usize {
             )
         };
 
-        match domain::create(name, image) {
+        match domain::create(name, image, root) {
             Ok(index) => {
                 if expect_reject {
                     event!(
@@ -609,7 +699,7 @@ fn create_initial_domains() -> usize {
                             (
                                 machine.domains[index].entry,
                                 machine.domains[index].segments,
-                                machine.domains[index].thread.unwrap_or(usize::MAX),
+                                machine.domains[index].first_thread().unwrap_or(usize::MAX),
                             )
                         };
                         event!(
@@ -726,7 +816,7 @@ fn reclaim_boot_memory(info: &BootInfo) {
     );
 }
 
-fn summarize() {
+fn summarize(terminal: sched::Terminal) {
     let machine = MACHINE.lock();
     let ticks = machine.ticks;
     let preemptions = machine.preemptions;
@@ -751,10 +841,17 @@ fn summarize() {
             machine.allocator().charged(Owner::Domain(index as u16))
         };
         let name = domain::domain_name(index);
+        let (handles, scope_id) = {
+            let machine = MACHINE.lock();
+            (
+                machine.domains[index].caps.live(),
+                machine.scopes[machine.domains[index].owner_scope as usize].id,
+            )
+        };
         event!(
             "k1.domain_summary",
             "domain={index} name={name} final_state={} exit_reason={reason} notes={notes} \
-             charged_frames={charged}",
+             charged_frames={charged} handles_held={handles} scope={scope_id}",
             state.name()
         );
     }
@@ -766,13 +863,57 @@ fn summarize() {
     let reclaimed = machine.reclaimed_frames;
     drop(machine);
 
+    // Obligations nobody discharged and the path the package chose. A run that
+    // ended tidily while an invocation was still charged somewhere would look
+    // exactly like one that did not, without the first number.
+    let (outstanding, managed) = {
+        let machine = MACHINE.lock();
+        let outstanding = machine
+            .root_scope
+            .map_or(0, |root| crate::api::scopeops::outstanding(&machine, root));
+        (outstanding, machine.managed_boot)
+    };
+
     event!(
         "k1.summary",
         "timer_ticks={ticks} preemptions={preemptions} preempt_records_emitted={records} \
          user_faults={faults} modules_rejected={rejected} kernel_charged_frames={kernel_charged} \
          free_frames={free} usable_frames_at_boot={usable} boot_frames_reclaimed={reclaimed} \
-         plane=diagnostic coalesced={}",
+         invocations_outstanding={outstanding} plane=diagnostic coalesced={}",
         u8::from(preemptions > u64::from(records))
     );
-    event!("k1.terminal", "reason=no_runnable_domain status=complete");
+    // What the run actually reached, named. A list of what was never invoked is
+    // the honest form of "this does not cover everything": it says which parts
+    // of the interface this evidence is silent about instead of leaving a
+    // reader to assume it covers them.
+    if managed {
+        let reached = MACHINE.lock().operations_reached;
+        let total = thalyx_abi::generated::OPERATIONS.len();
+        let count = reached.count_ones();
+        event!(
+            "k2.coverage",
+            "operations_assigned={total} operations_reached={count}"
+        );
+        for (index, spec) in thalyx_abi::generated::OPERATIONS.iter().enumerate() {
+            if reached & (1u64 << index) == 0 {
+                event!(
+                    "k2.operation_untouched",
+                    "operation=0x{:x} name={}",
+                    spec.code,
+                    spec.name
+                );
+            }
+        }
+    }
+
+    event!(
+        "k1.terminal",
+        "reason={} boot_path={} status=complete",
+        terminal.name(),
+        if managed {
+            "k2_supervisor"
+        } else {
+            "k1_domains"
+        }
+    );
 }

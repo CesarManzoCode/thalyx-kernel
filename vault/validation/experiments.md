@@ -7,16 +7,16 @@ status: planned
 
 ## Obligaciones de implementación
 
-Salvo la parte de EXP-01 ejecutada en K1, estos experimentos están **pendientes**. Los modelos de diseño que ya se pueden ejecutar tienen nombres MODEL-01/02 y se reportan por separado.
+EXP-01 está ejecutado; EXP-02, EXP-03, EXP-04 y EXP-06 lo están **en su alcance K2**, que es uniprocesador, sin dispositivos y sin estado durable. El resto está **pendiente**. Los modelos de diseño que ya se pueden ejecutar tienen nombres MODEL-01/02 y se reportan por separado.
 
 | ID | Experimento | Criterio de corrección | Fase |
 |---|---|---|---|
-| EXP-01 | Arranque y dos dominios adversarios; faults y FP. | Primer ring 3 después de protección; probes ilegales fallan sin dañar otro dominio; temporizador preempta un loop. | K1–K2. Parte de K1 ejecutada: [resultado y límites](../evidence/k1-protected-boot.md). |
-| EXP-02 | Caps: derivar, mover, copiar, expirar, reciclar slots y reiniciar. | Ninguna autoridad amplificada ni handle antiguo reinterpretado; operaciones cerradas rechazadas. | K2–K3 |
-| EXP-03 | Cierre concurrente con RPC, servidor muerto y operaciones recibidas. | Barrera separada de drenaje, contadores no falsamente cero, resultado posterior admitido solo cuando corresponde. | K2–K4 |
-| EXP-04 | Fan-out, CPU SMP, memoria, tickets y mantenimiento. | Conservación de cargos y presupuesto agregado, deuda visible, recuperación conserva sus reservas. | K2–K3 |
+| EXP-01 | Arranque y dos dominios adversarios; faults y FP. | Primer ring 3 después de protección; probes ilegales fallan sin dañar otro dominio; temporizador preempta un loop. | K1–K2. **Ejecutado**: [K1](../evidence/k1-protected-boot.md) y [K2](../evidence/k2-objects-authority-work.md). |
+| EXP-02 | Caps: derivar, mover, copiar, expirar, reciclar slots y reiniciar. | Ninguna autoridad amplificada ni handle antiguo reinterpretado; operaciones cerradas rechazadas. | K2–K3. **Parte K2 ejecutada**, sin reinicio ni concurrencia: [resultado y límites](../evidence/k2-objects-authority-work.md). |
+| EXP-03 | Cierre concurrente con RPC, servidor muerto y operaciones recibidas. | Barrera separada de drenaje, contadores no falsamente cero, resultado posterior admitido solo cuando corresponde. | K2–K4. **Parte K2 ejecutada**, sin servidor muerto ni estado durable: [resultado y límites](../evidence/k2-objects-authority-work.md). |
+| EXP-04 | Fan-out, CPU SMP, memoria, tickets y mantenimiento. | Conservación de cargos y presupuesto agregado, deuda visible, recuperación conserva sus reservas. | K2–K3. **Parte K2 ejecutada**, sin SMP: [resultado y límites](../evidence/k2-objects-authority-work.md). |
 | EXP-05 | Alias y TLB remotos, DMA tardío, reset, zeroing y estado FP. | No reutilización peligrosa; sello solo después de retirada; perfil DMA honesto. | K3 |
-| EXP-06 | IPC malformado y agotamiento de colas/handles/logs. | Sin efectos parciales de transferencia, sin allocation ilimitado y cierre disponible. | K2–K3 |
+| EXP-06 | IPC malformado y agotamiento de colas/handles/logs. | Sin efectos parciales de transferencia, sin allocation ilimitado y cierre disponible. | K2–K3. **Parte K2 ejecutada**, sin concurrencia: [resultado y límites](../evidence/k2-objects-authority-work.md). |
 | EXP-07 | Versiones, herramientas que cambian inputs, CAS y ABA. | Validación ligada a versión; conflicto correcto; no publicación con permiso de escritura privada. | K4 |
 | EXP-08 | Caídas en cada escritura/flush/respuesta, reintentos y compactación. | ACK recuperable; raíz/política/recibo coherentes; sin doble efecto por retry ni liberación temprana. | K4 |
 | EXP-09 | Evidencia incompleta, remoto incierto, saturación y servicio de control perdido. | No falsa auditabilidad, rollback ni causalidad; diagnóstico nombra el límite. | K4–K5 |

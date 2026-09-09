@@ -23,6 +23,13 @@ const CACHE_DISABLE: u64 = 1 << 4;
 const HUGE: u64 = 1 << 7;
 const NO_EXECUTE: u64 = 1 << 63;
 
+/// Leaf flag reported by [`AddressSpace::translate`]: the page is writable.
+pub const FLAG_WRITABLE: u64 = WRITABLE;
+/// Leaf flag reported by [`AddressSpace::translate`]: the page is reachable
+/// from ring 3.
+pub const FLAG_USER: u64 = USER;
+/// Leaf flag reported by [`AddressSpace::translate`]: the page is not
+
 const ADDRESS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 const ENTRIES: usize = 512;
 

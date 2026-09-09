@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
-"""Build the K1 boot image.
+"""Build a Thalyx boot image.
 
 Produces, from sources only:
 
-  build/thalyx-k1/kernel.elf     the kernel image
-  build/thalyx-k1/boot.tbp       the initial boot package
-  build/thalyx-k1.img            a FAT-formatted EFI system partition image
+  build/thalyx-<phase>/kernel.elf   the kernel image
+  build/thalyx-<phase>/boot.tbp     the boot package
+  build/thalyx-<phase>.img          a FAT-formatted EFI system partition image
 
-The package is the initial set of user domains. It carries one deliberately
-malformed module: a copy of a valid image whose first loadable segment claims a
-kernel address. Nothing in the kernel is written to recognise it. It is there so
-that the run shows the validator refusing an image on the same code path that
-accepts the others, rather than only showing acceptance.
+The kernel is the same binary in every phase. What differs is the package, and
+the package is what selects the kernel's boot path: a module declared
+`SUPERVISOR` takes the K2 route, and its absence keeps the K1 domains. Building
+both from one script is deliberate -- if the K2 image were produced by a
+different toolchain path, "K1 still passes" would be a claim about two kernels.
+
+The K1 package carries one deliberately malformed module: a copy of a valid
+image whose first loadable segment claims a kernel address. Nothing in the
+kernel is written to recognise it. It is there so that the run shows the
+validator refusing an image on the same code path that accepts the others,
+rather than only showing acceptance.
 """
 
 from __future__ import annotations
@@ -32,8 +38,6 @@ import toolchain as tc  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "build"
-STAGE = BUILD / "thalyx-k1"
-IMAGE = BUILD / "thalyx-k1.img"
 
 KERNEL_TARGET = "x86_64-unknown-none"
 LOADER_TARGET = "x86_64-unknown-uefi"
@@ -46,6 +50,7 @@ PACKAGE_VERSION = (0, 1)
 PACKAGE_HEADER_LEN = 40
 PACKAGE_ENTRY_LEN = 64
 MODULE_KIND_USER_ELF = 1
+MODULE_KIND_SUPERVISOR = 2
 MODULE_FLAG_EXPECT_REJECT = 1
 
 # Mirrors `thalyx_boot_protocol::USER_MAX_ADDR`: the patched module's segment is
@@ -60,15 +65,30 @@ KERNEL_RANGE_ADDRESS = 0xFFFFFFFF80000000
 IMAGE_SERIAL = "54484c58"
 IMAGE_EPOCH = 315532800
 
-# Programs built for the initial package, and the domains instantiated from
-# them. `worker` appears twice on purpose: two surviving domains keep preemption
+# Programs built for the K1 package, and the domains instantiated from them.
+# `worker` appears twice on purpose: two surviving domains keep preemption
 # observable after every faulting domain is gone.
-USER_PROGRAMS = ["worker", "trespasser", "wxprobe"]
-MODULE_INSTANCES = [
+K1_PROGRAMS = ["worker", "trespasser", "wxprobe"]
+K1_INSTANCES = [
     ("worker-a", "worker"),
     ("worker-b", "worker"),
     ("trespasser", "trespasser"),
     ("wxprobe", "wxprobe"),
+]
+
+# Programs built for the K2 package. Exactly one carries the supervisor kind:
+# the kernel refuses a package that declares more than one, because "the first
+# supervisor" has to be a single answer.
+#
+# The module names are what the supervisor matches on. It is not told which slot
+# holds which image; it asks each sealed object for its label, so these names
+# are part of the interface between the package and the program, not a layout
+# the program assumes.
+K2_PROGRAMS = ["k2super", "k2server", "k2client"]
+K2_INSTANCES = [
+    ("k2super", "k2super", MODULE_KIND_SUPERVISOR),
+    ("k2server", "k2server", MODULE_KIND_USER_ELF),
+    ("k2client", "k2client", MODULE_KIND_USER_ELF),
 ]
 
 
@@ -150,19 +170,19 @@ def patch_malformed(source: Path, destination: Path) -> None:
     raise SystemExit(f"{source} has no loadable segment to patch")
 
 
-def build_package(entries: list[tuple[str, Path, int]], destination: Path) -> None:
+def build_package(entries: list[tuple[str, Path, int, int]], destination: Path) -> None:
     """Writes a boot package: header, directory, then page-aligned payloads."""
     directory_end = PACKAGE_HEADER_LEN + len(entries) * PACKAGE_ENTRY_LEN
     offset = (directory_end + 4095) // 4096 * 4096
 
     records = []
     payloads = []
-    for name, path, flags in entries:
+    for name, path, kind, flags in entries:
         payload = path.read_bytes()
         encoded = name.encode("ascii")
         if len(encoded) >= 32:
             raise SystemExit(f"module name too long: {name}")
-        records.append((encoded.ljust(32, b"\0"), offset, len(payload), flags))
+        records.append((encoded.ljust(32, b"\0"), offset, len(payload), kind, flags))
         payloads.append((offset, payload))
         offset += (len(payload) + 4095) // 4096 * 4096
 
@@ -181,7 +201,7 @@ def build_package(entries: list[tuple[str, Path, int]], destination: Path) -> No
         total,
         0,
     )
-    for index, (name, start, length, flags) in enumerate(records):
+    for index, (name, start, length, kind, flags) in enumerate(records):
         struct.pack_into(
             "<32sQQIIQ",
             blob,
@@ -189,7 +209,7 @@ def build_package(entries: list[tuple[str, Path, int]], destination: Path) -> No
             name,
             start,
             length,
-            MODULE_KIND_USER_ELF,
+            kind,
             flags,
             0,
         )
@@ -198,23 +218,31 @@ def build_package(entries: list[tuple[str, Path, int]], destination: Path) -> No
     destination.write_bytes(bytes(blob))
 
 
-def build_esp(tools: tc.Toolchain, loader: Path, kernel: Path, package: Path, size_mib: int) -> None:
-    if IMAGE.exists():
-        IMAGE.unlink()
-    with IMAGE.open("wb") as handle:
+def build_esp(
+    tools: tc.Toolchain,
+    loader: Path,
+    kernel: Path,
+    package: Path,
+    size_mib: int,
+    image: Path,
+    volume: str,
+) -> None:
+    if image.exists():
+        image.unlink()
+    with image.open("wb") as handle:
         handle.truncate(size_mib * 1024 * 1024)
 
     # mformat derives a volume serial from the clock, so it is pinned here; the
     # directory timestamps come from SOURCE_DATE_EPOCH, which `main` sets.
 
     def mtool(binary: Path, *args: str) -> None:
-        argv = [str(binary), "-i", str(IMAGE), *args]
+        argv = [str(binary), "-i", str(image), *args]
         print("+", " ".join(argv), file=sys.stderr)
         result = tools.run(argv, capture_output=True, text=True)
         if result.returncode != 0:
             raise SystemExit(f"{argv[0]} failed: {result.stderr.strip()}")
 
-    mtool(tools.mformat, "-F", "-N", IMAGE_SERIAL, "-v", "THALYXK1", "::")
+    mtool(tools.mformat, "-F", "-N", IMAGE_SERIAL, "-v", volume, "::")
     mtool(tools.mmd, "::/EFI")
     mtool(tools.mmd, "::/EFI/BOOT")
     mtool(tools.mcopy, str(loader), "::/EFI/BOOT/BOOTX64.EFI")
@@ -230,6 +258,7 @@ def digest(path: Path) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", default="release", choices=["debug", "release"])
+    parser.add_argument("--phase", default="k1", choices=["k1", "k2"])
     parser.add_argument("--size-mib", type=int, default=64)
     arguments = parser.parse_args()
 
@@ -239,38 +268,58 @@ def main() -> int:
         print(str(error), file=sys.stderr)
         return 1
 
+    phase = arguments.phase
+    stage = BUILD / f"thalyx-{phase}"
+    image = BUILD / f"thalyx-{phase}.img"
+    programs = K1_PROGRAMS if phase == "k1" else K2_PROGRAMS
+
     # Read by rust-lld for the loader's PE timestamp and by mtools for the FAT
     # directory entries. Set before the first build so both see it.
     os.environ["SOURCE_DATE_EPOCH"] = str(IMAGE_EPOCH)
 
-    STAGE.mkdir(parents=True, exist_ok=True)
+    stage.mkdir(parents=True, exist_ok=True)
 
     cargo_build("thalyx-boot-uefi", LOADER_TARGET, arguments.profile)
     cargo_build("thalyx-kernel", KERNEL_TARGET, arguments.profile)
-    for program in USER_PROGRAMS:
+    for program in programs:
         cargo_build(f"thalyx-user-{program}", KERNEL_TARGET, arguments.profile)
 
     loader = artifact(LOADER_TARGET, arguments.profile, "bootx64.efi")
     kernel = artifact(KERNEL_TARGET, arguments.profile, "kernel")
-    shutil.copyfile(kernel, STAGE / "kernel.elf")
+    shutil.copyfile(kernel, stage / "kernel.elf")
 
-    for program in USER_PROGRAMS:
+    for program in programs:
         source = artifact(KERNEL_TARGET, arguments.profile, program)
-        shutil.copyfile(source, STAGE / f"{program}.elf")
+        shutil.copyfile(source, stage / f"{program}.elf")
 
-    entries: list[tuple[str, Path, int]] = [
-        (name, STAGE / f"{program}.elf", 0) for name, program in MODULE_INSTANCES
-    ]
+    entries: list[tuple[str, Path, int, int]] = []
+    if phase == "k1":
+        entries = [
+            (name, stage / f"{program}.elf", MODULE_KIND_USER_ELF, 0)
+            for name, program in K1_INSTANCES
+        ]
+        malformed = stage / "malformed.elf"
+        patch_malformed(stage / "worker.elf", malformed)
+        entries.append(("malformed", malformed, MODULE_KIND_USER_ELF, MODULE_FLAG_EXPECT_REJECT))
+    else:
+        entries = [
+            (name, stage / f"{program}.elf", kind, 0) for name, program, kind in K2_INSTANCES
+        ]
 
-    malformed = STAGE / "malformed.elf"
-    patch_malformed(STAGE / "worker.elf", malformed)
-    entries.append(("malformed", malformed, MODULE_FLAG_EXPECT_REJECT))
-
-    package = STAGE / "boot.tbp"
+    package = stage / "boot.tbp"
     build_package(entries, package)
-    build_esp(tools, loader, STAGE / "kernel.elf", package, arguments.size_mib)
+    build_esp(
+        tools,
+        loader,
+        stage / "kernel.elf",
+        package,
+        arguments.size_mib,
+        image,
+        f"THALYX{phase.upper()}",
+    )
 
     manifest = {
+        "phase": phase,
         "profile": arguments.profile,
         "rust": subprocess.run(
             ["rustc", "--version"], capture_output=True, text=True, cwd=ROOT
@@ -281,21 +330,26 @@ def main() -> int:
         "targets": {"loader": LOADER_TARGET, "kernel": KERNEL_TARGET, "user": KERNEL_TARGET},
         "artifacts": {
             "loader": {"path": str(loader.relative_to(ROOT)), "sha256": digest(loader)},
-            "kernel": {"path": "build/thalyx-k1/kernel.elf", "sha256": digest(STAGE / "kernel.elf")},
-            "package": {"path": "build/thalyx-k1/boot.tbp", "sha256": digest(package)},
-            "image": {"path": str(IMAGE.relative_to(ROOT)), "sha256": digest(IMAGE)},
+            "kernel": {
+                "path": f"build/thalyx-{phase}/kernel.elf",
+                "sha256": digest(stage / "kernel.elf"),
+            },
+            "package": {"path": f"build/thalyx-{phase}/boot.tbp", "sha256": digest(package)},
+            "image": {"path": str(image.relative_to(ROOT)), "sha256": digest(image)},
         },
         "modules": [
             {
                 "name": name,
+                "kind": kind,
                 "sha256": digest(path),
                 "expect_reject": bool(flags & MODULE_FLAG_EXPECT_REJECT),
             }
-            for name, path, flags in entries
+            for name, path, kind, flags in entries
         ],
         "toolchain": tools.describe(),
     }
-    (BUILD / "image-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    name = "image-manifest.json" if phase == "k1" else f"image-manifest-{phase}.json"
+    (BUILD / name).write_text(json.dumps(manifest, indent=2) + "\n")
     print(json.dumps(manifest, indent=2))
     return 0
 

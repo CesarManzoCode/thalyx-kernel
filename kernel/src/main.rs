@@ -1,29 +1,47 @@
 //! Thalyx-Kernel.
 //!
-//! K1 scope: take the machine from the loader's hand-off to user code running
-//! in ring 3 under the kernel's own protection, contain a fault by a user
-//! domain without losing the kernel or the other domains, and preempt a domain
-//! that never yields. Capabilities, scopes, IPC, endpoints and the supervisor
-//! are K2 and are deliberately absent rather than sketched.
+//! K1 took the machine from the loader's hand-off to user code running in ring
+//! 3 under the kernel's own protection, contained a fault by a user domain
+//! without losing the kernel or the other domains, and preempted a domain that
+//! never yields.
+//!
+//! K2 adds what turns that into a system with authority: an object substrate
+//! with generational handles, a grant tree that only ever attenuates, a scope
+//! tree that pays for everything and can be fenced, drained and retired, copied
+//! IPC with facets and work tickets, effect admission, signals and timers, a
+//! control-receipt plane, and a supervisor that receives its authority as an
+//! explicit set of boot capabilities and builds the rest of the system through
+//! the interface. SMP, devices, DMA and durable state remain absent rather than
+//! sketched.
 
 #![no_std]
 #![no_main]
 
+mod api;
 mod arch;
 mod boot;
+mod ctrl;
 mod diag;
 mod domain;
 mod elf;
+mod events;
 mod harness;
+mod ipc;
+mod k2boot;
 mod layout;
+mod limits;
+mod memobj;
 mod mm;
+mod obj;
 mod panic;
 mod sched;
+mod scope;
 mod state;
 mod sync;
 mod syscall;
 mod time;
 mod trap;
+mod ucopy;
 
 /// Entry point the loader jumps to.
 ///

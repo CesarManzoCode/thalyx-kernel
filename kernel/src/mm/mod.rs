@@ -161,16 +161,25 @@ impl RightsError {
 
 /// Who pays for a frame.
 ///
-/// K1 has no scopes, so this is not the sponsorship model of the resource
-/// contract: it is the minimum needed to prove that everything a domain was
-/// charged is returned when the domain dies. The scope tree replaces it in K2.
+/// This is the allocator's half of the sponsorship model: it answers "was every
+/// frame this owner was charged returned?", which is the conservation check a
+/// teardown has to pass. The other half — the ceilings a reservation is checked
+/// against before a frame is taken at all — lives in the scope tree, because a
+/// limit belongs to the resource principal and not to the bitmap.
+///
+/// A domain's own infrastructure (image, stack, page tables) is charged to the
+/// domain so that its teardown can be checked on its own. Pages of a memory
+/// object are charged to the scope that sponsors the object, because the object
+/// can outlive any particular domain that maps it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Owner {
     /// Charged to the kernel itself: page tables of the kernel space, kernel
     /// stacks, the frame bitmap.
     Kernel,
-    /// Charged to a domain, by identifier.
+    /// Charged to a domain, by table index.
     Domain(u16),
+    /// Charged to a scope, by table index.
+    Scope(u16),
 }
 
 impl Owner {
@@ -178,6 +187,7 @@ impl Owner {
         match self {
             Owner::Kernel => 0,
             Owner::Domain(id) => (id as usize) + 1,
+            Owner::Scope(id) => (id as usize) + 1 + crate::limits::MAX_DOMAINS,
         }
     }
 }

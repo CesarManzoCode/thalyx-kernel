@@ -8,6 +8,8 @@
 
 #![no_std]
 
+pub mod k2;
+
 use thalyx_abi::{note, scaffold, status};
 
 /// Emits one diagnostic note. Returns the calling domain's identifier.

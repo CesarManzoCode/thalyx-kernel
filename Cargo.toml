@@ -9,10 +9,13 @@ members = [
     "user/worker",
     "user/trespasser",
     "user/wxprobe",
+    "user/k2super",
+    "user/k2server",
+    "user/k2client",
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.1"
 edition = "2024"
 rust-version = "1.98.1"
 license = "NOASSERTION"

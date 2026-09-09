@@ -116,7 +116,17 @@ pub struct BootModule {
 /// Module classifications used by [`BootModule::kind`].
 pub mod module_kind {
     /// A statically linked ET_EXEC ELF64 image for a user domain.
+    ///
+    /// In a K1 package the kernel instantiates every such module itself. In a
+    /// K2 package it hands each one to the supervisor as a sealed memory
+    /// object, and the supervisor decides what becomes a domain.
     pub const USER_ELF: u32 = 1;
+    /// The image of the first supervisor.
+    ///
+    /// Exactly one module may carry this kind. Its presence is what selects the
+    /// K2 boot path: the kernel builds this domain, gives it an explicit
+    /// capability manifest, and creates nothing else.
+    pub const SUPERVISOR: u32 = 2;
 }
 
 /// Flags carried from the boot package directory into [`BootModule::flags`].
