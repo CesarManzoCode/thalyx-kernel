@@ -57,7 +57,7 @@ La vertical cubre además lo que EXP-02 y EXP-06 piden en alcance K2: copiar una
 
 ### Puerta K2
 
-`tools/check_k2.py` decide dieciocho criterios por separado desde los registros del kernel; los que necesitan las notas de los programas lo dicen en su título. La regresión de K1 es uno de esos criterios, porque una puerta K2 que pasara con el arranque protegido roto mediría otra cosa. `--self-test` daña la ejecución de veinte formas distintas y comprueba que cada daño hace fallar al criterio que le corresponde.
+`tools/check_k2.py` decide diecinueve criterios por separado desde los registros del kernel; los que necesitan las notas de los programas lo dicen en su título. La regresión de K1 es uno de esos criterios, porque una puerta K2 que pasara con el arranque protegido roto mediría otra cosa. `--self-test` daña la ejecución de veintidós formas distintas y comprueba que cada daño hace fallar al criterio que le corresponde.
 
 ### Lo que la vertical corrigió del sustrato
 
@@ -76,8 +76,8 @@ Ejecutar los mecanismos encontró diez defectos que compilar no encuentra, y los
 | Esquema ABI | PASS en 4 comprobaciones. [Comprobador](../../tools/check_abi.py). |
 | Puerta K1 | PASS en 13 criterios decididos por separado desde los registros del kernel, con controles negativos. [Detalle y límites](../evidence/k1-protected-boot.md). |
 | Regresión K1 sobre el sustrato K2 | PASS en los mismos 13 criterios con los mecanismos K2 compilados dentro del kernel. |
-| Puerta K2 | PASS en 18 criterios decididos por separado, la mayoría desde los registros del kernel. [Detalle y límites](../evidence/k2-objects-authority-work.md). |
-| Autocomprobación de la puerta K2 | 20 ejecuciones dañadas de una forma cada una, las 20 detectadas por el criterio que les corresponde. |
+| Puerta K2 | PASS en 19 criterios decididos por separado, la mayoría desde los registros del kernel. [Detalle y límites](../evidence/k2-objects-authority-work.md). |
+| Autocomprobación de la puerta K2 | 22 ejecuciones dañadas de una forma cada una, las 22 detectadas por el criterio que les corresponde. |
 
 ## Qué no existe todavía
 

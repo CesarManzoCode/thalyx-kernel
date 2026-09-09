@@ -355,11 +355,28 @@ pub fn release(table: &mut Table, scope: ScopeId, resource: Resource, amount: u6
 /// replenishment" has to mean if it is to mean anything.
 pub fn roll_window(table: &mut Table, now_ns: u64) {
     let window = now_ns / CPU_WINDOW_NS;
-    for node in table.iter_mut() {
+    for index in 0..MAX_SCOPES {
+        let node = &table[index];
         if node.state == State::Empty || node.window_index == window {
             continue;
         }
         let overrun = node.cpu_window_ns.saturating_sub(node.limits.cpu_budget_ns);
+        if overrun != 0 {
+            // Carried debt that nobody can see is not a limit, it is a number.
+            // The record is emitted only when a window actually closed over
+            // budget, so it says something happened rather than that a window
+            // went by.
+            crate::event!(
+                "scope.debt",
+                "scope={index} id={} label={} window={window} overrun_ns={overrun} \
+                 debt_ns={} budget_ns={} carried_into_next=1",
+                node.id,
+                node.label_str(),
+                node.cpu_debt_ns.saturating_add(overrun),
+                node.limits.cpu_budget_ns
+            );
+        }
+        let node = &mut table[index];
         node.cpu_debt_ns = node.cpu_debt_ns.saturating_add(overrun);
         node.cpu_window_ns = overrun;
         node.closure_used_ns = 0;

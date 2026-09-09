@@ -1070,6 +1070,10 @@ pub mod report {
     pub const TIMER_FIRED: u64 = 0x2013;
     /// The monotonic clock advanced between two readings. Value: the delta.
     pub const CLOCK_ADVANCED: u64 = 0x2014;
+    /// A child's CPU charges also appeared in its ancestors' totals.
+    pub const BUDGET_AGGREGATED: u64 = 0x2015;
+    /// A scope carried debt into a later window. Value: the debt in ns.
+    pub const DEBT_CARRIED: u64 = 0x2016;
 }
 
 /// Reports one observation on the diagnostic plane.

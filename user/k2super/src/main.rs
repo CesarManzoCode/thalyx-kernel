@@ -31,6 +31,10 @@
 //!    on a signal. Every deadline in this interface is an absolute monotonic
 //!    reading, so a program that could not read the clock could not state one,
 //!    and none of them would be usable.
+//! 7. Read its own scope and a child's, and check that what the child spent is
+//!    also counted against the parent. A budget that only bound the leaf would
+//!    be no budget at all: a domain could carve children until the sum of their
+//!    allowances exceeded anything it was given.
 //!
 //! The supervisor has no supervisor. Its fault ends the run.
 
@@ -556,10 +560,48 @@ fn run() -> ! {
     k2::note(report::BUILT, 5);
 
     expiry(own_scope, signal);
+    budget(own_scope, server_scope);
 
     let _ = k2::log_append(log, receipt_kind::SERVICE_NOTE, 0x5417_0002, spins, 0);
     k2::note(report::DONE, 5);
     k2::exit(0)
+}
+
+/// Checks that a child's spending is also charged to its ancestors.
+///
+/// The tree is the mechanism: a scope's budget bounds everything beneath it,
+/// not just the threads it owns directly. If a child could spend without its
+/// parent's totals moving, a domain would only have to create children to
+/// escape whatever it was given.
+fn budget(parent: u64, child: u64) {
+    let (above, below) = match (k2::scope_query(parent), k2::scope_query(child)) {
+        (Ok(above), Ok(below)) => (above, below),
+        (Err(code), _) | (_, Err(code)) => {
+            k2::note(report::UNEXPECTED, code as u64);
+            return;
+        }
+    };
+    if below.cpu_total_ns == 0 {
+        k2::note(report::UNEXPECTED, 0);
+        return;
+    }
+    if above.cpu_total_ns < below.cpu_total_ns {
+        k2::note(report::UNEXPECTED, above.cpu_total_ns);
+        return;
+    }
+    if above.depth >= below.depth {
+        k2::note(report::UNEXPECTED, u64::from(above.depth));
+        return;
+    }
+    k2::note(
+        report::BUDGET_AGGREGATED,
+        above.cpu_total_ns - below.cpu_total_ns,
+    );
+
+    // Debt is what a window that closed over budget carried forward. Reporting
+    // it whether or not it happened is the point: a limit whose overrun nobody
+    // can read is not being enforced, it is being hoped for.
+    k2::note(report::DEBT_CARRIED, above.cpu_debt_ns);
 }
 
 /// Arms a timer against the monotonic clock and waits for it.

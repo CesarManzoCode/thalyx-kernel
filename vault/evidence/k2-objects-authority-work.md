@@ -16,9 +16,9 @@ Una segunda imagen UEFI construida solo desde fuentes con el mismo script y el m
 | Artefacto | Comando | Resultado |
 |---|---|---|
 | Imagen | `python3 tools/build_image.py --phase k2` | `build/thalyx-k2.img`, manifiesto con digest de cada artefacto y herramienta |
-| Ejecución | `python3 tools/run_k2.py` | `exit_status=33` (`k1.terminal status=complete`), 375 registros, ~1.6 s |
-| Veredicto | `python3 tools/check_k2.py` | `K2 GATE PASSED: 18 of 18 criteria met` |
-| Autocomprobación | `python3 tools/check_k2.py --self-test` | `20 of 20 damaged runs were caught` |
+| Ejecución | `python3 tools/run_k2.py` | `exit_status=33` (`k1.terminal status=complete`), 409 registros, ~1.6 s |
+| Veredicto | `python3 tools/check_k2.py` | `K2 GATE PASSED: 19 of 19 criteria met` |
+| Autocomprobación | `python3 tools/check_k2.py --self-test` | `22 of 22 damaged runs were caught` |
 
 Toolchain fijada: `rustc 1.98.1`, targets `x86_64-unknown-uefi` y `x86_64-unknown-none`, QEMU 11.1.1 con OVMF, perfil de CPU `qemu64,+smep,+smap,+pdpe1gb`, un solo núcleo, 512 MiB. El runner de K2 reutiliza el del K1 en lugar de repetir esos parámetros: si las dos fases corrieran en máquinas distintas, la comparación entre ellas mediría también el entorno.
 
@@ -29,10 +29,10 @@ Los contadores temporales de una ejecución —ticks, número de preempciones, v
 Digests de la ejecución registrada:
 
 ```text
-image   95b3240e6a2d2254ae8a875749582a78bd03e47574bd1c97641d3aa55e47140a
-kernel  3a4e91ab708128596668ab3538bcaf6d8d619b59914d030cc1f69c81d320d66a
+image   f147d2988051e3a1d49029b75076c1c88577956c0b8540103a0c05b60c1881af
+kernel  884bbed3105319561b4d666643476add1299c3ff8bcab3acc3a1e21c35d97a75
 loader  669c530b353b8aba9dfa58147167c6879765b3cbaeb109204c41764a1f7bea83
-package a50dffb31b82c9fbd334dd280d219cb37a5f418281e960fcd9ab84e2f0e609db
+package 54f4236b98dac057bccf9f89e672f1d305559289001c57ca4d784ade701c8a9a
 ```
 
 ## Qué observó la ejecución
@@ -75,6 +75,10 @@ V0 toma un plazo monotónico en seis operaciones. Esta ejecución añadió la en
 
 El supervisor leyó el reloj, armó un timer contra esa lectura, esperó a que levantara sus bits en una señal, comprobó que el reloj había avanzado y que el timer constaba disparado y desarmado. Armar con plazo cero se rechazó: cero es como esta interfaz escribe «sin plazo».
 
+### Presupuesto agregado y deuda
+
+El planificador retuvo hilos cuyo ámbito había gastado su ventana; el registro de cada preempción dice si fue por eso. Veintiocho ventanas cerraron por encima del presupuesto y cada una dejó constancia del exceso que arrastraba a la siguiente: una deuda que nadie puede leer no es un límite, es un número. El supervisor comparó además su propio ámbito con uno de sus hijos y comprobó que lo que gasta el hijo también cuenta contra el padre; un presupuesto que solo acotara la hoja se evadiría creando hijos.
+
 ### Contabilidad
 
 La retirada liberó lo que el perímetro patrocinaba y no retuvo nada: cero páginas y cero metadatos cargados a un ámbito retirado. Los tres dominios terminaron sin marcos a su nombre. El kernel acabó con 24 marcos propios y 129 254 libres.
@@ -106,7 +110,7 @@ La regresión de K1 es un criterio de esta puerta. K2 creció dentro del kernel 
 | [EXP-01](../validation/experiments.md) | Completado en su parte K2: primer ring 3 del supervisor tras el manifiesto, dominios adversarios ya cubiertos en [K1](k1-protected-boot.md). | Nada de K2; el resto pertenece a fases posteriores. |
 | [EXP-02](../validation/experiments.md) | Derivar, mover, copiar, expirar, reciclar ranuras y rechazar operaciones bajo un ámbito cerrado, en alcance UP. | Reinicio con handles persistidos, y el reciclado bajo presión concurrente, que es K3. |
 | [EXP-03](../validation/experiments.md) | Cierre concurrente con un RPC en vuelo: barrera separada de drenaje, contadores no falsamente cero, resultado posterior admitido solo desde quiescente. | Servidor muerto durante la retención, y el resultado posterior con estado durable, que es K4. |
-| [EXP-04](../validation/experiments.md) | Conservación de cargos en la retirada, presupuesto agregado por ámbito, reserva de cierre en la cuenta del servidor. | CPU en SMP, deuda observada a lo largo de varias ventanas y mantenimiento, que es K3. |
+| [EXP-04](../validation/experiments.md) | Conservación de cargos en la retirada, presupuesto agregado que alcanza a los ancestros, deuda arrastrada y observada entre ventanas, reserva de cierre retenida y gastada en la cuenta del servidor. | CPU en SMP y mantenimiento, que es K3. |
 | [EXP-06](../validation/experiments.md) | IPC malformado sin efecto parcial, agotamiento de tabla de capacidades, de cola y de log, con cierre disponible. | Agotamiento bajo concurrencia y con varios servidores, que es K3. |
 
 Los invariantes que esta ejecución toca —autoridad no amplificada, origen no falsificable, admisión indivisible, barrera antes que drenaje, obligación que sobrevive al cierre, cargos conservados— quedan **observados en una vertical**, no probados en general. Una vertical ejerce un camino por mecanismo; los mecanismos tienen más caminos.

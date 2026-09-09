@@ -83,6 +83,8 @@ NOTE = {
     "bound": 0x2012,
     "timer_fired": 0x2013,
     "clock_advanced": 0x2014,
+    "budget_aggregated": 0x2015,
+    "debt_carried": 0x2016,
 }
 
 # Mirrors `thalyx_abi::generated::cancel_state` and `scope_state`.
@@ -793,6 +795,58 @@ def check_charge_conservation(records: list[Record], run: dict) -> Result:
     return result
 
 
+def check_aggregate_budget(records: list[Record], run: dict) -> Result:
+    result = Result("budget", "presupuesto agregado y deuda visible")
+
+    # A scope's budget is enforced by the scheduler refusing to dispatch a
+    # thread whose scope chain has spent its window.
+    preempts = by_event(records, "sched.preempt")
+    starved = [record for record in preempts if record.get("starved") == "1"]
+    if not preempts:
+        result.detail = "nothing was preempted, so no budget was ever consumed"
+        return result
+    if not starved:
+        result.detail = (
+            "no thread was ever held back for having spent its scope's window, so the CPU "
+            "budget was never reached"
+        )
+        return result
+
+    # Overrun carried into the next window, in the kernel's own record.
+    debt = by_event(records, "scope.debt")
+    if not debt:
+        result.detail = "no window ever closed over budget, so no debt was carried or shown"
+        return result
+    carried = [record for record in debt if (record.number("overrun_ns") or 0) > 0]
+    if not carried:
+        result.detail = "a debt record was written with no overrun"
+        return result
+
+    # And the tree: what a child spends must also count against its ancestors.
+    aggregated = notes(records, "budget_aggregated")
+    reported = notes(records, "debt_carried")
+    if not aggregated:
+        result.detail = (
+            "no program compared a child scope's spending against its parent's, so the budget "
+            "was never shown to bound more than one scope"
+        )
+        return result
+    if not reported:
+        result.detail = "no program read a scope's carried debt"
+        return result
+
+    scopes = {record.get("label") for record in carried}
+    result.passed = True
+    result.detail = (
+        f"{len(starved)} of {len(preempts)} preemptions held a thread back for its scope's "
+        f"window; {len(carried)} window(s) closed over budget and carried the overrun forward "
+        f"in {len(scopes)} scope(s); a parent's totals exceeded its child's by "
+        f"{aggregated[0].number('b')} ns"
+    )
+    result.evidence = [line_of(starved[0]), line_of(carried[0]), line_of(aggregated[0])]
+    return result
+
+
 def check_bounded_tables(records: list[Record], run: dict) -> Result:
     result = Result("bounds", "tablas y colas acotadas, sin crecimiento ilimitado")
     refused = by_event(records, "k2.refused")
@@ -1049,6 +1103,7 @@ CRITERIA = [
     check_work_tickets,
     check_clock_and_timers,
     check_charge_conservation,
+    check_aggregate_budget,
     check_bounded_tables,
     check_closure_available,
     check_malformed_refused,
@@ -1142,6 +1197,12 @@ MUTATIONS = [
     ),
     ("no timer fired", rewrite("a=0x2013 b=", "a=0x20fe b="), "clock"),
     ("a clock that never advanced", rewrite("a=0x2014 b=", "a=0x20fd b="), "clock"),
+    ("no window ever closed over budget", drop_event("scope.debt"), "budget"),
+    (
+        "a budget nothing was ever held back for",
+        rewrite("starved=1", "starved=0"),
+        "budget",
+    ),
 ]
 
 
