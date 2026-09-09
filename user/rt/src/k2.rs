@@ -17,11 +17,12 @@
 //! naming service; a domain receives capabilities or it has none.
 
 use thalyx_abi::generated::{
-    BindFacetRequest, CallResult, DeriveRequest, DescriptorHeader, DomainCreateRequest,
-    DrainReport, EffectRequest, EndpointCreateRequest, FaultChannelRequest, InstallCapRequest,
-    InvocationInfo, Limits, LogAppendRequest, MapRequest, MemoryBytes, MemoryCreateRequest,
-    MemoryInfo, ReceiveResult, ReplyRequest, ResolveRequest, ScopeCreateRequest, ScopeInfo,
-    ScopeLimits, SendRequest, SignalBits, SignalInfo, ThreadCreateRequest, entry, op, spec, status,
+    BindFacetRequest, CallResult, CapInfo, DeriveRequest, DescriptorHeader, DomainCreateRequest,
+    DrainReport, EffectRequest, EndpointCreateRequest, EndpointInfo, FaultChannelRequest,
+    InstallCapRequest, InvocationInfo, Limits, LogAppendRequest, LogInfo, MapRequest, MemoryBytes,
+    MemoryCreateRequest, MemoryInfo, ReceiveResult, ReplyRequest, ResolveRequest,
+    ScopeCreateRequest, ScopeInfo, ScopeLimits, SendRequest, SignalBits, SignalInfo,
+    ThreadCreateRequest, entry, op, spec, status,
 };
 
 /// Offset of a descriptor body: everything before it is the common header.
@@ -238,6 +239,11 @@ pub fn exit(code: u64) -> ! {
 // Common capability operations
 // ---------------------------------------------------------------------------
 
+/// Reads what a handle names and what its lineage still permits.
+pub fn cap_inspect(handle: u64) -> Result<CapInfo, i64> {
+    query::<CapInfo>(handle, op::CAP_INSPECT).map(|(info, _)| info)
+}
+
 /// Narrows a capability into a new handle of the calling domain.
 pub fn derive(handle: u64, rights_mask: u32, deadline_ns: u64, life_scope: u64) -> Outcome {
     with(
@@ -303,13 +309,16 @@ pub fn scope_drain_status(scope: u64) -> Result<DrainReport, i64> {
 }
 
 /// Retires a drained scope and releases what it held.
-pub fn scope_retire(scope: u64) -> Result<DrainReport, i64> {
+///
+/// Returns the status together with the report the kernel wrote, because a
+/// refusal here is an answer and not just a failure: `DRAIN_INCOMPLETE` comes
+/// with the counters that say what the perimeter is still holding, and a caller
+/// that only saw the status would have to guess.
+pub fn scope_retire(scope: u64) -> (Outcome, DrainReport) {
     let mut desc = Desc::new();
     let len = desc.prepare(op::SCOPE_RETIRE, 0);
-    match call(scope, op::SCOPE_RETIRE, &mut desc, len, 0, 0) {
-        Ok(_) => Ok(desc.body()),
-        Err(code) => Err(code),
-    }
+    let outcome = call(scope, op::SCOPE_RETIRE, &mut desc, len, 0, 0);
+    (outcome, desc.body())
 }
 
 /// Creates a domain from a sealed executable image.
@@ -686,6 +695,16 @@ pub fn invocation_query(invocation: u64) -> Result<InvocationInfo, i64> {
 // Control log
 // ---------------------------------------------------------------------------
 
+/// Reads an endpoint's queue occupancy, facets and epoch.
+pub fn endpoint_query(endpoint: u64) -> Result<EndpointInfo, i64> {
+    query::<EndpointInfo>(endpoint, op::ENDPOINT_QUERY).map(|(info, _)| info)
+}
+
+/// Reads a control log's capacity, occupancy and loss count.
+pub fn log_query(log: u64) -> Result<LogInfo, i64> {
+    query::<LogInfo>(log, op::LOG_QUERY).map(|(info, _)| info)
+}
+
 /// Appends a service note whose origin the kernel stamps over the claim.
 pub fn log_append(log: u64, kind: u32, a: u64, b: u64, claimed_origin_domain_id: u64) -> Outcome {
     with(
@@ -749,6 +768,203 @@ pub mod slot {
     pub const WORK_RESOLVED: u64 = 1 << 1;
 }
 
+/// Descriptors and register arguments the interface has to refuse.
+///
+/// Every probe here is a well-formed *call* carrying a malformed *request*:
+/// the entry, the handle and the operation are real, and exactly one thing
+/// about the descriptor or the registers is wrong. That is the shape of the
+/// mistake a real program makes and the shape an attacker sends deliberately,
+/// and it is the one worth refusing on the same path that accepts everything
+/// else. A kernel that only ever sees descriptors its own helper built has not
+/// been shown to validate anything.
+///
+/// None of these may have a partial effect. The operations chosen take a
+/// capability or a payload, so a refusal that had already moved something would
+/// be visible afterwards as a missing handle.
+pub mod malformed {
+    use super::{BODY, Desc, Outcome, finish};
+    use thalyx_abi::generated::{DescriptorHeader, SendRequest, cap_op, entry, op, spec, status};
+
+    /// Sends a descriptor the caller has deliberately damaged after preparing
+    /// it, so the kernel sees a structurally valid call with an invalid body.
+    fn send(handle: u64, operation: u32, desc: &Desc, len: u64, flags: u64) -> Outcome {
+        // SAFETY: the pointer names this program's own descriptor for `len`
+        // bytes. The kernel validates the range and the contents and refuses
+        // them; that is the point of the call.
+        let (st, aux) = unsafe {
+            thalyx_abi::invoke(
+                entry::INVOKE,
+                handle,
+                u64::from(operation),
+                core::ptr::from_ref(desc).addr() as u64,
+                len,
+                flags,
+                0,
+            )
+        };
+        finish(st, aux)
+    }
+
+    /// The header's declared length disagrees with the length in R10.
+    pub fn short_length(handle: u64) -> Outcome {
+        let mut desc = Desc::new();
+        let len = desc.prepare(op::MEMORY_QUERY, 0);
+        send(handle, op::MEMORY_QUERY, &desc, u64::from(len) - 8, 0)
+    }
+
+    /// The header names a different operation from the one in RSI.
+    pub fn wrong_opcode(handle: u64) -> Outcome {
+        let mut desc = Desc::new();
+        let len = desc.prepare(op::MEMORY_QUERY, 0);
+        let mut header: DescriptorHeader = desc.get(0);
+        header.opcode = op::SCOPE_QUERY;
+        desc.put(0, header);
+        send(handle, op::MEMORY_QUERY, &desc, u64::from(len), 0)
+    }
+
+    /// The header's reserved word is not zero.
+    pub fn dirty_reserved(handle: u64) -> Outcome {
+        let mut desc = Desc::new();
+        let len = desc.prepare(op::MEMORY_QUERY, 0);
+        let mut header: DescriptorHeader = desc.get(0);
+        header.reserved = 0x1;
+        desc.put(0, header);
+        send(handle, op::MEMORY_QUERY, &desc, u64::from(len), 0)
+    }
+
+    /// The header claims a major version this kernel does not implement.
+    pub fn future_version(handle: u64) -> Outcome {
+        let mut desc = Desc::new();
+        let len = desc.prepare(op::MEMORY_QUERY, 0);
+        let mut header: DescriptorHeader = desc.get(0);
+        header.major = header.major.wrapping_add(1);
+        desc.put(0, header);
+        send(handle, op::MEMORY_QUERY, &desc, u64::from(len), 0)
+    }
+
+    /// The descriptor pointer is not memory this domain can reach.
+    pub fn unreachable_descriptor(handle: u64) -> Outcome {
+        let len = spec(op::MEMORY_QUERY).map_or(0, |s| u64::from(s.descriptor_len));
+        // SAFETY: the kernel validates the range against this domain's own page
+        // tables and refuses it; it never dereferences an address it could not
+        // translate for the caller.
+        let (st, aux) = unsafe {
+            thalyx_abi::invoke(
+                entry::INVOKE,
+                handle,
+                u64::from(op::MEMORY_QUERY),
+                0xFFFF_8000_0000_0000,
+                len,
+                0,
+                0,
+            )
+        };
+        finish(st, aux)
+    }
+
+    /// A flag bit the interface has not assigned.
+    pub fn unknown_flag(handle: u64) -> Outcome {
+        let mut desc = Desc::new();
+        let len = desc.prepare(op::MEMORY_QUERY, 0);
+        send(handle, op::MEMORY_QUERY, &desc, u64::from(len), 1 << 40)
+    }
+
+    /// An operation code the interface does not assign.
+    pub fn unassigned_operation(handle: u64) -> Outcome {
+        // SAFETY: no descriptor is passed, so there is no memory precondition.
+        let (st, aux) =
+            unsafe { thalyx_abi::invoke(entry::INVOKE, handle, 0x00FF_00FF, 0, 0, 0, 0) };
+        finish(st, aux)
+    }
+
+    /// Builds a request body for `operation` and submits it.
+    ///
+    /// The operation is the caller's, deliberately: a body-level check runs
+    /// after the rights check, so probing it with an operation the caller has
+    /// no right to would only ever observe the rights check. These probes have
+    /// to arrive on a call the caller is entitled to make.
+    fn transfer(endpoint: u64, operation: u32, body: SendRequest) -> Outcome {
+        let mut desc = Desc::new();
+        let len = desc.prepare(operation, 0);
+        desc.set_body(body);
+        send(endpoint, operation, &desc, u64::from(len), 0)
+    }
+
+    /// A message claiming more capabilities than the interface allows.
+    ///
+    /// This one is a transfer, so a partial effect would be observable: the
+    /// sender would come back missing a handle it still holds.
+    pub fn overlong_cap_count(endpoint: u64, operation: u32, cap: u64) -> Outcome {
+        transfer(
+            endpoint,
+            operation,
+            SendRequest {
+                payload_len: 0,
+                cap_count: 9,
+                caps: [cap, 0, 0, 0],
+                cap_ops: [0; 4],
+                payload: [0; 256],
+            },
+        )
+    }
+
+    /// A message whose payload is longer than the inline limit.
+    pub fn overlong_payload(endpoint: u64, operation: u32) -> Outcome {
+        transfer(
+            endpoint,
+            operation,
+            SendRequest {
+                payload_len: 4096,
+                cap_count: 0,
+                caps: [0; 4],
+                cap_ops: [0; 4],
+                payload: [0; 256],
+            },
+        )
+    }
+
+    /// A capability operation code the interface does not define.
+    pub fn unknown_cap_op(endpoint: u64, operation: u32, cap: u64) -> Outcome {
+        transfer(
+            endpoint,
+            operation,
+            SendRequest {
+                payload_len: 0,
+                cap_count: 1,
+                caps: [cap, 0, 0, 0],
+                cap_ops: [7, 0, 0, 0],
+                payload: [0; 256],
+            },
+        )
+    }
+
+    /// The same handle moved twice in one message.
+    pub fn duplicate_move(endpoint: u64, operation: u32, cap: u64) -> Outcome {
+        transfer(
+            endpoint,
+            operation,
+            SendRequest {
+                payload_len: 0,
+                cap_count: 2,
+                caps: [cap, cap, 0, 0],
+                cap_ops: [cap_op::MOVE, cap_op::MOVE, 0, 0],
+                payload: [0; 256],
+            },
+        )
+    }
+
+    /// Every status this module expects, so a caller states the pairing once.
+    pub const EXPECTED: [(&str, i64); 4] = [
+        ("structure", status::INVALID_ARGUMENT),
+        ("version", status::INCOMPATIBLE_VERSION),
+        ("address", status::INVALID_ADDRESS),
+        ("operation", status::NOT_SUPPORTED),
+    ];
+
+    /// Offset of the descriptor body, re-exported for callers building one.
+    pub const BODY_OFFSET: usize = BODY;
+}
+
 /// What a K2 program reports about its own observations.
 ///
 /// These go out on the K1 diagnostic plane, which is deliberately **not** the
@@ -783,6 +999,16 @@ pub mod report {
     pub const DONE: u64 = 0x200B;
     /// A status the program did not expect at all. Value: the status.
     pub const UNEXPECTED: u64 = 0x200C;
+    /// A capability copy behaved as a copy: same rights, different handle.
+    pub const COPIED: u64 = 0x200D;
+    /// A recycled table slot did not answer to the handle it used to have.
+    pub const SLOT_RECYCLED: u64 = 0x200E;
+    /// A bounded table refused rather than growing. Value: entries admitted.
+    pub const BOUNDED: u64 = 0x200F;
+    /// A control log lost ordinary receipts. Value: the loss count.
+    pub const LOG_LOSS: u64 = 0x2010;
+    /// A closing receipt was written while the log was full of ordinary ones.
+    pub const CLOSURE_RECORDED: u64 = 0x2011;
 }
 
 /// Reports one observation on the diagnostic plane.

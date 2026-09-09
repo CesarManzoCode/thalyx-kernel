@@ -616,25 +616,29 @@ pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64)
         }
     };
 
-    match outcome {
-        Ok(aux) => {
-            if spec.writes_response {
-                let machine = MACHINE.lock();
-                let Some(space) = machine.domains[domain].space.as_ref() else {
-                    drop(machine);
-                    return refuse(domain, operation, status::PEER_DEAD);
-                };
-                let bytes = &staging.bytes[..spec.descriptor_len as usize];
-                let written = ucopy::copy_out(space, frame.rdx, bytes);
-                drop(machine);
-                if written.is_err() {
-                    // The operation happened. A failed copy of its result is a
-                    // delivery failure, not an undo, and the interface says so.
-                    return refuse(domain, operation, status::INVALID_ADDRESS);
-                }
-            }
-            (status::OK, aux)
+    // A response goes back whenever a handler wrote one, whatever the status.
+    // Most refusals write nothing and the caller's buffer is left alone; the
+    // ones that refuse with an explanation -- a retirement reporting what is
+    // still outstanding -- would otherwise have their answer thrown away here,
+    // which is the one place it cannot be recovered.
+    if spec.writes_response && staging.filled {
+        let machine = MACHINE.lock();
+        let Some(space) = machine.domains[domain].space.as_ref() else {
+            drop(machine);
+            return refuse(domain, operation, status::PEER_DEAD);
+        };
+        let bytes = &staging.bytes[..spec.descriptor_len as usize];
+        let written = ucopy::copy_out(space, frame.rdx, bytes);
+        drop(machine);
+        if written.is_err() {
+            // The operation happened. A failed copy of its result is a delivery
+            // failure, not an undo, and the interface says so.
+            return refuse(domain, operation, status::INVALID_ADDRESS);
         }
+    }
+
+    match outcome {
+        Ok(aux) => (status::OK, aux),
         Err(code) => refuse(domain, operation, code),
     }
 }
@@ -669,6 +673,7 @@ pub const BODY: usize = core::mem::size_of::<DescriptorHeader>();
 /// A response never leaves the caller's own request bytes in the tail of the
 /// buffer: the descriptor a caller reads back is entirely the kernel's.
 pub fn begin_response(staging: &mut Staging, operation: u32) {
+    staging.filled = true;
     let cookie: u64 = staging.read::<DescriptorHeader>(0).cookie;
     let Some(spec) = spec(operation) else { return };
     for byte in staging.bytes[BODY..spec.descriptor_len as usize].iter_mut() {

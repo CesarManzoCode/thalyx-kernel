@@ -16,6 +16,11 @@
 //! must keep working, because it does not: it is sponsored by this domain's own
 //! scope. Those two facts together are what "the barrier reaches derived
 //! authority, not retained obligations" means in practice.
+//!
+//! Last, with its obligations discharged, it fills its own capability table
+//! until the kernel refuses. A domain that can accumulate handles for free can
+//! make the kernel's tables grow without ever exceeding a limit it was given,
+//! so the interesting result is the refusal, not the successes before it.
 
 #![no_std]
 #![no_main]
@@ -36,9 +41,12 @@ const EFFECT_KIND: u32 = 1;
 /// Detail recorded with the resolution, so the receipt says why it aborted.
 const ABORT_DETAIL: u64 = 0xAB07_0001;
 
-/// Polls between checks of the invocation's cancellation state. The server is
-/// preempted while it spins, which is how the supervisor gets to run and fence.
-const POLL_WORK: u64 = 20_000;
+/// Work between checks of the invocation's cancellation state. Small, because
+/// the state the server is waiting for is one another domain sets and then
+/// stops existing: the origin is fenced first and dies shortly after, and a
+/// server that only looked occasionally would see the second fact and miss the
+/// first. The spin is what lets the supervisor run and fence in between.
+const POLL_WORK: u64 = 200;
 
 fn run() -> ! {
     let endpoint = thalyx_abi::boot_handle(slot::SERVER_ENDPOINT);
@@ -140,10 +148,44 @@ fn run() -> ! {
         }
     }
     let _ = k2::log_append(log, receipt_kind::SERVICE_NOTE, 0x5E70_0003, invocation, 0);
+
+    bounded_table(log);
+
     let _ = k2::signal_raise(signal, slot::WORK_RESOLVED);
 
     k2::note(report::DONE, 3);
     k2::exit(0)
+}
+
+/// Fills the domain's capability table until the kernel refuses to grow it.
+///
+/// The table is a fixed capacity charged as metadata to the domain's scope, so
+/// there are two ways this can end and both are correct: the slots run out, or
+/// the scope's metadata budget does. What must not happen is that it never
+/// ends.
+fn bounded_table(log: u64) {
+    let mut admitted = 0u64;
+    let mut last = log;
+    loop {
+        match k2::cap_copy(last) {
+            Ok(handle) => {
+                admitted += 1;
+                last = handle;
+                if admitted > 1024 {
+                    k2::note(report::UNEXPECTED, admitted);
+                    return;
+                }
+            }
+            Err(code) => {
+                if code == status::LIMIT_EXHAUSTED {
+                    k2::note(report::BOUNDED, admitted);
+                } else {
+                    k2::note(report::UNEXPECTED, code as u64);
+                }
+                return;
+            }
+        }
+    }
 }
 
 rt::entry!(run);

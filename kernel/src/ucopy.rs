@@ -48,6 +48,15 @@ const _: () = {
 pub struct Staging {
     /// The bytes.
     pub bytes: [u8; MAX_OP_DESCRIPTOR],
+    /// Whether a handler has written a response into it.
+    ///
+    /// A refusal usually leaves the buffer untouched, and returning zeros to a
+    /// caller that asked for a report would be worse than returning nothing.
+    /// Some operations, though, refuse *with* an explanation -- a retirement
+    /// that cannot proceed says what is still outstanding -- and the answer is
+    /// useless if the dispatcher discards it because the status was negative.
+    /// This is what tells the two apart.
+    pub filled: bool,
 }
 
 impl Staging {
@@ -56,6 +65,7 @@ impl Staging {
     pub const fn new() -> Self {
         Self {
             bytes: [0; MAX_OP_DESCRIPTOR],
+            filled: false,
         }
     }
 
