@@ -1358,8 +1358,6 @@ pub mod report {
     pub const PAGE_READ: u64 = 0x3012;
     /// A sealed object read the same twice with time in between.
     pub const SEAL_HELD: u64 = 0x3013;
-    /// A domain ran on more than one processor. Value: processors seen.
-    pub const RAN_ON_CPUS: u64 = 0x3014;
     /// The ring validator was run against entries this program forged in
     /// memory the device cannot reach. Value: damaged entries refused.
     pub const VALIDATOR_SELF_TEST: u64 = 0x3015;
