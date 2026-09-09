@@ -89,6 +89,17 @@ NOTE = {
     "copied_bytes": 0x2018,
     "sealed": 0x2019,
     "read_mapped": 0x201A,
+    "replied": 0x201B,
+    "receipts_read": 0x201C,
+    "grant_fenced": 0x201D,
+    "grant_drained": 0x201E,
+    "origin_stamped": 0x201F,
+    "receipts_acked": 0x2020,
+    "limits_narrowed": 0x2021,
+    "domain_observed": 0x2022,
+    "thread_added": 0x2023,
+    "domain_stopped": 0x2024,
+    "signal_observed": 0x2025,
 }
 
 # Mirrors `thalyx_abi::generated::cancel_state` and `scope_state`.
@@ -1139,6 +1150,61 @@ def check_negative_controls(records: list[Record], run: dict) -> Result:
     return result
 
 
+def check_interface_coverage(records: list[Record], run: dict) -> Result:
+    """Every assigned operation must have been reached by dispatch.
+
+    A run that exercises a third of the interface and one that exercises all of
+    it produce the same shape of log, and everything else this gate decides is a
+    statement about the paths that were walked. Without this criterion the gate
+    could stay green while most of the interface went untested, and a reader
+    would have no way to tell from the verdict.
+
+    The count and the list of untouched operations are both checked, against each
+    other. The kernel derives them from the same bitmap, so a count that claims
+    everything while the list still names something is a kernel that is
+    miscounting -- and trusting either one alone would not notice.
+    """
+    result = Result("coverage", "las 51 operaciones asignadas ejercidas")
+    coverage = by_event(records, "k2.coverage")
+    if not coverage:
+        result.detail = "the run emitted no coverage record"
+        return result
+    if len(coverage) != 1:
+        result.detail = f"{len(coverage)} coverage records; expected exactly one"
+        return result
+    record = coverage[0]
+    assigned = record.number("operations_assigned")
+    reached = record.number("operations_reached")
+    if assigned is None or reached is None:
+        result.detail = "the coverage record does not say how many operations it counted"
+        return result
+
+    untouched = by_event(records, "k2.operation_untouched")
+    named = ", ".join(r.get("name") or "?" for r in untouched)
+    if reached < assigned:
+        result.detail = (
+            f"{reached} of {assigned} operations were reached; untouched: {named or 'none named'}"
+        )
+        return result
+    if reached > assigned:
+        result.detail = f"{reached} operations were reached but only {assigned} are assigned"
+        return result
+    if untouched:
+        result.detail = (
+            f"the count says {reached} of {assigned}, but {len(untouched)} operation(s) are still "
+            f"named as untouched: {named}"
+        )
+        return result
+
+    result.passed = True
+    result.detail = (
+        f"all {assigned} assigned operations were reached by dispatch, and the run names none as "
+        f"untouched"
+    )
+    result.evidence = [line_of(record)]
+    return result
+
+
 def check_k1_regression(records: list[Record], run: dict, k1: dict | None) -> Result:
     result = Result("k1", "regresión K1 verde con el sustrato K2")
     if k1 is None:
@@ -1229,6 +1295,7 @@ CRITERIA = [
     check_closure_available,
     check_malformed_refused,
     check_negative_controls,
+    check_interface_coverage,
 ]
 
 
@@ -1354,6 +1421,20 @@ MUTATIONS = [
         "memory",
     ),
     ("the sealed page never mapped or read", drop_event("mem.mapped"), "memory"),
+    ("no coverage record at all", drop_event("k2.coverage"), "coverage"),
+    (
+        "a run that reached less of the interface than it assigns",
+        rewrite_re(
+            r"operations_assigned=(\d+) operations_reached=\d+",
+            r"operations_assigned=\1 operations_reached=0",
+        ),
+        "coverage",
+    ),
+    (
+        "a coverage count that disagrees with its own list of untouched operations",
+        rewrite("sched.preempt ", "k2.operation_untouched "),
+        "coverage",
+    ),
 ]
 
 
