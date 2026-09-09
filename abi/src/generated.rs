@@ -29,7 +29,7 @@ pub mod limit {
     /// `max_endpoint_queue` from the schema.
     pub const MAX_ENDPOINT_QUEUE: u64 = 8;
     /// `max_memory_pages_per_object` from the schema.
-    pub const MAX_MEMORY_PAGES_PER_OBJECT: u64 = 64;
+    pub const MAX_MEMORY_PAGES_PER_OBJECT: u64 = 512;
     /// `cpu_window_ns` from the schema.
     pub const CPU_WINDOW_NS: u64 = 10000000;
     /// `cpu_quantum_ns` from the schema.

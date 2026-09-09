@@ -1,5 +1,7 @@
 //! K2 user domain `k2server`.
 //!
+//! The server answers one ordinary request and then holds the next one.
+//!
 //! The server is the domain that holds work. It receives one request, admits an
 //! effect against it, and then deliberately keeps that obligation open while
 //! the origin of the request is closed underneath it. That is the whole point:
@@ -64,6 +66,29 @@ fn run() -> ! {
     // A claimed origin the kernel is expected to overwrite with the real one.
     // If it ever appears in a receipt as written here, origin is forgeable.
     let _ = k2::log_append(log, receipt_kind::SERVICE_NOTE, 0x5E70_0001, 0, 0xDEAD_BEEF);
+
+    // The ordinary case first: a request, answered and discharged. Replying
+    // resolves the invocation, so nothing is left holding after it.
+    let (_, first) = match k2::endpoint_receive(endpoint, 0, false) {
+        Ok(pair) => pair,
+        Err(code) => {
+            k2::note(report::UNEXPECTED, code as u64);
+            k2::exit(1);
+        }
+    };
+    match k2::invocation_reply(first, 0, b"pong") {
+        Ok(_) => k2::note(report::REPLIED, first),
+        Err(code) => {
+            k2::note(report::UNEXPECTED, code as u64);
+            k2::exit(8);
+        }
+    }
+    // Answering twice is an error, and the interface names it precisely rather
+    // than quietly overwriting a result the caller may already have acted on.
+    k2::expect_refusal(
+        k2::invocation_reply(first, 0, b"again"),
+        status::ALREADY_RESOLVED,
+    );
 
     let (message, invocation) = match k2::endpoint_receive(endpoint, 0, false) {
         Ok(pair) => pair,

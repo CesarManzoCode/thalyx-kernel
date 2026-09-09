@@ -654,6 +654,33 @@ fn publish(scope: u64, target: u64, source: u64) {
         }
     }
 
+    // Taking the mapping away by hand, and putting it back, before the seal
+    // does the same thing on its own account. The two paths have to agree that
+    // a mapping is a record the kernel keeps rather than a page table entry it
+    // forgot about.
+    match k2::domain_unmap(target, PUBLISHED_VADDR, PUBLISHED_PAGES as u32) {
+        Ok(_) => {}
+        Err(code) => {
+            k2::note(report::UNEXPECTED, code as u64);
+            return;
+        }
+    }
+    k2::expect_refusal(
+        k2::domain_unmap(target, PUBLISHED_VADDR, PUBLISHED_PAGES as u32),
+        status::INVALID_ARGUMENT,
+    );
+    if let Err(code) = k2::domain_map(
+        target,
+        published,
+        PUBLISHED_VADDR,
+        0,
+        PUBLISHED_PAGES as u32,
+        right::MEMORY_READ | right::MEMORY_WRITE,
+    ) {
+        k2::note(report::UNEXPECTED, code as u64);
+        return;
+    }
+
     match k2::memory_seal(published) {
         Ok(info) if info.state == memory_state::SEALED && info.writable_maps == 0 => {
             k2::note(report::SEALED, info.pages);

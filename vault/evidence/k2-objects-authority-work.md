@@ -7,7 +7,7 @@ status: observed
 
 Esta nota registra la primera ejecución del sistema de capacidades. K1 mostró que el kernel puede contener a un programa; esto muestra qué puede hacer un programa que no tiene permisos ambientales, y qué le pasa a la autoridad que reparte cuando alguien la cierra debajo de él.
 
-Como en K1, describe lo observado y no lo que la arquitectura promete. Aquí la tentación es distinta y mayor: los mecanismos son numerosos, compilan todos, y una ejecución que termina sin quejarse invita a dar por bueno el conjunto. La ejecución cubre una vertical y sus controles; no cubre los 60 manejadores del esquema.
+Como en K1, describe lo observado y no lo que la arquitectura promete. Aquí la tentación es distinta y mayor: los mecanismos son numerosos, compilan todos, y una ejecución que termina sin quejarse invita a dar por bueno el conjunto. La ejecución cubre una vertical y sus controles. El kernel cuenta cuántas de las 51 operaciones asignadas alcanzó el despacho y **nombra las que no**: 42 de 51 en esta ejecución, y los registros `k2.operation_untouched` dicen cuáles son las nueve restantes. Un número medido es lo que convierte «esto no lo cubre todo» en una afirmación comprobable en lugar de una disculpa.
 
 ## Qué se ejecutó
 
@@ -16,7 +16,7 @@ Una segunda imagen UEFI construida solo desde fuentes con el mismo script y el m
 | Artefacto | Comando | Resultado |
 |---|---|---|
 | Imagen | `python3 tools/build_image.py --phase k2` | `build/thalyx-k2.img`, manifiesto con digest de cada artefacto y herramienta |
-| Ejecución | `python3 tools/run_k2.py` | `exit_status=33` (`k1.terminal status=complete`), 432 registros, ~1.6 s |
+| Ejecución | `python3 tools/run_k2.py` | `exit_status=33` (`k1.terminal status=complete`), 397 registros, ~1.7 s |
 | Veredicto | `python3 tools/check_k2.py` | `K2 GATE PASSED: 20 of 20 criteria met` |
 | Autocomprobación | `python3 tools/check_k2.py --self-test` | `25 of 25 damaged runs were caught` |
 
@@ -29,10 +29,10 @@ Los contadores temporales de una ejecución —ticks, número de preempciones, v
 Digests de la ejecución registrada:
 
 ```text
-image   c12e6deebb6441f18992bdc5eab19bb2423b658db7e9ec62b63adeffe3ecef7d
-kernel  884bbed3105319561b4d666643476add1299c3ff8bcab3acc3a1e21c35d97a75
+image   e5fb3e0a39c958e0b2349b646bb24b7b2140420036b726a2fcb026148cc73fc3
+kernel  7dc64fdfca90e6e1694cd236941929357e881bfa4cc11f440882ba661b269ffd
 loader  669c530b353b8aba9dfa58147167c6879765b3cbaeb109204c41764a1f7bea83
-package aacf0830e13508ed176b91b65d15299cbfd368a2eb754e964b0fb4e8186fd687
+package e4ed619034fc0dfccf07a2b1ce43a0a891b42a39b0a7a497e8276f0b21474c51
 ```
 
 ## Qué observó la ejecución
@@ -74,6 +74,10 @@ El servidor se vinculó al ticket antes de anunciar el efecto: adoptó el ámbit
 V0 toma un plazo monotónico en seis operaciones. Esta ejecución añadió la entrada que faltaba para poder expresarlo: una lectura del reloj, sin handle, sin descriptor y sin autoridad, porque el paso del tiempo no es autoridad y negarse a exponerlo mientras se aceptan plazos no los hace seguros sino inservibles.
 
 El supervisor leyó el reloj, armó un timer contra esa lectura, esperó a que levantara sus bits en una señal, comprobó que el reloj había avanzado y que el timer constaba disparado y desarmado. Armar con plazo cero se rechazó: cero es como esta interfaz escribe «sin plazo».
+
+### Petición y respuesta ordinarias
+
+Antes de nada de lo anterior, el cliente hace una petición corriente y el servidor la contesta. Todo lo demás en esta ejecución trata de lo que se rechaza o se cierra, y una vertical que nunca mostrara la interfaz funcionando sería un sitio raro desde el que sacar conclusiones. Responder resuelve la invocación: contestar dos veces se rechaza como ya resuelta, no sobrescribe un resultado sobre el que quien llamó pudo ya haber actuado.
 
 ### Publicación conservadora
 
@@ -131,7 +135,7 @@ El primer supervisor no tiene supervisor. Su fallo termina la ejecución, y el r
 
 ## Qué corrigió ejecutar los mecanismos
 
-Compilar los 60 manejadores no encontró ninguno de estos siete defectos; ejecutarlos los encontró todos:
+Compilar las 51 operaciones no encontró ninguno de estos siete defectos; ejecutarlos los encontró todos:
 
 1. El creador de un objeto de memoria recibía solo el techo de derechos del objeto, sin los derechos comunes, de modo que no podía inspeccionar, estrechar ni entregar lo que acababa de crear.
 2. Un dominio no podía reclamarse receptor de un endpoint propio, así que ningún supervisor podía tener canal de fallos y ningún dominio gestionado podía activarse.

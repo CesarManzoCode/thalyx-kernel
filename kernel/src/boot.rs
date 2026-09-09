@@ -882,6 +882,30 @@ fn summarize(terminal: sched::Terminal) {
          invocations_outstanding={outstanding} plane=diagnostic coalesced={}",
         u8::from(preemptions > u64::from(records))
     );
+    // What the run actually reached, named. A list of what was never invoked is
+    // the honest form of "this does not cover everything": it says which parts
+    // of the interface this evidence is silent about instead of leaving a
+    // reader to assume it covers them.
+    if managed {
+        let reached = MACHINE.lock().operations_reached;
+        let total = thalyx_abi::generated::OPERATIONS.len();
+        let count = reached.count_ones();
+        event!(
+            "k2.coverage",
+            "operations_assigned={total} operations_reached={count}"
+        );
+        for (index, spec) in thalyx_abi::generated::OPERATIONS.iter().enumerate() {
+            if reached & (1u64 << index) == 0 {
+                event!(
+                    "k2.operation_untouched",
+                    "operation=0x{:x} name={}",
+                    spec.code,
+                    spec.name
+                );
+            }
+        }
+    }
+
     event!(
         "k1.terminal",
         "reason={} boot_path={} status=complete",

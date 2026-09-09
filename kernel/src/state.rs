@@ -441,6 +441,8 @@ pub struct Machine {
     pub boot_epoch: u64,
     /// Whether the boot package selected the K2 supervisor path.
     pub managed_boot: bool,
+    /// One bit per assigned operation, set when the dispatch reached it.
+    pub operations_reached: u64,
     /// Root scope of the resource tree, once it exists.
     pub root_scope: Option<ScopeId>,
     /// The system control log, once it exists.
@@ -480,6 +482,7 @@ impl Machine {
             next_object_id: 1,
             boot_epoch: 0,
             managed_boot: false,
+            operations_reached: 0,
             root_scope: None,
             system_log: None,
             supervisor: None,

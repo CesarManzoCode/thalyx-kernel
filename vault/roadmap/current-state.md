@@ -31,13 +31,13 @@ Las decisiones son contratos para implementar, no resultados del sistema. [Regis
 
 `abi/schema/v0.json` es la única fuente de la interfaz. `tools/gen_abi.py` deriva de ella los bindings Rust y C y las fixtures; `tools/check_abi.py` comprueba que lo generado coincide byte a byte con el esquema, que ningún número significa dos cosas, que las 325 aserciones de disposición en C se cumplen y que 15 fixtures decodifican en 669 desplazamientos. Cuatro de cuatro comprobaciones pasan.
 
-La tabla asigna cinco entradas de kernel —consulta de versión, invocación, consulta de límites, salida y lectura del reloj monotónico— y 60 operaciones repartidas en nueve tipos de objeto. La quinta entrada la añadió K2 al ejecutar: seis operaciones toman un plazo monotónico absoluto y no había forma de leer el reloj para expresarlo.
+La tabla asigna cinco entradas de kernel —consulta de versión, invocación, consulta de límites, salida y lectura del reloj monotónico— y 51 operaciones repartidas en nueve tipos de objeto. La quinta entrada la añadió K2 al ejecutar: seis operaciones toman un plazo monotónico absoluto y no había forma de leer el reloj para expresarlo.
 
 ### Sustrato del kernel
 
 El kernel implementa los mecanismos K2 del lado del núcleo: tabla generacional de objetos y capacidades (`obj.rs`), ámbitos con límites, ventana de CPU, barrera, drenaje y retirada (`scope.rs`), objetos de memoria con sellado y copia (`memobj.rs`), IPC copiado con invocaciones, origen y cargo (`ipc.rs`), señales y timers (`events.rs`), log de control con celdas reservadas (`ctrl.rs`), copia de usuario acotada (`ucopy.rs`) y las capacidades de arranque del primer supervisor (`k2boot.rs`).
 
-`kernel/src/api/` es el único punto de admisión: estructura, autoridad y efecto se comprueban en ese orden, y los pasos de autoridad y efecto ocurren bajo una sola toma del cerrojo de la máquina, que la barrera también toma. Las 60 operaciones del esquema tienen manejador y se despachan desde ahí.
+`kernel/src/api/` es el único punto de admisión: estructura, autoridad y efecto se comprueban en ese orden, y los pasos de autoridad y efecto ocurren bajo una sola toma del cerrojo de la máquina, que la barrera también toma. Las 51 operaciones del esquema tienen manejador y se despachan desde ahí.
 
 `kernel/src/syscall.rs` conecta las cinco entradas asignadas con ese punto de admisión. Las dos entradas de andamiaje de K1 siguen presentes, marcadas como tales y sin tocar ningún objeto, para que la regresión de K1 se siga ejecutando contra el kernel en el que K2 creció.
 
@@ -83,7 +83,7 @@ Ejecutar los mecanismos encontró diez defectos que compilar no encuentra, y los
 
 ## Qué no existe todavía
 
-Lo que K2 demuestra está acotado por lo que una vertical puede demostrar. Los mecanismos tienen más caminos de los que una ejecución recorre: los 60 manejadores del esquema no están todos ejercidos, y los que lo están lo están por un camino cada uno. EXP-02, EXP-03, EXP-04 y EXP-06 quedan ejecutados **en su alcance K2** —uniprocesador, sin dispositivos, sin estado durable— y sus partes de K3 y K4 siguen pendientes.
+Lo que K2 demuestra está acotado por lo que una vertical puede demostrar. Los mecanismos tienen más caminos de los que una ejecución recorre: los 51 manejadores del esquema no están todos ejercidos, y los que lo están lo están por un camino cada uno. EXP-02, EXP-03, EXP-04 y EXP-06 quedan ejecutados **en su alcance K2** —uniprocesador, sin dispositivos, sin estado durable— y sus partes de K3 y K4 siguen pendientes.
 
 No existe: SMP, drivers propios, DMA, servicio de estado implementado, Thalyx sobre este kernel, pruebas de hardware físico, mediciones de rendimiento o prueba formal general. El plano de diagnóstico de K1 sigue presente, sigue sin ser el plano de recibos, y sus dos entradas de andamiaje permanecen para que la regresión de K1 se siga ejecutando. El primer supervisor no tiene supervisor: su fallo termina la ejecución. No se ha retirado ni reemplazado Linux.
 

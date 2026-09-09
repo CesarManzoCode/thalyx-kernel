@@ -6,7 +6,7 @@ K2 — Objetos, autoridad y trabajo. Primer sistema de capacidades ejecutándose
 
 - Interfaz V0 generada desde un esquema único: bindings Rust y C, fixtures y comprobador que verifica que lo generado coincide byte a byte con el esquema. Cinco entradas de kernel, incluida la lectura del reloj monotónico sin la cual los plazos de la interfaz no podían expresarse.
 - Tabla generacional de objetos y capacidades, ámbitos con límites y ventana de CPU, objetos de memoria con sellado, IPC copiado con invocaciones que llevan origen y cargo, señales, timers, log de control con celdas reservadas y copia de usuario acotada.
-- Un único punto de admisión: estructura, autoridad y efecto en ese orden, con autoridad y efecto bajo el mismo cerrojo que toma la barrera. Las 60 operaciones del esquema se despachan desde ahí.
+- Un único punto de admisión: estructura, autoridad y efecto en ese orden, con autoridad y efecto bajo el mismo cerrojo que toma la barrera. Las 51 operaciones del esquema se despachan desde ahí.
 - Arranque K2 seleccionado por el paquete: un módulo `SUPERVISOR` construye la raíz, el log y un solo dominio con manifiesto explícito de capacidades; su ausencia mantiene los dominios de K1.
 - Primera vertical: supervisor, servidor y cliente sin permisos ambientales. El cliente estrecha autoridad sobre su propio buffer y la delega; el servidor admite un efecto y retiene la obligación; el supervisor cierra el ámbito del cliente mientras eso ocurre; la autoridad delegada muere con la barrera y la obligación sobrevive a ella hasta ser resuelta.
 - Veintisiete controles negativos ejecutados dentro de la vertical, incluidas once peticiones malformadas sin efecto parcial y los límites de tabla, cola y log con el cierre todavía disponible.

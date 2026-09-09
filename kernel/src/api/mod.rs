@@ -538,6 +538,24 @@ const fn waits(operation: u32) -> bool {
     )
 }
 
+/// Marks an operation as having been reached, for the run's own coverage.
+///
+/// A run that exercises a third of the interface and one that exercises all of
+/// it produce the same shape of log, and the difference is exactly what a
+/// reader needs to know before believing anything general about the whole.
+/// Counting here, where every operation passes, is the only place the number
+/// cannot be an estimate.
+fn mark_reached(machine: &mut Machine, operation: u32) {
+    let mut index = 0;
+    while index < thalyx_abi::generated::OPERATIONS.len() {
+        if thalyx_abi::generated::OPERATIONS[index].code == operation {
+            machine.operations_reached |= 1u64 << index;
+            return;
+        }
+        index += 1;
+    }
+}
+
 /// Handles one `INVOKE` entry.
 pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64) {
     let operation = match u32::try_from(frame.rsi) {
@@ -547,6 +565,7 @@ pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64)
     let Some(spec) = spec(operation) else {
         return refuse(domain, operation, status::NOT_SUPPORTED);
     };
+    mark_reached(&mut MACHINE.lock(), operation);
     if frame.r8 & !flag::KNOWN != 0 {
         return refuse(domain, operation, status::INVALID_ARGUMENT);
     }

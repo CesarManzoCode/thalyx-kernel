@@ -24,7 +24,7 @@
     "max_derive_depth": 32,
     "max_handles_per_domain": 32,
     "max_endpoint_queue": 8,
-    "max_memory_pages_per_object": 64,
+    "max_memory_pages_per_object": 512,
     "cpu_window_ns": 10000000,
     "cpu_quantum_ns": 1000000,
     "page_size": 4096,

@@ -34,10 +34,14 @@
 //!    hardware -- is [K1's probe](../../../vault/evidence/k1-protected-boot.md)
 //!    and is not repeated here: a domain that killed itself proving it would not
 //!    be around for the rest of this run, which is what the run is about.
-//! 5. Calls, and blocks. It is still blocked when its scope is fenced, which is
+//! 5. Makes one ordinary request first and gets an ordinary reply. Everything
+//!    else here is about what happens when things are refused or closed, and a
+//!    vertical that never showed the interface working would be a strange thing
+//!    to draw conclusions from.
+//! 6. Calls again, and blocks. It is still blocked when its scope is fenced, which is
 //!    the situation the whole run exists to produce: the client is closed while
 //!    the server is holding admitted work.
-//! 6. Reports what its call returned, then tries to call again. The second call
+//! 7. Reports what its call returned, then tries to call again. The second call
 //!    is the observable half of the barrier: the origin is closed, so admission
 //!    must refuse it.
 
@@ -120,6 +124,21 @@ fn run() -> ! {
         }
     };
     k2::note(report::BUILT, 1);
+
+    // The ordinary case, before anything is closed: a request, and a reply.
+    match k2::endpoint_call(endpoint, COOKIE, b"ping", &[], 0, false) {
+        Ok(reply) => {
+            if reply.result == 0 && reply.payload_len > 0 {
+                k2::note(report::REPLIED, reply.invocation_id);
+            } else {
+                k2::note(report::UNEXPECTED, reply.result);
+            }
+        }
+        Err(code) => {
+            k2::note(report::UNEXPECTED, code as u64);
+            k2::exit(4);
+        }
+    }
 
     // The call blocks. The run is arranged so that this domain's scope is
     // fenced while it is still here, with the server holding the work.

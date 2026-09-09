@@ -237,6 +237,15 @@ def check_k2_boot(records: list[Record], run: dict) -> Result:
         result.detail = f"the domain the kernel created is {unmanaged[0].get('name')}"
         return result
 
+    rejected = by_event(records, "k2.image_rejected")
+    if rejected:
+        names = ", ".join(str(record.get("name")) for record in rejected)
+        result.detail = (
+            f"the kernel could not hand the supervisor every image in the package: {names}. "
+            "A run missing an image is a degraded run, not a smaller one"
+        )
+        return result
+
     capabilities = by_event(records, "k2.boot_capability")
     if not capabilities:
         result.detail = "the supervisor was built with no boot capabilities at all"
@@ -457,20 +466,38 @@ def check_admission_and_effect(records: list[Record], run: dict) -> Result:
         )
         return result
 
-    # The message carried a capability, and the receiver was told what it got.
-    if delivered[0].number("caps") in (None, 0):
-        result.detail = "no capability was transferred with the message"
+    # Follow the invocation the effect belongs to, rather than whichever message
+    # happened to arrive first: a run that answers ordinary requests as well as
+    # holding one has several deliveries and only one of them is this.
+    invocation = effect.get("invocation")
+    carried = [
+        record
+        for record in delivered
+        if record.get("invocation") == invocation and (record.number("caps") or 0) > 0
+    ]
+    if not carried:
+        transfers = [record for record in delivered if (record.number("caps") or 0) > 0]
+        result.detail = (
+            "no capability was transferred with the message the effect was admitted against"
+            if transfers
+            else "no capability was transferred with any message"
+        )
+        return result
+    delivery = carried[0]
+    origin = [record for record in admitted if record.get("invocation") == invocation]
+    if not origin:
+        result.detail = f"invocation {invocation} was delivered but never admitted"
         return result
 
     result.passed = True
     result.detail = (
-        f"invocation {admitted[0].number('invocation')} admitted with "
-        f"{delivered[0].number('caps')} capability, delivered, an effect admitted reserving "
+        f"{len(delivered)} invocation(s) delivered; invocation {invocation} carried "
+        f"{delivery.number('caps')} capability, and an effect against it reserved "
         f"{effect.number('closure_reserve_ns')} ns in the service scope "
         f"{effect.get('service_scope')} rather than the origin's {effect.get('origin_scope')}, "
-        f"and resolved with outcome {resolved[0].get('outcome')}"
+        f"before being resolved with outcome {resolved[0].get('outcome')}"
     )
-    result.evidence = [line_of(admitted[0]), line_of(delivered[0]), line_of(effect), line_of(resolved[0])]
+    result.evidence = [line_of(origin[0]), line_of(delivery), line_of(effect), line_of(resolved[0])]
     return result
 
 

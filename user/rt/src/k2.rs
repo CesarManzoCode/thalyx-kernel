@@ -18,12 +18,12 @@
 
 use thalyx_abi::generated::{
     BindFacetRequest, CallResult, CapInfo, DeriveRequest, DescriptorHeader, DomainCreateRequest,
-    DrainReport, EffectRequest, EndpointCreateRequest, EndpointInfo, FaultChannelRequest,
-    InstallCapRequest, InvocationInfo, Limits, LogAppendRequest, LogInfo, MapRequest, MemoryBytes,
-    MemoryCopyRequest, MemoryCreateRequest, MemoryInfo, ReceiveResult, ReplyRequest,
-    ResolveRequest, ScopeCreateRequest, ScopeInfo, ScopeLimits, SendRequest, SignalBits,
-    SignalInfo, ThreadCreateRequest, TimerArmRequest, TimerCreateRequest, TimerInfo, entry, op,
-    spec, status,
+    DomainInfo, DrainReport, EffectRequest, EndpointCreateRequest, EndpointInfo,
+    FaultChannelRequest, InstallCapRequest, InvocationInfo, Limits, LogAckRequest,
+    LogAppendRequest, LogInfo, LogReadResult, MapRequest, MemoryBytes, MemoryCopyRequest,
+    MemoryCreateRequest, MemoryInfo, ReceiveResult, ReplyRequest, ResolveRequest,
+    ScopeCreateRequest, ScopeInfo, ScopeLimits, SendRequest, SignalBits, SignalInfo,
+    ThreadCreateRequest, TimerArmRequest, TimerCreateRequest, TimerInfo, entry, op, spec, status,
 };
 
 /// Offset of a descriptor body: everything before it is the common header.
@@ -333,6 +333,21 @@ pub fn cap_fence(handle: u64) -> Outcome {
 /// Reports what a fenced grant is still waiting for.
 pub fn cap_drain_status(handle: u64) -> Result<DrainReport, i64> {
     query::<DrainReport>(handle, op::CAP_DRAIN_STATUS).map(|(report, _)| report)
+}
+
+/// Reads a domain's lifecycle, thread count and fault record.
+pub fn domain_query(domain: u64) -> Result<DomainInfo, i64> {
+    query::<DomainInfo>(domain, op::DOMAIN_QUERY).map(|(info, _)| info)
+}
+
+/// Reads a signal's raised bits, sequence and waiter count.
+pub fn signal_query(signal: u64) -> Result<SignalInfo, i64> {
+    query::<SignalInfo>(signal, op::SIGNAL_QUERY).map(|(info, _)| info)
+}
+
+/// Narrows a scope's limits. A scope may only ever be given less.
+pub fn scope_set_limits(scope: u64, limits: ScopeLimits) -> Outcome {
+    with(scope, op::SCOPE_SET_LIMITS, 0, limits)
 }
 
 // ---------------------------------------------------------------------------
@@ -796,6 +811,19 @@ pub fn endpoint_query(endpoint: u64) -> Result<EndpointInfo, i64> {
     query::<EndpointInfo>(endpoint, op::ENDPOINT_QUERY).map(|(info, _)| info)
 }
 
+/// Reads a batch of receipts without consuming them.
+///
+/// Reading needs a right that appending does not: a domain that may record what
+/// it did is not thereby allowed to read what everyone else did.
+pub fn log_read(log: u64) -> Result<LogReadResult, i64> {
+    query::<LogReadResult>(log, op::LOG_READ).map(|(result, _)| result)
+}
+
+/// Drops every receipt up to and including `through_sequence`.
+pub fn log_acknowledge(log: u64, through_sequence: u64) -> Outcome {
+    with(log, op::LOG_ACK, 0, LogAckRequest { through_sequence })
+}
+
 /// Reads a control log's capacity, occupancy and loss count.
 pub fn log_query(log: u64) -> Result<LogInfo, i64> {
     query::<LogInfo>(log, op::LOG_QUERY).map(|(info, _)| info)
@@ -1126,6 +1154,12 @@ pub mod report {
     pub const SEALED: u64 = 0x2019;
     /// A mapped page was read through its mapping. Value: the first word.
     pub const READ_MAPPED: u64 = 0x201A;
+    /// An ordinary request was answered with an ordinary reply.
+    pub const REPLIED: u64 = 0x201B;
+    /// Receipts were read through a capability. Value: how many.
+    pub const RECEIPTS_READ: u64 = 0x201C;
+    /// A single grant was fenced, without closing its scope.
+    pub const GRANT_FENCED: u64 = 0x201D;
 }
 
 /// Reports one observation on the diagnostic plane.
