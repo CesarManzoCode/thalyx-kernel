@@ -40,6 +40,7 @@ Este vault es la constitución técnica inicial de Thalyx-Kernel. Su unidad de l
 - [Fuentes primarias](research/sources.md) y [alternativas evaluadas](research/alternatives.md).
 - [Registro de decisiones](decisions/README.md).
 - [Plan experimental](validation/experiments.md) y [auditoría de coherencia](validation/audit.md).
+- [Ejecución de K1 y sus límites](evidence/k1-protected-boot.md).
 - [Preguntas abiertas](roadmap/open-questions.md).
 - [Gobierno del conocimiento](governance.md).
 - [Manifiesto de fuentes inspeccionadas](evidence/source-manifest.json).

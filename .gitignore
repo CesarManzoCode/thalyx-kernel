@@ -1,3 +1,9 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# Build outputs and captured evidence. Everything under build/ is regenerated
+# by tools/build_image.py and tools/run_k1.py from sources and a pinned
+# toolchain; the image manifest records the digests that make a run traceable,
+# so the artefacts themselves are not tracked.
+build/

@@ -1,0 +1,40 @@
+[workspace]
+resolver = "3"
+members = [
+    "abi",
+    "boot/protocol",
+    "boot/uefi",
+    "kernel",
+    "user/rt",
+    "user/worker",
+    "user/trespasser",
+    "user/wxprobe",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.98.1"
+license = "NOASSERTION"
+publish = false
+
+[workspace.dependencies]
+thalyx-abi = { path = "abi" }
+thalyx-boot-protocol = { path = "boot/protocol" }
+thalyx-user-rt = { path = "user/rt" }
+
+# Bare-metal images must not unwind: there is no unwinder and no runtime below
+# the kernel. `panic = "abort"` is also the target default for both
+# x86_64-unknown-none and x86_64-unknown-uefi; stating it keeps a profile
+# override from silently reintroducing landing pads.
+[profile.dev]
+panic = "abort"
+overflow-checks = true
+debug = true
+
+[profile.release]
+panic = "abort"
+overflow-checks = true
+debug = true
+lto = false
+codegen-units = 1

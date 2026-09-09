@@ -7,11 +7,11 @@ status: planned
 
 ## Obligaciones de implementación
 
-Estos experimentos están **pendientes**. Los modelos de diseño que ya se pueden ejecutar tienen nombres MODEL-01/02 y se reportan por separado.
+Salvo la parte de EXP-01 ejecutada en K1, estos experimentos están **pendientes**. Los modelos de diseño que ya se pueden ejecutar tienen nombres MODEL-01/02 y se reportan por separado.
 
 | ID | Experimento | Criterio de corrección | Fase |
 |---|---|---|---|
-| EXP-01 | Arranque y dos dominios adversarios; faults y FP. | Primer ring 3 después de protección; probes ilegales fallan sin dañar otro dominio; temporizador preempta un loop. | K1–K2 |
+| EXP-01 | Arranque y dos dominios adversarios; faults y FP. | Primer ring 3 después de protección; probes ilegales fallan sin dañar otro dominio; temporizador preempta un loop. | K1–K2. Parte de K1 ejecutada: [resultado y límites](../evidence/k1-protected-boot.md). |
 | EXP-02 | Caps: derivar, mover, copiar, expirar, reciclar slots y reiniciar. | Ninguna autoridad amplificada ni handle antiguo reinterpretado; operaciones cerradas rechazadas. | K2–K3 |
 | EXP-03 | Cierre concurrente con RPC, servidor muerto y operaciones recibidas. | Barrera separada de drenaje, contadores no falsamente cero, resultado posterior admitido solo cuando corresponde. | K2–K4 |
 | EXP-04 | Fan-out, CPU SMP, memoria, tickets y mantenimiento. | Conservación de cargos y presupuesto agregado, deuda visible, recuperación conserva sus reservas. | K2–K3 |
