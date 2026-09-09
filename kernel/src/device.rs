@@ -390,6 +390,18 @@ impl IrqBinding {
 
 /// Interrupts that arrived for a vector nothing is bound to.
 static mut UNCLAIMED: u64 = 0;
+/// Interrupts delivered to a binding since boot.
+///
+/// Counted here rather than only on the binding, because a reset destroys the
+/// binding and a summary that read the binding's counter would report that the
+/// interrupts never happened.
+static mut DELIVERED: u64 = 0;
+/// Per-interrupt records already emitted. Bounded: the evidence a run needs is
+/// that interrupts arrive at all and reach the right binding, not a line per
+/// completion.
+static mut INTERRUPT_RECORDS: u32 = 0;
+/// Most per-interrupt records one run emits.
+const INTERRUPT_RECORD_LIMIT: u32 = 8;
 
 /// Delivers one device interrupt.
 ///
@@ -415,11 +427,35 @@ pub fn on_interrupt(vector: u8) {
             continue;
         }
         machine.irqs[index].deliveries += 1;
+        let deliveries = machine.irqs[index].deliveries;
         let signal = binding.signal as usize;
         let generation = binding.signal_generation;
         let bits = binding.bits;
         crate::api::evtops::raise_bits(&mut machine, signal, generation, bits);
         delivered = true;
+        // SAFETY: written only from interrupt handlers, which run with
+        // interrupts masked while this lock is held, so the increments are
+        // serialised by the lock this function already holds.
+        let record = unsafe {
+            DELIVERED += 1;
+            let emit = INTERRUPT_RECORDS < INTERRUPT_RECORD_LIMIT;
+            if emit {
+                INTERRUPT_RECORDS += 1;
+            }
+            emit
+        };
+        if record {
+            let device_id = machine.devices[device].id;
+            let signal_id = machine.signals[signal].id;
+            event!(
+                "device.interrupt",
+                "device={device_id} vector=0x{vector:x} entry={} signal={signal_id} \
+                 bits=0x{bits:x} session={} deliveries={deliveries} cpu={}",
+                binding.entry,
+                binding.session,
+                crate::percpu::index()
+            );
+        }
     }
     if !delivered {
         // SAFETY: written only from interrupt handlers, which run with
@@ -427,6 +463,13 @@ pub fn on_interrupt(vector: u8) {
         // serialised by the lock the caller already holds.
         unsafe { UNCLAIMED += 1 };
     }
+}
+
+/// Interrupts delivered to a binding over the whole run.
+#[must_use]
+pub fn delivered() -> u64 {
+    // SAFETY: read while the machine is quiescent, from the summary path.
+    unsafe { DELIVERED }
 }
 
 /// Interrupts that arrived for no binding.
@@ -915,12 +958,6 @@ pub fn summarize() {
     let assigned = machine.devices.iter().filter(|device| device.used).count();
     let grants = machine.dma_grants.iter().filter(|grant| grant.used).count();
     let maps = machine.device_maps.iter().filter(|map| map.used).count();
-    let bindings: u64 = machine
-        .irqs
-        .iter()
-        .filter(|binding| binding.used)
-        .map(|binding| binding.deliveries)
-        .sum();
     let bound = machine.irqs.iter().filter(|binding| binding.used).count();
     let iommu = machine.iommu_described;
     let translating = machine.iommu_translating;
@@ -955,13 +992,6 @@ pub fn summarize() {
             stale_bindings += 1;
         }
     }
-    let deliveries: u64 = machine
-        .irqs
-        .iter()
-        .filter(|binding| binding.used)
-        .map(|binding| u64::from(binding.signal) << 32 | binding.signal_generation as u64)
-        .sum();
-    let _ = deliveries;
     drop(machine);
     for slot in 0..count {
         let (iova, pages, rights, profile, session, generation) = outstanding[slot];
@@ -974,9 +1004,10 @@ pub fn summarize() {
     event!(
         "device.summary",
         "assigned={assigned} grants_outstanding={grants} maps_outstanding={maps} \
-         bindings_outstanding={bound} interrupts_delivered={bindings} \
+         bindings_outstanding={bound} interrupts_delivered={} \
          interrupts_unclaimed={} remapping_unit_described={} remapping_programmed={} \
          stale_maps={stale_maps} stale_bindings={stale_bindings}",
+        delivered(),
         unclaimed(),
         u8::from(iommu),
         u8::from(translating)

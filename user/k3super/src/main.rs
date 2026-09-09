@@ -382,6 +382,16 @@ fn run() -> ! {
         Ok(handle) => handle,
         Err(code) => fail(16, code),
     };
+    // An endpoint has one receiver, and it is claimed rather than assumed. This
+    // supervisor does not service the queue until much later; without claiming
+    // now, every call made in between would be refused for want of a peer
+    // instead of waiting for one, and the barrier this run raises later would
+    // have nothing admitted to race against.
+    match k2::endpoint_receive(work_endpoint, 0, true) {
+        Ok(_) => k2::note(report::UNEXPECTED, 0),
+        Err(code) if code == status::WOULD_BLOCK => k2::note(report::BOUND, 1),
+        Err(code) => k2::note(report::UNEXPECTED, code as u64),
+    }
     k2::note(report::BUILT, 2);
 
     // --- workers -----------------------------------------------------------
@@ -805,7 +815,6 @@ fn build_device(scope: u64, supervision: u64, stop: u64, timer: u64, log: u64) -
     // device, its interrupt and its completion signal, because it stops the
     // device later; the domain and the ring it no longer names.
     drop_handle(ring);
-    drop_handle(domain);
 
     // Bus mastering last, and by the authority that keeps it. Until this, the
     // device cannot issue a transaction whatever the driver writes.
@@ -824,6 +833,7 @@ fn build_device(scope: u64, supervision: u64, stop: u64, timer: u64, log: u64) -
         DEVICE_IRQ = irq;
         DEVICE_DONE = done;
         DEVICE_SESSION = info.session;
+        DEVICE_DOMAIN = domain;
     }
     true
 }
@@ -832,12 +842,20 @@ static mut DEVICE_HANDLE: u64 = 0;
 static mut DEVICE_IRQ: u64 = 0;
 static mut DEVICE_DONE: u64 = 0;
 static mut DEVICE_SESSION: u32 = 0;
+static mut DEVICE_DOMAIN: u64 = 0;
 
 /// Waits for the driver to finish, then stops the device underneath it.
 fn stop_device(timer: u64, stop: u64) {
     // SAFETY: written once during the build, before the driver existed.
-    let (device, irq, done, session) =
-        unsafe { (DEVICE_HANDLE, DEVICE_IRQ, DEVICE_DONE, DEVICE_SESSION) };
+    let (device, irq, done, session, domain) = unsafe {
+        (
+            DEVICE_HANDLE,
+            DEVICE_IRQ,
+            DEVICE_DONE,
+            DEVICE_SESSION,
+            DEVICE_DOMAIN,
+        )
+    };
     let deadline = k2::now_ns() + 4_000_000_000;
     match k2::signal_wait(done, bit::DRIVER_DONE, deadline) {
         Ok(_) => {}
@@ -851,6 +869,14 @@ fn stop_device(timer: u64, stop: u64) {
     // between the decision to stop and the confirmation that it stopped.
     match k2::device_set_master(device, false, session) {
         Ok(_) => {}
+        Err(code) => k2::note(report::UNEXPECTED, code as u64),
+    }
+    // One window taken back by name, from a domain still executing, before the
+    // reset takes the rest. A withdrawal of a device register window is a
+    // translation withdrawal like any other: it does not answer until every
+    // processor has retired it.
+    match k2::device_unmap_region(device, domain, k3::REGION_VADDR[3], session) {
+        Ok(_) => k2::note(report::REGION_MAPPED, 0),
         Err(code) => k2::note(report::UNEXPECTED, code as u64),
     }
     match k2::device_reset(device) {

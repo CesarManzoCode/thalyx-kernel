@@ -703,6 +703,11 @@ pub fn reap_dead() {
 
         let owner = Owner::Domain(index as u16);
         let charged_before = machine.allocator().charged(owner);
+        // Counted before the slots are emptied. Read afterwards it is always
+        // zero, and a domain that held two threads would return one of them to
+        // its scope: the scope would then never see itself as empty, and a
+        // drain waiting on it would wait forever.
+        let threads = machine.domains[index].thread_count() as u32;
 
         for slot in 0..crate::state::MAX_THREADS_PER_DOMAIN {
             let Some(thread_index) = machine.domains[index].threads[slot].take() else {
@@ -751,7 +756,6 @@ pub fn reap_dead() {
             Resource::Metadata,
             metadata,
         );
-        let threads = machine.domains[index].thread_count() as u32;
         machine.scopes[scope_index as usize].threads = machine.scopes[scope_index as usize]
             .threads
             .saturating_sub(threads.max(1));
