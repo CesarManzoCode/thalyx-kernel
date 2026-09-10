@@ -13,7 +13,7 @@ No hay una arquitectura escondida pendiente de que el usuario escoja una escuela
 | OQ-02 | Latencia requerida de UI, motor y cierre bajo saturación. | Cuotas de ventana fija, recuperación reservada, sin hard real-time. | Medir colas y deuda con Thalyx; evaluar servidor esporádico si la necesidad lo exige. |
 | OQ-03 | Granularidad óptima de payloads y coste de copias. | 256 bytes inline, cuatro capacidades, copia/sellado conservador. | Trazas de workload y microbench comparables; ajustar con versión ABI. |
 | OQ-04 | Contención SMP en cuentas y metadatos. | Reservas globales correctas antes de sharding. | EXP-04/12 en varios núcleos; revisar partición solo con medidas. |
-| OQ-05 | Inventario de hardware físico y aislamiento IOMMU efectivo. | QEMU y perfiles separados; no prometer aislamiento DMA universal. | Inventario CPU/firmware/dispositivos/grupos al integrar hardware, K3. |
+| OQ-05 | Inventario de hardware físico y aislamiento IOMMU efectivo. | QEMU y perfiles separados; no prometer aislamiento DMA universal. | Inventario CPU/firmware/dispositivos/grupos al integrar hardware. **K3 ejecutado sin cerrarla**: perfil débil declarado como tal, perfil fuerte rechazado con `UNSUPPORTED_PROFILE`, unidad DMAR descrita pero no programada. [ADR-009](../decisions/ADR-009-device-path-and-dma-profiles.md), [K3](../evidence/k3-smp-devices.md). |
 | OQ-06 | Coste y contrato mínimo de port de herramientas. | Compatibilidad de fuente; inventario completo desde K1. | Spike de runtime/toolchain y carga real K5; no contar host o VM Linux como native. |
 | OQ-07 | Coste de log, retención y compactación para repositorios/modelos reales. | Escritor único, reserva de segunda arena, rechazo antes de agotar cierre. | EXP-08/12; valorar estructuras de índices/segmentos sin cambiar atomicidad. |
 | OQ-08 | Biblioteca de disco/hash y formato de bytes exacto. | Hash identificado, longitud/tipo canónicos, registros enmarcados y protocolo fijado. | Elegir dependencia auditada y fixtures antes de K4; no se congela un formato sin parser. |
@@ -26,6 +26,6 @@ No hay una arquitectura escondida pendiente de que el usuario escoja una escuela
 
 ## Cuándo una incertidumbre sí bloquea una garantía
 
-Sin conocer el comportamiento de flush no se declara durabilidad del dispositivo. Sin IOMMU válido no se afirma aislamiento de un driver DMA no confiable. Sin port ejecutado no se anuncia Thalyx nativo. Sin fuente de entropía/provisión no se anuncia una cadena criptográfica segura.
+Sin conocer el comportamiento de flush no se declara durabilidad del dispositivo. Sin IOMMU válido no se afirma aislamiento de un driver DMA no confiable; K3 ejecuta el camino de dispositivo entero **sin** esa unidad y por eso su driver es de confianza y su nota de evidencia lo dice en cada punto donde importa. Sin port ejecutado no se anuncia Thalyx nativo. Sin fuente de entropía/provisión no se anuncia una cadena criptográfica segura.
 
 Estos límites bloquean una **afirmación o perfil concreto**, no el trabajo autorizado de construir componentes anteriores. Se avanza con el perfil que realmente se puede sostener y se conserva la deuda explícita.

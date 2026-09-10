@@ -618,10 +618,19 @@ def rustfmt(text: str) -> str:
     The generated files are part of the tree that `cargo fmt --check` inspects,
     so they have to come out of the generator already formatted; otherwise every
     regeneration would leave the format check failing on a file nobody edits.
+
+    A missing formatter is refused rather than skipped. Returning the
+    unformatted text instead makes every comparison against a committed file
+    fail, and fail saying the bindings disagree with the schema -- which is a
+    refusal arriving with the wrong reason, and sends the reader to look at a
+    schema that is fine.
     """
     binary = shutil.which("rustfmt")
     if binary is None:
-        return text
+        raise SchemaError(
+            "rustfmt was not found on PATH, so the generated Rust cannot be produced in the "
+            "form the tree stores it. Install it or put the toolchain's bin directory on PATH"
+        )
     result = subprocess.run(
         [binary, "--edition", "2024", "--emit", "stdout", "--quiet"],
         input=text,
@@ -657,8 +666,14 @@ def main() -> int:
         print(f"schema error: {error}", file=sys.stderr)
         return 2
 
+    try:
+        produced = outputs(schema, layout)
+    except SchemaError as error:
+        print(f"schema error: {error}", file=sys.stderr)
+        return 2
+
     stale = []
-    for path, text in outputs(schema, layout).items():
+    for path, text in produced.items():
         current = path.read_text() if path.exists() else None
         if current == text:
             continue

@@ -5,17 +5,17 @@ status: observed
 ---
 # Estado actual
 
-**2026-09-09 · Fundación 0.1.0 · K0, K1 y K2 completos. K3 en curso. K4–K6 pendientes.**
+**2026-09-09 · Fundación 0.1.0 · K0, K1, K2 y K3 completos. K4–K6 pendientes.**
 
-> **Punto de reanudación.** Este documento es el checkpoint. La sección [Reanudar aquí](#reanudar-aquí) dice exactamente dónde empieza el trabajo siguiente; no hace falta reauditar K0, K1 ni K2.
+> **Punto de reanudación.** Este documento es el checkpoint. La sección [Reanudar aquí](#reanudar-aquí) dice exactamente dónde empieza el trabajo siguiente; no hace falta reauditar K0, K1, K2 ni K3.
 
 ## Qué existe
 
-Un vault de 41 notas con constitución, 13 contratos de arquitectura, glosario, reconstrucción de Thalyx, 32 fuentes primarias anotadas, ocho decisiones, 23 invariantes, alternativas, integración Linux/nativa, experimentos y ruta de implementación. Se incluyen herramientas documentales y dos modelos finitos de investigación con controles negativos y resultado versionado.
+Un vault de 43 notas con constitución, 13 contratos de arquitectura, glosario, reconstrucción de Thalyx, 32 fuentes primarias anotadas, nueve decisiones, 23 invariantes, alternativas, integración Linux/nativa, experimentos y ruta de implementación. Se incluyen herramientas documentales y dos modelos finitos de investigación con controles negativos y resultado versionado.
 
-Existe además un kernel que arranca y un sistema de capacidades que se ejecuta sobre él. El workspace tiene loader UEFI, protocolo de arranque, kernel con `arch/x86_64`, interfaz V0 generada desde un esquema y siete programas de usuario, con toolchain fijada y construcción reproducible desde un solo script para las dos fases.
+Existe además un kernel que arranca, un sistema de capacidades que se ejecuta sobre él, y una ejecución en cuatro procesadores con un dispositivo de bloque real conducido desde usuario. El workspace tiene loader UEFI, protocolo de arranque, kernel con `arch/x86_64`, interfaz V0 generada desde un esquema y diez programas de usuario, con toolchain fijada y construcción reproducible desde un solo script para las tres fases.
 
-La imagen K1 arranca en QEMU, ejecuta dominios en ring 3, los preempta con timer, contiene sus fallos ilegales y sobrevive. [Qué se ejecutó exactamente](../evidence/k1-protected-boot.md). La imagen K2, con el mismo kernel y otro paquete, construye un supervisor con un manifiesto explícito de capacidades y deja que ese supervisor cree todo lo demás por la interfaz. [Qué se ejecutó exactamente](../evidence/k2-objects-authority-work.md).
+La imagen K1 arranca en QEMU, ejecuta dominios en ring 3, los preempta con timer, contiene sus fallos ilegales y sobrevive. [Qué se ejecutó exactamente](../evidence/k1-protected-boot.md). La imagen K2, con el mismo kernel y otro paquete, construye un supervisor con un manifiesto explícito de capacidades y deja que ese supervisor cree todo lo demás por la interfaz. [Qué se ejecutó exactamente](../evidence/k2-objects-authority-work.md). La imagen K3, otra vez con el mismo kernel, arranca cuatro procesadores, reparte trabajo entre ellos con presupuesto agregado, retira traducciones con acuse de todos, y le entrega a un dominio de usuario una función virtio-blk moderna con la que lee, escribe y hace flush. [Qué se ejecutó exactamente](../evidence/k3-smp-devices.md).
 
 La base de evidencia de Thalyx está fijada al commit `0492f72e487e2463b0d7b938365a8b3383364cb9`: inventario de 407 commits alcanzables, 96 archivos del vault, 38 rutas de código/configuración de evidencia y 15 revisiones históricas seleccionadas. Inventariar no significa haber ejecutado ni auditado exhaustivamente cada archivo.
 
@@ -87,6 +87,48 @@ Ejecutar los mecanismos encontró trece defectos que compilar no encuentra, y lo
 
 Cerrar la cobertura encontró tres más, y los tres están corregidos. Las tres operaciones que hablan de un linaje —`CAP_INSPECT`, `CAP_CLOSE` y `CAP_DRAIN_STATUS`— pasaban por la misma puerta de resolución que todo lo demás, y esa puerta rechaza un linaje cercado o vencido: exactamente el estado del que existen para informar o limpiar. Se midió desactivando la corrección: `CAP_DRAIN_STATUS` no se alcanza nunca —50 de 51, todavía nombrada como no tocada—, `CAP_INSPECT` sobre una concesión cercada se rechaza con `SCOPE_CLOSED`, y `CAP_CLOSE` sobre un linaje vencido se rechaza con `EXPIRED`, dejando un handle que su poseedor no puede soltar. `DOMAIN_ADD_THREAD` colapsaba todo error en `LIMIT_EXHAUSTED` y consultaba el espacio de direcciones antes que el estado, de modo que «este dominio se ha detenido» volvía como «se agotó un límite» o como «ese punto de entrada no está mapeado». Y `CapInfo.lineage_state` cruzaba la frontera como un entero cuyos valores solo nombraba el kernel en constantes privadas; `CapLineage` entra en el esquema. [Detalle](../evidence/k2-objects-authority-work.md).
 
+## K3
+
+### Interfaz V0, ampliada a 59 operaciones
+
+`abi/schema/v0.json` sigue siendo la única fuente. K3 le añade un noveno tipo de objeto —`DEVICE`—, cuatro derechos (`DEVICE_MAP`, `DEVICE_IRQ`, `DEVICE_DMA`, `DEVICE_CONTROL`), el estado `UNSUPPORTED_PROFILE` (−21), las estructuras del camino de dispositivo y ocho operaciones nuevas. `Limits` gana `cpus_online`, de modo que un programa puede saber en cuántos procesadores puede ser planificado; `DomainInfo` gana `entry_point`, que una autoridad necesita para añadir un hilo a un dominio que construyó.
+
+### Arranque de procesadores
+
+`acpi.rs` valida RSDP/XSDT/MADT/MCFG/DMAR por firma, longitud y checksum, y construye un mapa explícito `cpu_index → APIC ID` con el procesador de arranque identificado por su identidad real. `arch/x86_64/ap.rs` es un trampolín 16→32→64 bits en una página bajo 1 MiB; `smp.rs` lo instala, hace INIT/SIPI/SIPI con los tiempos del SDM y espera un handshake explícito. `percpu.rs` da a cada procesador su bloque por `GS`, su GDT/TSS/IST y su ranura de pila de `syscall`. `lapic.rs` tiene backends xAPIC y x2APIC, con la valla explícita antes del `WRMSR` del ICR.
+
+Los recursos de un procesador que no contesta **no se reutilizan**: la ranura se retira y la pila se conserva, porque un procesador que contestara tarde correría sobre memoria de otro. La ejecución prueba ese camino con un APIC id que no existe.
+
+### Planificación multinúcleo
+
+La selección de un hilo, la reserva de saldo y de simultaneidad en todos sus ancestros, y la reclamación del hilo ocurren bajo **una sola** toma del cerrojo. El cuanto sale de lo que la reserva concedió, no de una constante. Un hilo que otro procesador todavía nombre como actual o como saliente no es candidato en ningún otro. Cada ámbito registra lo máximo que llegó a tener comprometido, lo máximo que llegó a tener corriendo, las reservas concedidas y rechazadas, y cuánto se pasó una ventana de lo que podía admitir; el planificador registra el intervalo más largo que cubrió un solo cobro, que es lo que hace atribuible ese exceso en lugar de excusable.
+
+### Invalidación entre núcleos y reclamación diferida
+
+`tlb.rs` publica una generación monótona de invalidación, cada procesador acusa la que ha retirado, y un iniciador espera a que todos hayan pasado por la suya. El refresco antes de despachar usuario cierra la carrera del procesador que entra después. `MEMORY_SEAL`, `DOMAIN_UNMAP`, `DEVICE_UNMAP_REGION` y `DEVICE_RESET` salen del despacho bajo cerrojo y **no responden** hasta que todos acusan. Los marcos de un dominio reclamado pasan por una cuarentena sellada con la generación vigente y salen de ella cuando todos han invalidado.
+
+Un espacio de direcciones registra además la máscara de todos los procesadores en los que ha llegado a ejecutarse, y una retirada la publica al lado del recuento instantáneo: el instante casi nunca es el interesante, y la máscara es el conjunto al que la invalidación tiene que llegar.
+
+### Camino de dispositivo
+
+`pci.rs` direcciona por ECAM, mide los BARs con la decodificación de memoria apagada y recorre capacidades con límite y detección de ciclos. `device.rs` valida las estructuras virtio contra su BAR y contra la tabla MSI-X —una estructura que comparta página con la tabla se rechaza en el descubrimiento—, mantiene la sesión del dispositivo y pone en cuarentena las concesiones. `api/devops.rs` implementa las ocho operaciones. La entrada de la tabla de interrupciones la escribe el kernel; maestro de bus y reset se quedan con quien asigna y no con quien conduce. [ADR-009](../decisions/ADR-009-device-path-and-dma-profiles.md) registra por qué el camino es ese y no otro.
+
+El perfil de DMA es `WEAK_TRUSTED_DRIVER` y el kernel lo declara con las palabras que le corresponden: `enforced_by=nothing_driver_is_trusted`. `STRONG_IOMMU` se rechaza con `UNSUPPORTED_PROFILE`, y sigue rechazándose cuando hay una unidad DMAR **descrita** pero no programada, que es el perfil de control que la puerta también ejecuta.
+
+### Paquete K3
+
+`k3super` construye cuatro ámbitos y siete dominios y después hace, desde otro procesador, lo que solo significa algo cuando hay más de uno: quitarle un mapeo a un dominio de dos hilos, sellar un objeto mientras un escritor lo intenta, levantar una barrera mientras se admiten llamadas, y parar un dispositivo bajo su driver. `k3worker` sirve cuatro papeles desde una sola imagen: el papel se lo escribe el supervisor en una página que le mapea de solo lectura, de modo que qué es un dominio no es elección del programa. `k3driver` es un driver virtio-blk moderno completo, con validación de cada entrada del anillo de usados y un autotest de ese validador contra entradas que fabrica en la única página del anillo que el supervisor **no** concedió al dispositivo.
+
+### Puerta K3
+
+`tools/check_k3.py` decide **28** criterios por separado. Las regresiones de K1 y K2 son dos de ellos, y la plataforma es otro: el número de procesadores del `run.json` tiene que coincidir con los que arrancaron, porque una puerta multiprocesador leída de una ejecución uniprocesador es el error que conviene hacer imposible. Solo tres criterios leen notas de un programa y los tres lo dicen en su título; la convención que en K2 quedó a medias aquí está entera.
+
+`--self-test` daña la ejecución de **57** formas distintas, una cada vez, y un criterio nombrado tiene que notar cada una.
+
+### Lo que la ejecución corrigió del sustrato
+
+Seis defectos que compilar no encuentra, más dos de la evidencia y dos del propio paquete. Los tres primeros son fatales y comparten familia —suponer que el estado de un hilo basta para decir de quién es, que en un procesador es cierto—: dos procesadores tomando el mismo hilo `Ready` y ejecutándolo sobre una pila de kernel; la reclamación liberando la pila o el espacio de direcciones que otro procesador todavía usaba; y un hilo que se bloquea, es despertado por un receptor en otro procesador y despachado por un tercero antes de que el procesador en el que sigue ejecutando haya guardado dónde continuar. Los otros tres son de contabilidad: una reserva que acotaba la admisión y no la ejecución; un dominio de dos hilos que solo devolvía uno a su ámbito, dejándolo permanentemente no quiescente; y un registro de mapeo que nombraba por índice una concesión sobre la que no retenía referencia. [Detalle](../evidence/k3-smp-devices.md).
+
 ## Evidencia ejecutada aquí
 
 | Comprobación | Resultado y alcance |
@@ -96,64 +138,69 @@ Cerrar la cobertura encontró tres más, y los tres están corregidos. Las tres 
 | MODEL-02 | 23 casos de caída del protocolo correcto; variantes incorrectas detectadas. |
 | Caso ABA | Confirma la necesidad de generación para rechazar expectativas antiguas sobre contenido repetido. |
 | Revisión arquitectónica | Hallazgos y correcciones registrados en [la auditoría](../validation/audit.md). |
-| Integridad documental | PASS: 40 IDs y enlaces locales. [Comprobador](../../tools/check_vault.py). Además, 36 destinos de código/historia de Thalyx resueltos contra Git. |
+| Integridad documental | PASS: 43 IDs y enlaces locales. [Comprobador](../../tools/check_vault.py). Además, 36 destinos de código/historia de Thalyx resueltos contra Git. |
 | Esquema ABI | PASS en 4 comprobaciones. [Comprobador](../../tools/check_abi.py). |
 | Puerta K1 | PASS en 13 criterios decididos por separado desde los registros del kernel, con controles negativos. [Detalle y límites](../evidence/k1-protected-boot.md). |
 | Regresión K1 sobre el sustrato K2 | PASS en los mismos 13 criterios con los mecanismos K2 compilados dentro del kernel. |
 | Puerta K2 | PASS en 21 criterios decididos por separado, la mayoría desde los registros del kernel. [Detalle y límites](../evidence/k2-objects-authority-work.md). |
-| Cobertura de la interfaz | 51 de 51 operaciones alcanzadas por el despacho, ninguna nombrada como no tocada. Es criterio de la puerta. |
+| Cobertura de la interfaz en K2 | 51 de 51 operaciones alcanzadas por el despacho, ninguna nombrada como no tocada. Es criterio de la puerta K2. |
 | Autocomprobación de la puerta K2 | 28 ejecuciones dañadas de una forma cada una, las 28 detectadas por el criterio que les corresponde. |
+| Regresiones K1 y K2 sobre el sustrato K3 | PASS en 13 y en 21 criterios con el SMP y el camino de dispositivo compilados dentro del mismo kernel. |
+| Puerta K3 | PASS en 28 criterios decididos por separado, todos menos tres desde los registros del kernel. [Detalle y límites](../evidence/k3-smp-devices.md). |
+| Puerta K3, perfil de control | PASS en los mismos 28 con `-device intel-iommu`: unidad descrita, `remapping_programmed=0`, perfil fuerte igualmente rechazado. |
+| Cobertura de la interfaz en K3 | 37 de 59 alcanzadas, las 26 que las afirmaciones K3 necesitan entre ellas y las 22 restantes nombradas una a una. Es criterio de la puerta K3. |
+| Autocomprobación de la puerta K3 | 57 ejecuciones dañadas de una forma cada una, las 57 detectadas por el criterio que les corresponde. |
 
-Todas ejecutadas en el estado actual del árbol, con los mismos binarios: `fmt` limpio, ninguna advertencia de compilación, ABI 4/4, vault 41 notas PASS, modelos PASS, puerta K1 13/13, puerta K2 21/21, cobertura 51/51, autocomprobación 28/28, y cero resultados inesperados en la ejecución K2 —ni una nota de resultado no esperado, ni una operación que debiera haber sido rechazada y no lo fuera, ni un fallo de usuario—. La imagen K2 y el kernel se reconstruyen byte a byte borrando `build/cargo`.
+Todas ejecutadas en el estado actual del árbol, con **el mismo binario de kernel** en las tres fases: `fmt` limpio, ninguna advertencia de compilación, ABI 4/4, vault 43 notas PASS, modelos PASS, puerta K1 13/13, puerta K2 21/21 con autocomprobación 28/28, puerta K3 28/28 con autocomprobación 57/57 y en los dos perfiles de plataforma, y cero resultados inesperados en las ejecuciones K2 y K3 —ni una nota de resultado no esperado, ni una operación que debiera haber sido rechazada y no lo fuera—. Los dos fallos de usuario de K3 son los dos que la ejecución provoca a propósito. Las imágenes y el kernel se reconstruyen byte a byte desde un árbol limpio.
 
 Clippy deja **18 advertencias de estilo preexistentes**, el mismo número en `HEAD` que con este trabajo aplicado: están en `arch/x86_64`, `diag.rs`, `mm/`, `scope.rs` e `ipcops.rs`. Las dos últimas son archivos K2, de modo que la afirmación anterior de «ninguna advertencia de clippy en ningún archivo K2» era falsa y queda corregida aquí. Ninguna la introdujo este trabajo y ninguna está arreglada.
 
 ## Cobertura real de la interfaz
 
-El kernel cuenta cuáles de las 51 operaciones asignadas alcanza el despacho y emite `k2.coverage` con el total, más un `k2.operation_untouched` por cada una que no se tocó. La última ejecución alcanza **51 de 51**, y no emite ningún `k2.operation_untouched`. La puerta lo exige como criterio, comparando el recuento contra la lista, de modo que la cobertura no puede volver a bajar en silencio.
+El kernel cuenta cuáles de las **59** operaciones asignadas alcanza el despacho y emite `k2.coverage` con el total, más un `k2.operation_untouched` por cada una que no se tocó. Cada puerta exige lo que su paquete debe recorrer, comparando el recuento contra la lista, de modo que la cobertura no puede bajar en silencio.
 
-Las nueve que faltaban —`CAP_FENCE`, `CAP_DRAIN_STATUS`, `SCOPE_SET_LIMITS`, `DOMAIN_QUERY`, `DOMAIN_ADD_THREAD`, `DOMAIN_TERMINATE`, `SIGNAL_QUERY`, `LOG_READ` y `LOG_ACK`— están ejercidas cada una por un camino que tiene éxito, con controles negativos añadidos sobre él. Dos de ellas no se podían ejercer sin corregir el kernel primero: la puerta de resolución rechazaba el linaje cercado sobre el que `CAP_DRAIN_STATUS` existe para informar.
+El paquete K2 alcanza **51 de 51** de las operaciones que existían cuando se escribió, y la puerta K2 lo exige nombrando explícitamente las ocho de dispositivo como las únicas que puede no tocar: cualquier otra sin tocar la hace fallar.
 
-Tres cosas que este número **no** dice, y conviene tenerlas delante antes de usarlo:
+El paquete K3 alcanza **37 de 59**, y la puerta K3 exige las **26** sobre las que descansan sus afirmaciones —las ocho de dispositivo enteras, más mapear, desmapear, añadir hilo, activar, sellar, leer, escribir, cercar, drenar, retirar, consultar, llamar, recibir, responder, esperar y levantar señales, armar timer y cerrar capacidad—. Las 22 restantes pertenecen a caminos que este paquete no recorre y están nombradas una a una en el propio registro. K3 no es K2 con más procesadores y no pretende volver a recorrer la interfaz entera.
 
-- Cada operación está ejercida por **un** camino. Cobertura de interfaz no es cobertura de caminos, y la segunda es la que sigue abierta.
-- El contador marca una operación al resolver su especificación, **antes** de comprobar derechos, así que una operación solo intentada y rechazada contaría. Aquí no pasa —las nueve tienen un camino con éxito— pero lo que lo garantiza son las comprobaciones de los programas sobre el resultado, no el contador.
-- El hilo que `DOMAIN_ADD_THREAD` añade al dominio de repuesto nunca se ejecuta: el dominio se termina antes de activarse. La creación del hilo está ejercida completa; su ejecución no.
+Tres cosas que estos números **no** dicen:
+
+- Cada operación está ejercida por **un** camino. Cobertura de interfaz no es cobertura de caminos, y la segunda sigue abierta.
+- El contador marca una operación al resolver su especificación, **antes** de comprobar derechos, así que una operación solo intentada y rechazada contaría. Lo que garantiza que no ocurre son las comprobaciones que los programas hacen sobre el resultado, no el contador.
+- Que dos paquetes cubran juntos las 59 no es lo mismo que una ejecución que las cubra todas. Ninguna lo hace.
 
 ## Qué no existe todavía
 
-Lo que K2 demuestra está acotado por lo que una vertical puede demostrar. Las 51 operaciones están ejercidas, y cada una lo está por un camino: los mecanismos tienen más caminos de los que una ejecución recorre. Que la cobertura de interfaz sea completa hace esa distinción más visible, no menos. EXP-02, EXP-03, EXP-04 y EXP-06 quedan ejecutados **en su alcance K2** —uniprocesador, sin dispositivos, sin estado durable— y sus partes de K3 y K4 siguen pendientes.
+Lo que K3 demuestra está acotado por la plataforma en la que se demuestra. EXP-02, EXP-03, EXP-04 y EXP-06 quedan ejecutados **en su alcance K3** —multiprocesador, con un dispositivo, sin estado durable—; EXP-05 queda ejecutado **salvo el DMA tardío**, que es justamente la parte que necesita hardware que esta plataforma no tiene.
 
-No existe: SMP, drivers propios, DMA, servicio de estado implementado, Thalyx sobre este kernel, pruebas de hardware físico, mediciones de rendimiento o prueba formal general. El plano de diagnóstico de K1 sigue presente, sigue sin ser el plano de recibos, y sus dos entradas de andamiaje permanecen para que la regresión de K1 se siga ejecutando. El primer supervisor no tiene supervisor: su fallo termina la ejecución. No se ha retirado ni reemplazado Linux.
+Lo que no existe, en orden de cuánto se parece a existir:
+
+- **Aislamiento de DMA.** No hay unidad de remapeo programada. El perfil débil es lo único que esta plataforma sostiene, el kernel lo dice en cada registro que lo menciona, y el perfil fuerte se rechaza con un estado propio en lugar de aproximarse. Un driver no confiable **no** está contenido aquí, y ninguna nota puede decir lo contrario. [ADR-009](../decisions/ADR-009-device-path-and-dma-profiles.md), [OQ-05](open-questions.md).
+- **Hardware físico.** Todo es QEMU con TCG. El inventario de CPU, firmware, dispositivos y grupos de aislamiento sigue sin hacerse.
+- **Más de un dispositivo, y rutas de interrupción legadas.** Una función virtio-blk moderna con MSI-X. No hay IOAPIC, INTx, hotplug, NUMA, suspensión, virtio-net ni GPU, y ninguno está a medias.
+- **Estado durable.** No hay servicio de estado, ni versiones publicadas, ni recuperación tras caída. Es K4.
+- **Thalyx sobre este kernel, rendimiento y prueba formal general.** Nada de eso está implementado o medido.
+
+El plano de diagnóstico de K1 sigue presente, sigue sin ser el plano de recibos, y sus dos entradas de andamiaje permanecen para que la regresión de K1 se siga ejecutando. El primer supervisor no tiene supervisor: su fallo termina la ejecución. No se ha retirado ni reemplazado Linux.
 
 ## Reanudar aquí
 
-**Último hito terminado y pusheado:** K3, primer hito — **arranque de procesadores de aplicación y planificación multinúcleo**. Rama `feat/k3-smp-devices`.
+**Último hito terminado y pusheado:** **K3 completo**. Rama `feat/k3-smp-devices`, sin fusionar.
 
-**Qué está verde, medido en este árbol:** puerta K1 13/13, puerta K2 21/21, autocomprobación K2 28/28, cobertura 51/51, ABI 4/4, vault PASS, modelos PASS, `fmt` limpio. Además, la imagen K2 **completa su vertical entera con cuatro procesadores** (`-smp 4`, backend x2APIC) y termina en `no_runnable_domain` con estado `complete`.
+**Qué está verde, medido en este árbol y con el mismo binario de kernel en las tres fases:** puerta K1 13/13, puerta K2 21/21, autocomprobación K2 28/28, puerta K3 28/28 en los dos perfiles de plataforma, autocomprobación K3 57/57, cobertura K2 51/51 y K3 37/59 con las 26 requeridas dentro, ABI 4/4, vault 43 notas PASS, modelos PASS, `fmt` limpio.
 
-**Qué existe ya de K3:**
+**Qué demostró exactamente la ejecución K3:** cuatro procesadores en línea de cuatro descritos con x2APIC, un procesador ausente que no contesta y no deja recursos reutilizados, cuatro hilos despachados en el mismo instante, 346 migraciones con estado FP, un solo reloj sin regresiones, admisión que nunca prometió más que el presupuesto con 45 220 rechazos por saldo, deuda arrastrada y nunca perdonada, una traducción retirada de un espacio vivo con acuse de los cuatro y el fallo de lectura posterior, un sello publicado contra un escritor vivo con el fallo de escritura posterior y los mismos bytes leídos dos veces, cuarentena de marcos condicionada a que todos hayan invalidado, y el camino de dispositivo entero: enumeración PCI, cuatro ventanas mapeadas sin caché fuera de la página de la tabla MSI-X, interrupciones escritas por el kernel y entregadas a la señal enlazada, lectura, escritura y flush de bloques reales, validador de anillo probado contra daño que el driver fabrica, perfil débil declarado como tal, perfil fuerte rechazado, y el dispositivo parado bajo su driver con el transporte releído y las tres operaciones que el driver recordaba rechazadas por sesión obsoleta.
 
-* `acpi.rs`: RSDP/XSDT/MADT/MCFG/DMAR validados por firma, longitud y checksum; mapa explícito `cpu_index → APIC ID`, BSP por identidad real, duplicados y entradas truncadas rechazados.
-* `percpu.rs`, GDT/TSS/IST por procesador, `swapgs` condicionado al nivel de privilegio del marco, y ranura de pila de `syscall` por procesador.
-* `arch/x86_64/ap.rs` + `smp.rs`: trampolín 16→32→64 bits en una página bajo 1 MiB, INIT/SIPI/SIPI con los tiempos del SDM, handshake explícito, y recursos por AP que nunca se reutilizan tras un timeout.
-* `lapic.rs`: backends xAPIC y x2APIC con IPI, con la valla explícita antes del `WRMSR` del ICR.
-* `tlb.rs`: generación de invalidación, acuse por generación, refresco antes de ejecutar usuario, y cuarentena de marcos en `mm/frame.rs`.
-* Planificación: reserva de saldo y de simultaneidad en todos los ancestros **antes** de despachar, decisión y reclamación del hilo en una sola sección crítica, y publicación diferida del hilo saliente.
+**Qué no demostró, y está escrito así en la evidencia:** aislamiento de DMA, hardware físico, escalabilidad, más de un dispositivo, rutas de interrupción legadas y cobertura de caminos. [Detalle y límites](../evidence/k3-smp-devices.md).
 
-**Segundo hito, ya en el árbol:** el shootdown está conectado —`MEMORY_SEAL` y `DOMAIN_UNMAP` salen del despacho bajo cerrojo y no responden hasta que todos los procesadores acusan la invalidación— y existe el sustrato de dispositivos: `pci.rs` (ECAM, enumeración, BARs medidos con la decodificación apagada, capacidades con límite y detección de ciclos), `device.rs` (objeto `DEVICE`, validación de las estructuras virtio contra su BAR y contra la tabla MSI-X, sesión, cuarentena de concesiones) y `api/devops.rs` con las ocho operaciones nuevas. La interfaz pasa de 51 a **59** operaciones.
+**Siguiente paso exacto al reanudar:** K4, estado durable, según [la ruta](phases.md). Nada de K3 queda pendiente; lo que queda abierto son las preguntas que K3 no podía cerrar, y están registradas donde corresponde en lugar de en una lista de tareas.
 
-**Siguiente paso exacto al reanudar:** el paquete K3: `k3super`, `k3worker` y `k3driver`; `tools/build_image.py --phase k3`, `tools/run_k3.py` y `tools/check_k3.py`; después evidencia y contratos.
+**Bugs encontrados por ejecución en K3, todos corregidos:** seis del kernel, dos de la evidencia y dos del paquete. Los tres fatales comparten familia —suponer que el estado de un hilo basta para decir de quién es— y ninguno era visible con un procesador. Están descritos uno a uno en [la evidencia](../evidence/k3-smp-devices.md).
 
-**Bugs encontrados por ejecución en este hito, ya corregidos:** dos, ambos invisibles al compilador y ambos fatales:
+## Siguiente trabajo: K4
 
-* seleccionar un hilo y marcarlo en ejecución en dos secciones críticas distintas dejaba que dos procesadores tomaran el mismo hilo y ejecutaran sobre una sola pila de kernel;
-* la reclamación comprobaba solo el `CR3` del procesador que reclamaba, de modo que liberaba la pila o el espacio de direcciones que otro procesador todavía estaba usando.
+Estado durable, según [la ruta](phases.md): versiones inmutables, publicación con CAS, recuperación tras caída en cada punto de escritura, y el recibo que hace auditable lo publicado. El perfil de durabilidad tendrá que declarar sus dependencias con la misma honestidad con la que el perfil de DMA declara las suyas: sin conocer el comportamiento de flush del dispositivo no se declara durabilidad, igual que sin IOMMU programada no se declara aislamiento.
 
-## Siguiente trabajo: K3
-
-Ejecutar el paquete K3 descrito en [la ruta](phases.md): arranque de procesadores de aplicación, planificación con presupuesto agregado entre núcleos, sincronización, invalidación de TLB entre núcleos y reclamación diferida; después el primer driver propio con IRQ y buffers separados, y el perfil de aislamiento que declare honestamente sus dependencias de IOMMU.
-
-Lo primero que K3 debe romper es la suposición que K2 tiene derecho a hacer y K3 no: que hay un solo núcleo y que, por tanto, un cerrojo de máquina y la ausencia de DMA bastan para que una barrera signifique algo.
+Lo primero que K4 debe romper es la suposición que K3 tiene derecho a hacer: que todo lo que importa cabe en memoria y desaparece con la ejecución.
 
 No hay una elección técnica pendiente que deba devolver el diseño al usuario. [Las preguntas abiertas](open-questions.md) especifican qué dato falta y con qué decisión conservadora avanzar.
