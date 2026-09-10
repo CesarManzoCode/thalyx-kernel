@@ -30,7 +30,7 @@
 #![no_main]
 
 use thalyx_abi::boot_handle;
-use thalyx_abi::generated::{cap_op, right};
+use thalyx_abi::generated::{cap_op, right, status};
 use thalyx_user_k4fmt as k4;
 use thalyx_user_k4fmt::pkg::{
     CONFIG_VADDR, ClientConfig, OutboxAnswer, OutboxIntent, STAGE_PAGES, STAGE_VADDR, bit,
@@ -151,6 +151,19 @@ impl Client {
                     None
                 }
             },
+            // A service that resolved an invocation without answering it has
+            // answered: the outcome arrives instead of a payload. That is not
+            // a surprise and is not recorded as one -- it is what a caller is
+            // told when the effect it asked for did not commit, or when
+            // whether it committed is exactly what nobody can say.
+            Err(status::CANCELLED) => {
+                k2::note(note::CLIENT_RESULT, u64::from(result_outcome::ABORTED));
+                None
+            }
+            Err(status::PENDING) => {
+                k2::note(note::CLIENT_RESULT, u64::from(result_outcome::UNKNOWN));
+                None
+            }
             Err(code) => {
                 k2::note(report::UNEXPECTED, code as u64);
                 None
@@ -388,6 +401,7 @@ fn tree_digest(bindings: &[Binding], scratch: &mut [u8]) -> Option<([u8; 32], us
 }
 
 /// One publication, from staging its content to the answer.
+#[derive(Clone, Copy)]
 struct Attempt {
     root: [u8; 32],
     policy: [u8; 32],
@@ -396,10 +410,31 @@ struct Attempt {
     content: [u8; 32],
 }
 
+impl Attempt {
+    const fn zeroed() -> Self {
+        Self {
+            root: [0u8; 32],
+            policy: [0u8; 32],
+            validation: [0u8; 32],
+            tree: [0u8; 32],
+            content: [0u8; 32],
+        }
+    }
+}
+
 /// Builds a candidate version binding `name` to `content`.
+///
+/// `over` is the version the workspace is forked from, which the service will
+/// only allow to be the published one. `claims` is the version the evidence
+/// says it was computed against, and they are separate because a control that
+/// wants to be refused for a stale expectation has to offer evidence that
+/// names the stale expectation. Evidence for one version presented for another
+/// is a different refusal, and getting that one instead would mean the control
+/// never reached what it was aimed at.
 fn candidate(
     client: &mut Client,
-    generation: u64,
+    over: u64,
+    claims: u64,
     name: &[u8],
     content: &[u8],
     valid: bool,
@@ -428,10 +463,10 @@ fn candidate(
     } else {
         k4::object_digest(object_type::TREE, b"not these inputs")
     };
-    let validation = validation_for(named, generation, 1);
+    let validation = validation_for(named, claims, 1);
     let validation_digest = client.put_object(object_type::VALIDATION, validation.as_bytes())?;
 
-    let workspace = client.fork(generation)?;
+    let workspace = client.fork(over)?;
     client.bind(workspace, name, content_digest)?;
     let frozen = client.freeze(workspace, policy_digest, validation_digest)?;
     client.discard(workspace);
@@ -483,20 +518,34 @@ fn run_publisher(client: &mut Client, config: &ClientConfig) {
     let mut sequence = 0u64;
     let mut first_root = [0u8; 32];
     let mut first_content = [0u8; 32];
+    // The last round's request, kept so it can be asked again exactly as it
+    // was. Rebuilding it is not the same thing: the workspace it would be
+    // rebuilt in can only be forked from the published version, and the
+    // published version is no longer the one that request expected.
+    let mut last = Attempt::zeroed();
+    let mut last_base = 0u64;
 
     for round in 1..=config.rounds {
         let mut buffer = [0u8; 64];
         let length = content_for(round, &mut buffer);
-        let Some(attempt) = candidate(client, generation, b"data", &buffer[..length], true) else {
+        let Some(attempt) = candidate(
+            client,
+            generation,
+            generation,
+            b"data",
+            &buffer[..length],
+            true,
+        ) else {
             return;
         };
         sequence += 1;
+        let expected = generation;
         // An outbox intent rides with the second publication, so the record of
         // what a broker said is part of a version rather than beside it.
         let target = if round == 2 { 0x4B34_B001 } else { 0 };
         let Some(reply) = client.publish(
             sequence,
-            generation,
+            expected,
             attempt.root,
             attempt.policy,
             attempt.validation,
@@ -531,28 +580,27 @@ fn run_publisher(client: &mut Client, config: &ClientConfig) {
             first_root = attempt.root;
             first_content = attempt.content;
         }
+        last_base = expected;
+        last = attempt;
     }
 
     if config.rounds == 0 {
         return;
     }
 
-    // The same request again, byte for byte. One request, one generation: the
-    // answer has to be the one already durable rather than a second one.
-    let mut buffer = [0u8; 64];
-    let length = content_for(config.rounds, &mut buffer);
-    let base = generation - 1;
-    if let Some(attempt) = candidate(client, base, b"data", &buffer[..length], true)
-        && let Some(reply) = client.publish(
-            sequence,
-            base,
-            attempt.root,
-            attempt.policy,
-            attempt.validation,
-            0,
-            attempt.tree,
-        )
-    {
+    // The same request again, byte for byte: the same sequence, the same
+    // expected version and the same three digests as the round that produced
+    // the version now published. One request, one generation, so the answer
+    // has to be the one already durable rather than a second one.
+    if let Some(reply) = client.publish(
+        sequence,
+        last_base,
+        last.root,
+        last.policy,
+        last.validation,
+        0,
+        last.tree,
+    ) {
         if reply.status == store_status::OK && reply.generation == generation {
             k2::note(
                 note::CLIENT_RESULT,
@@ -567,17 +615,22 @@ fn run_publisher(client: &mut Client, config: &ClientConfig) {
     // one would let a client change what a request meant after the fact.
     let mut other = [0u8; 64];
     let length = content_for(config.rounds + 100, &mut other);
-    if let Some(attempt) = candidate(client, generation, b"data", &other[..length], true)
-        && let Some(reply) = client.publish(
-            sequence,
-            generation,
-            attempt.root,
-            attempt.policy,
-            attempt.validation,
-            0,
-            attempt.tree,
-        )
-    {
+    if let Some(attempt) = candidate(
+        client,
+        generation,
+        generation,
+        b"data",
+        &other[..length],
+        true,
+    ) && let Some(reply) = client.publish(
+        sequence,
+        generation,
+        attempt.root,
+        attempt.policy,
+        attempt.validation,
+        0,
+        attempt.tree,
+    ) {
         if reply.status == store_status::CONFLICT {
             k2::note(
                 report::REFUSED_AS_EXPECTED,
@@ -589,7 +642,7 @@ fn run_publisher(client: &mut Client, config: &ClientConfig) {
     }
 
     // A sequence with a gap in front of it.
-    if let Some(attempt) = candidate(client, generation, b"data", b"gap\n", true)
+    if let Some(attempt) = candidate(client, generation, generation, b"data", b"gap\n", true)
         && let Some(reply) = client.publish(
             sequence + 3,
             generation,
@@ -613,7 +666,14 @@ fn run_publisher(client: &mut Client, config: &ClientConfig) {
     // An expectation about a version that is no longer the published one.
     sequence += 1;
     if generation > 1
-        && let Some(attempt) = candidate(client, generation, b"data", b"stale\n", true)
+        && let Some(attempt) = candidate(
+            client,
+            generation,
+            generation - 1,
+            b"data",
+            b"stale\n",
+            true,
+        )
         && let Some(reply) = client.publish(
             sequence,
             generation - 1,
@@ -635,17 +695,22 @@ fn run_publisher(client: &mut Client, config: &ClientConfig) {
     }
 
     // Evidence that names other inputs, offered for these ones.
-    if let Some(attempt) = candidate(client, generation, b"data", b"unevidenced\n", false)
-        && let Some(reply) = client.publish(
-            sequence,
-            generation,
-            attempt.root,
-            attempt.policy,
-            attempt.validation,
-            0,
-            attempt.tree,
-        )
-    {
+    if let Some(attempt) = candidate(
+        client,
+        generation,
+        generation,
+        b"data",
+        b"unevidenced\n",
+        false,
+    ) && let Some(reply) = client.publish(
+        sequence,
+        generation,
+        attempt.root,
+        attempt.policy,
+        attempt.validation,
+        0,
+        attempt.tree,
+    ) {
         if reply.status == store_status::VALIDATION_MISMATCH {
             k2::note(
                 note::VALIDATION_REFUSED,
@@ -663,8 +728,14 @@ fn run_publisher(client: &mut Client, config: &ClientConfig) {
     if first_content != [0u8; 32] {
         let mut buffer = [0u8; 64];
         let length = content_for(1, &mut buffer);
-        if let Some(attempt) = candidate(client, generation, b"data", &buffer[..length], true)
-            && attempt.root == first_root
+        if let Some(attempt) = candidate(
+            client,
+            generation,
+            generation,
+            b"data",
+            &buffer[..length],
+            true,
+        ) && attempt.root == first_root
             && let Some(reply) = client.publish(
                 sequence,
                 1,
@@ -727,7 +798,14 @@ fn run_rival(client: &mut Client, config: &ClientConfig) {
     let generation = state.generation;
     let mut buffer = [0u8; 64];
     let length = content_for(config.leg + 900, &mut buffer);
-    let Some(attempt) = candidate(client, generation, b"data", &buffer[..length], true) else {
+    let Some(attempt) = candidate(
+        client,
+        generation,
+        generation,
+        b"data",
+        &buffer[..length],
+        true,
+    ) else {
         return;
     };
     // The same transition the publisher is asking for. One of the two has to
@@ -795,7 +873,14 @@ fn run_reader(client: &mut Client) {
     // the refusal is about publishing rather than about reaching the service.
     let mut buffer = [0u8; 64];
     let length = content_for(777, &mut buffer);
-    let attempt = candidate(client, state.generation, b"data", &buffer[..length], true);
+    let attempt = candidate(
+        client,
+        state.generation,
+        state.generation,
+        b"data",
+        &buffer[..length],
+        true,
+    );
     if let Some(attempt) = attempt
         && let Some(reply) = client.publish(
             1,

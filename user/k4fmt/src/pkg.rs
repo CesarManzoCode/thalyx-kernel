@@ -351,6 +351,13 @@ pub mod note {
     pub const CONTROL_INCOMPLETE: u64 = 0x4028;
     /// A request identity was reused for different inputs. Value: sequence.
     pub const CONFLICT_REFUSED: u64 = 0x4029;
+    /// The service ended where the harness cut it. Value: writes issued.
+    pub const SERVICE_STOPPED: u64 = 0x402A;
+    /// No workspace was free to fork into. Value: the principal owning each
+    /// live workspace, one nibble per slot from the low end.
+    pub const WORKSPACES_EXHAUSTED: u64 = 0x402B;
+    /// Staged objects nothing could still name were dropped. Value: how many.
+    pub const STAGING_RECLAIMED: u64 = 0x402C;
 
     /// A client read what it was built to be. Value: role, principal above 8.
     pub const CLIENT_ROLE: u64 = 0x4030;

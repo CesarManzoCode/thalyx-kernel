@@ -611,6 +611,21 @@ fn drain_receipts(log: u64, audit: &mut Audit) {
     }
 }
 
+/// States what the auditor saw, in the four numbers a gate reads.
+///
+/// Emitted on both ways out, because a run that was cut has an audit too, and
+/// a cut whose receipts were never reported would leave the kernel's account
+/// of the writes missing exactly where it matters most.
+fn report_audit(audit: &Audit) {
+    k2::note(note::AUDIT_DRAINED, audit.drained);
+    k2::note(note::AUDIT_EFFECT, audit.effects);
+    k2::note(
+        note::AUDIT_HIGH_WATER,
+        u64::from(audit.high_water) | (audit.gaps << 32),
+    );
+    k2::note(note::AUDIT_LOST, u64::from(audit.lost));
+}
+
 /// Reads how full the log got, before draining it.
 fn observe_log(log: u64, audit: &mut Audit) {
     if let Ok(info) = k2::log_query(log)
@@ -935,7 +950,11 @@ fn run() -> ! {
             if info.bits & bit::CRASH != 0 {
                 // The service asked for the run to end at a named point. It
                 // ends here, with nothing further written, which is the whole
-                // value of the request.
+                // value of the request. The receipts that cover what was
+                // written before the cut are read first: they are the only
+                // account of it that is not the service's own.
+                drain_receipts(log, &mut audit);
+                report_audit(&audit);
                 k2::note(note::SUPER_CRASH, run.instances);
                 rt::exit(0)
             }
@@ -982,13 +1001,7 @@ fn run() -> ! {
     // The last receipts, including the ones the run's own ending wrote.
     observe_log(log, &mut audit);
     drain_receipts(log, &mut audit);
-    k2::note(note::AUDIT_DRAINED, audit.drained);
-    k2::note(note::AUDIT_EFFECT, audit.effects);
-    k2::note(
-        note::AUDIT_HIGH_WATER,
-        u64::from(audit.high_water) | (audit.gaps << 32),
-    );
-    k2::note(note::AUDIT_LOST, u64::from(audit.lost));
+    report_audit(&audit);
     k2::note(note::SUPER_FINISHED, 1);
     rt::exit(0)
 }

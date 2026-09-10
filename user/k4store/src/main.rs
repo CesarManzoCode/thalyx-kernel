@@ -81,6 +81,13 @@ const EFFECT_PUBLISH: u32 = 4;
 /// How long the service waits for a broker to answer an intent.
 const BROKER_DEADLINE_NS: u64 = 2_000_000_000;
 
+/// One slice of a parked service's wait to be replaced.
+const PARK_SLICE_NS: u64 = 1_000_000_000;
+
+/// How many slices before a service that was told it would be replaced stops
+/// waiting for the supervisor that said so.
+const PARK_ROUNDS: u32 = 10;
+
 /// Bytes handed to or taken from a client's lent memory in one call.
 const CHUNK: usize = 256;
 
@@ -226,6 +233,15 @@ fn give_to(memory: u64, bytes: &[u8]) -> bool {
 struct Service {
     store: Store,
     workspaces: [Workspace; MAX_WORKSPACES],
+    /// The candidate each principal last froze and has not yet published. A
+    /// freeze and the publication that names it are two calls, and between
+    /// them the only thing keeping the candidate's objects staged is this.
+    candidates: [[u8; 32]; state::MAX_PRINCIPALS],
+    /// Set when serving a request already discharged the invocation, so the
+    /// loop does not answer twice. An invocation resolved without a reply is
+    /// answered; replying afterwards is refused, and the refusal would be the
+    /// service reporting a fault of its own making.
+    discharged: bool,
     log: u64,
     broker: u64,
     crash: u64,
@@ -234,6 +250,38 @@ struct Service {
 }
 
 impl Service {
+    /// Tells the engine which staged digests are still nameable.
+    ///
+    /// Two things are: what a live workspace has bound, which is content
+    /// staged and not yet inside any tree, and the candidate a principal
+    /// froze and has not published. Everything else staged is the residue of
+    /// something nobody is going to finish.
+    fn protect(&mut self) {
+        let mut count = 0usize;
+        let mut push = |digest: [u8; 32], store: &mut Store| {
+            if digest == [0u8; 32] || count == state::MAX_PROTECTED {
+                return;
+            }
+            if store.protected[..count].contains(&digest) {
+                return;
+            }
+            store.protected[count] = digest;
+            count += 1;
+        };
+        for index in 0..state::MAX_PRINCIPALS {
+            push(self.candidates[index], &mut self.store);
+        }
+        for space in &self.workspaces {
+            if !space.live {
+                continue;
+            }
+            for binding in &space.bindings[..space.count] {
+                push(binding.digest, &mut self.store);
+            }
+        }
+        self.store.protected_count = count;
+    }
+
     /// Whether `target` is reachable from a root this store still serves.
     ///
     /// Reading is bounded by what the store publishes or has been asked to
@@ -369,6 +417,10 @@ impl Service {
         if !self.store.ready && request.op != store_op::HARNESS {
             return refused(store_status::UNAVAILABLE);
         }
+        // What must survive a sweep, decided here because the engine does not
+        // know what a workspace is and should not be taught.
+        self.protect();
+        self.discharged = false;
         match request.op {
             store_op::QUERY => StoreReply {
                 status: store_status::OK,
@@ -514,6 +566,13 @@ impl Service {
             return refused(store_status::GENERATION_STALE);
         }
         let Some(slot) = self.free_workspace() else {
+            // Which principals are holding them, because "no workspace" says
+            // nothing about whose it is and a leak is always somebody's.
+            let mut owners = 0u64;
+            for (index, space) in self.workspaces.iter().enumerate() {
+                owners |= (space.owner & 0xF) << (index * 4);
+            }
+            k2::note(note::WORKSPACES_EXHAUSTED, owners);
             return refused(store_status::EXHAUSTED);
         };
         let mut space = Workspace {
@@ -620,15 +679,20 @@ impl Service {
             total_bytes: total,
         };
         match self.store.stage(object_type::MANIFEST, manifest.as_bytes()) {
-            Ok(root) => StoreReply {
-                status: store_status::OK,
-                digest0: root,
-                digest1: tree_digest,
-                value: total,
-                generation: space.base_generation,
-                free_blocks: self.store.free_blocks(),
-                ..StoreReply::zeroed()
-            },
+            Ok(root) => {
+                if (principal as usize) < state::MAX_PRINCIPALS {
+                    self.candidates[principal as usize] = root;
+                }
+                StoreReply {
+                    status: store_status::OK,
+                    digest0: root,
+                    digest1: tree_digest,
+                    value: total,
+                    generation: space.base_generation,
+                    free_blocks: self.store.free_blocks(),
+                    ..StoreReply::zeroed()
+                }
+            }
             Err(status) => refused(status as u32),
         }
     }
@@ -793,7 +857,13 @@ impl Service {
                         generation,
                     );
                 }
-                let _ = k2::invocation_resolve(invocation, outcome::COMMITTED, generation);
+                // No resolve here. Resolving discharges the invocation, and a
+                // discharged invocation carries no payload: the caller would
+                // be woken with `OK` and an empty reply, learning that
+                // something committed but not which version. The reply is
+                // itself a commit -- the kernel marks the outcome `COMMITTED`
+                // when a responder answers -- so answering is the discharge,
+                // and it is the only discharge that carries the answer.
                 let _ = k2::log_append(
                     self.log,
                     receipt_kind::SERVICE_NOTE,
@@ -832,6 +902,12 @@ impl Service {
                     },
                     u64::from(status),
                 );
+                // Resolving is a discharge, so this request is answered and
+                // the loop must not answer it again. What the caller gets is
+                // the outcome without a payload, which is the honest shape of
+                // "this did not commit, and asking me again will not tell you
+                // more than the durable result will".
+                self.discharged = true;
                 k2::note(note::PUBLISH_REFUSED, u64::from(status));
                 StoreReply {
                     status,
@@ -860,12 +936,15 @@ impl Service {
                 self.store.disk.latch();
                 let _ = k2::invocation_reply(invocation, u64::from(reply.status), reply.as_bytes());
                 let _ = k2::signal_raise(self.crash, bit::CRASH);
-                self.park()
+                self.stop()
             }
             Fault::LoseResponse => {
+                // The caller is told nothing at all. What it must not be told
+                // is a result: an answer that never arrived is the case the
+                // next leg has to survive, and replying would remove it.
                 self.store.disk.latch();
                 let _ = k2::signal_raise(self.crash, bit::CRASH);
-                self.park()
+                self.stop()
             }
             Fault::Kill => {
                 let _ = k2::invocation_reply(invocation, u64::from(reply.status), reply.as_bytes());
@@ -876,15 +955,31 @@ impl Service {
         }
     }
 
-    /// Waits to be ended or replaced, without touching the medium again.
+    /// Ends this service where it stands, having latched the medium first.
+    ///
+    /// A cut service that stays alive waiting is indistinguishable from a
+    /// working one to everything except the medium, and it keeps the machine
+    /// from winding down: a domain in a timed wait is a domain making
+    /// progress, so nothing ever decides the run is over and the leg has to be
+    /// killed from outside. Ending here is not a tidier crash -- the writes
+    /// are already latched, so nothing this domain could still do would reach
+    /// the medium -- and the caller learns what a caller learns when a service
+    /// disappears, which is nothing.
+    fn stop(&mut self) -> ! {
+        k2::note(note::SERVICE_STOPPED, self.store.disk.writes_issued);
+        rt::exit(0)
+    }
+
+    /// Waits to be replaced, without touching the medium again.
+    ///
+    /// Bounded, because the only thing that ends this wait is the supervisor
+    /// terminating the domain, and a service that waits forever for a
+    /// supervisor that never comes is the hang this bound exists to refuse.
     fn park(&mut self) -> ! {
-        loop {
-            let _ = k2::signal_wait(
-                self.crash,
-                bit::CRASH | bit::RESTART,
-                k2::now_ns() + 1_000_000_000,
-            );
+        for _ in 0..PARK_ROUNDS {
+            let _ = k2::signal_wait(self.crash, bit::RESTART, k2::now_ns() + PARK_SLICE_NS);
         }
+        self.stop()
     }
 }
 
@@ -938,6 +1033,8 @@ fn run() -> ! {
     let mut service_state = Service {
         store: Store::new(Disk::new(disk_endpoint)),
         workspaces: [Workspace::default(); MAX_WORKSPACES],
+        candidates: [[0u8; 32]; state::MAX_PRINCIPALS],
+        discharged: false,
         log,
         broker,
         crash,
@@ -1020,7 +1117,7 @@ fn run() -> ! {
         // service that kept one per call would hold an invocation record for
         // every request it had already answered, and the machine's table, not
         // the medium, is what would run out first.
-        let answered = service_state.honour_demand(invocation, &reply);
+        let answered = service_state.honour_demand(invocation, &reply) && !service_state.discharged;
         if answered {
             if let Err(code) =
                 k2::invocation_reply(invocation, u64::from(reply.status), reply.as_bytes())

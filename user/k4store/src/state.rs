@@ -35,6 +35,10 @@ use crate::disk::{Disk, slot_bytes};
 pub const MAX_OBJECTS: usize = 40;
 /// Objects that may be staged but not yet durable.
 pub const MAX_STAGED: usize = 12;
+
+/// Digests the loop may ask the engine to keep staged at once: one candidate
+/// root per principal, plus every binding of every live workspace.
+pub const MAX_PROTECTED: usize = 24;
 /// Largest object this service accepts.
 pub const OBJECT_MAX: usize = geometry::OBJECT_MAX_BYTES as usize;
 /// Principals the service keeps durable state for.
@@ -209,6 +213,15 @@ pub struct Store {
     pub objects: [ObjectEntry; MAX_OBJECTS],
     pub stage_used: [bool; MAX_STAGED],
     pub stage_len: [u32; MAX_STAGED],
+    /// Digests the loop asks to be kept staged, refreshed before every
+    /// request: what a live workspace binds, and the candidate each principal
+    /// froze and has not yet published. The engine cannot work these out --
+    /// workspaces are the loop's -- so it is told.
+    pub protected: [[u8; 32]; MAX_PROTECTED],
+    pub protected_count: usize,
+    /// Staged objects dropped to make room, counted so a run can say whether
+    /// it ever had to.
+    pub staged_reclaimed: u64,
     pub principals: [PrincipalEntry; MAX_PRINCIPALS],
     pub results: [ResultEntry; MAX_RESULTS],
     pub result_count: usize,
@@ -259,6 +272,9 @@ impl Store {
             objects: [ObjectEntry::default(); MAX_OBJECTS],
             stage_used: [false; MAX_STAGED],
             stage_len: [0u32; MAX_STAGED],
+            protected: [[0u8; 32]; MAX_PROTECTED],
+            protected_count: 0,
+            staged_reclaimed: 0,
             principals: [PrincipalEntry::zeroed(); MAX_PRINCIPALS],
             results: [ResultEntry::zeroed(); MAX_RESULTS],
             result_count: 0,
@@ -420,6 +436,12 @@ impl Store {
         if self.find(&digest).is_some() {
             return Ok(digest);
         }
+        if self.free_stage_slot().is_none() || self.free_object_slot().is_none() {
+            // Staging is bounded, and nothing has ever given a slot back on
+            // its own. Sweeping before refusing is what keeps a client that
+            // stages a candidate and walks away from taking the service.
+            self.reclaim_staged();
+        }
         let slot = self
             .free_stage_slot()
             .ok_or(store_status::EXHAUSTED as i64)?;
@@ -552,6 +574,75 @@ impl Store {
             self.objects[index].stage = u32::MAX;
         }
         true
+    }
+
+    /// Frees staging held by objects nothing can still name.
+    ///
+    /// Staging is not durable and never was: an object lives there from the
+    /// call that staged it until the publication that writes it down, and
+    /// nothing else ever gave a slot back. A candidate that is never published
+    /// therefore held its objects for the rest of the run, which is one client
+    /// taking the service away from the others -- and it is exactly what the
+    /// negative controls do, since a refusal that was asked for on purpose is
+    /// still a candidate nobody publishes.
+    ///
+    /// What may not be dropped is anything still nameable: the published root
+    /// and everything it reaches, every retained root, and whatever the loop
+    /// says it is protecting. Everything else staged and not durable goes, and
+    /// a publication that later names one of them is refused with `NOT_FOUND`
+    /// rather than answered out of a slot that had been quietly reused.
+    pub fn reclaim_staged(&mut self) -> usize {
+        let mut keep = [false; MAX_OBJECTS];
+        let mut reachable = [0usize; MAX_OBJECTS];
+        let mut count = 0usize;
+
+        let mut mark = |store: &mut Self, root: [u8; 32], keep: &mut [bool; MAX_OBJECTS]| {
+            if root == [0u8; 32] {
+                return;
+            }
+            if store.closure(&root, &mut reachable, &mut count) {
+                for index in &reachable[..count] {
+                    keep[*index] = true;
+                }
+            } else {
+                // A root whose closure could not be walked is a root whose
+                // objects cannot be shown to be unreachable. Keeping the
+                // digest itself is the conservative half of that.
+                if let Some(index) = store.find(&root) {
+                    keep[index] = true;
+                }
+            }
+        };
+
+        let published = self.published_root;
+        mark(self, published, &mut keep);
+        for index in 0..self.retained_count.min(MAX_RETAINED) {
+            let root = self.retained[index].root_digest;
+            mark(self, root, &mut keep);
+        }
+        for index in 0..self.protected_count.min(MAX_PROTECTED) {
+            let root = self.protected[index];
+            mark(self, root, &mut keep);
+        }
+
+        let mut freed = 0usize;
+        for index in 0..MAX_OBJECTS {
+            let entry = self.objects[index];
+            if !entry.live || entry.durable || keep[index] {
+                continue;
+            }
+            if entry.stage != u32::MAX {
+                self.stage_used[entry.stage as usize] = false;
+                self.stage_len[entry.stage as usize] = 0;
+            }
+            self.objects[index] = ObjectEntry::default();
+            freed += 1;
+        }
+        self.staged_reclaimed += freed as u64;
+        if freed != 0 {
+            k2::note(note::STAGING_RECLAIMED, freed as u64);
+        }
+        freed
     }
 
     /// Collects every object reachable from `root`, appending indices to `out`.
