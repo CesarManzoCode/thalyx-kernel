@@ -13,6 +13,7 @@ use thalyx_boot_protocol::{
     region_kind,
 };
 
+use crate::acpi;
 use crate::arch::x86_64::serial::{COM1, Uart};
 use crate::arch::x86_64::{cpu, fpu, gdt, idt, lapic, paging::AddressSpace, pic, syscall, trap};
 use crate::event;
@@ -22,8 +23,9 @@ use crate::layout;
 use crate::mm::frame::FrameAllocator;
 use crate::mm::{Frame, Owner, Rights};
 use crate::obj::ScopeId;
+use crate::percpu;
 use crate::state::{IDLE_THREAD, MACHINE, ThreadKind, ThreadState};
-use crate::{domain, sched, time};
+use crate::{domain, sched, smp, time, tlb};
 
 unsafe extern "C" {
     static __thalyx_text_start: u8;
@@ -162,8 +164,35 @@ pub unsafe fn start(bootinfo_phys: u64) -> ! {
         cpu::write_cr0(cpu::read_cr0() | cpu::CR0_WP);
     }
 
+    // The processor's identity comes from `CPUID` rather than from the local
+    // APIC's own register, because the register page is not mapped yet and,
+    // more importantly, because assuming the bootstrap processor is number zero
+    // is exactly what the enumeration groundwork warns against.
+    let bsp_apic_id = cpu::apic_id_from_cpuid(features.x2apic);
+    smp::claim_bootstrap(bsp_apic_id);
+    // SAFETY: the per-processor block for slot zero has just been claimed, and
+    // nothing has read `GS` yet.
+    unsafe { percpu::install(0) };
+
+    let backend = if features.x2apic {
+        lapic::Backend::X2Apic
+    } else {
+        lapic::Backend::XApic
+    };
     // SAFETY: bootstrap, interrupts masked, no interrupt source enabled yet.
-    let lapic_phys = unsafe { lapic::enable_xapic() };
+    let lapic_phys = unsafe { lapic::enable_local(features.x2apic) };
+    event!(
+        "cpu.apic_backend",
+        "backend={} bsp_apic_id={bsp_apic_id} lapic_phys=0x{lapic_phys:x} \
+         mmio_window={} advertised_x2apic={}",
+        backend.name(),
+        if backend == lapic::Backend::XApic {
+            "mapped"
+        } else {
+            "absent"
+        },
+        u8::from(features.x2apic)
+    );
 
     // SAFETY: `regions` is the loader's classification and the direct map covers
     // every usable frame it names, which `validate` checked against
@@ -186,7 +215,7 @@ pub unsafe fn start(bootinfo_phys: u64) -> ! {
         machine.memory = Some(allocator);
     }
 
-    build_kernel_space(&info, lapic_phys);
+    build_kernel_space(&info, lapic_phys, backend);
 
     // SAFETY: the kernel's own tables are installed and every mapping the
     // kernel executes from, and its stack, exist in them.
@@ -202,11 +231,15 @@ pub unsafe fn start(bootinfo_phys: u64) -> ! {
         event!("mm.paging_installed", "cr3=0x{cr3:x} owner=kernel");
     }
 
-    let ist_tops = map_emergency_stacks();
+    let ist_tops = smp::map_emergency_stacks(0);
 
     // SAFETY: bootstrap path, interrupts masked, emergency stacks mapped.
     unsafe {
-        gdt::install(ist_tops);
+        gdt::install(0, ist_tops);
+        // Reloading the segment registers cleared the `GS` base, so the
+        // per-processor block is installed again. Nothing between the two calls
+        // reads it.
+        percpu::install(0);
         idt::install();
     }
     event!(
@@ -222,9 +255,9 @@ pub unsafe fn start(bootinfo_phys: u64) -> ! {
         "cpu.tss_installed",
         "ist1=0x{:x} ist2=0x{:x} ist3=0x{:x} double_fault_vector={} nmi_vector={} \
          machine_check_vector={}",
-        gdt::ist_stack(0),
-        gdt::ist_stack(1),
-        gdt::ist_stack(2),
+        gdt::ist_stack(0, 0),
+        gdt::ist_stack(0, 1),
+        gdt::ist_stack(0, 2),
         idt::VECTOR_DOUBLE_FAULT,
         idt::VECTOR_NMI,
         idt::VECTOR_MACHINE_CHECK
@@ -252,9 +285,17 @@ pub unsafe fn start(bootinfo_phys: u64) -> ! {
     event!(
         "cpu.profile",
         "name=v0-qemu status=accepted paging=4level nx=on wp=on smep={} smap={} \
-         kernel_simd=off user_fp=x87+sse2 fp_switch=eager",
+         kernel_simd=off user_fp=x87+sse2 fp_switch=eager global_pages={}",
         if features.smep { "on" } else { "absent" },
-        if features.smap { "on" } else { "absent" }
+        if features.smap { "on" } else { "absent" },
+        // Read back rather than assumed. Cross-processor invalidation reloads
+        // `CR3` and calls that complete, which is only true while no mapping is
+        // global, and no mapping can be global while this bit is clear.
+        if cpu::read_cr4() & cpu::CR4_PGE == 0 {
+            "off"
+        } else {
+            "on_unexpected"
+        }
     );
 
     // SAFETY: the feature gate confirmed FXSR and SSE2.
@@ -280,8 +321,24 @@ pub unsafe fn start(bootinfo_phys: u64) -> ! {
     // SAFETY: bootstrap, interrupts masked, no legacy interrupt is wanted.
     unsafe { pic::remap_and_mask() };
 
-    start_timer(lapic_phys);
+    let calibration = start_timer(lapic_phys, backend);
     establish_idle_thread(&info);
+    smp::bootstrap_online(bsp_apic_id);
+
+    let platform = acpi::parse(info.acpi_rsdp_phys);
+    match platform.as_ref() {
+        Some(platform) => {
+            smp::start_all(platform, features.x2apic, calibration.tsc_hz);
+            report_smp(platform);
+        }
+        None => {
+            event!(
+                "smp.summary",
+                "described=0 started=0 online=1 reason=no_firmware_description \
+                 profile=uniprocessor"
+            );
+        }
+    }
 
     // The resource tree exists before the first domain does. Nothing the kernel
     // creates from here on is unaccounted: every object is charged to a scope,
@@ -294,6 +351,14 @@ pub unsafe fn start(bootinfo_phys: u64) -> ! {
         root
     };
 
+    // Devices are discovered before the first domain exists, and assigned to
+    // the root scope, so that whatever a package's supervisor receives it
+    // receives as an explicit capability rather than by asking for a device by
+    // name later.
+    if let Some(platform) = platform.as_ref() {
+        crate::device::discover(platform, root);
+    }
+
     let created = create_initial_domains(root);
 
     reclaim_boot_memory(&info);
@@ -304,7 +369,9 @@ pub unsafe fn start(bootinfo_phys: u64) -> ! {
     }
 
     let terminal = sched::run_until_idle();
+    smp::stop_all();
     domain::reap_dead();
+    drain_quarantine();
 
     summarize(terminal);
     harness::finish(harness::STATUS_COMPLETE)
@@ -395,6 +462,44 @@ fn report_memory_map() {
     }
 }
 
+/// Records what the machine ended up with, and what it was told it had.
+///
+/// The two numbers are reported separately on purpose. "The firmware described
+/// four processors" and "four processors answered" are different claims, and a
+/// run where they differ is a run whose scheduling evidence covers fewer
+/// processors than the machine has.
+fn report_smp(platform: &acpi::Platform) {
+    let machine = MACHINE.lock();
+    let online = machine.cpus_online;
+    drop(machine);
+    let (published, ipis, flushes, timeouts, spins) = tlb::counters();
+    event!(
+        "smp.online",
+        "described={} enabled={} online={online} capacity={} mask=0x{:x} \
+         invalidations={published} ipis={ipis} flushes={flushes} \
+         ack_timeouts={timeouts} max_ack_spins={spins}",
+        platform.cpu_count,
+        platform.enabled(),
+        crate::limits::MAX_CPUS,
+        tlb::online_mask()
+    );
+    for cpu in 0..crate::limits::MAX_CPUS {
+        let machine = MACHINE.lock();
+        let slot = machine.cpus[cpu];
+        drop(machine);
+        if !slot.online {
+            continue;
+        }
+        event!(
+            "smp.cpu",
+            "cpu={cpu} apic_id={} idle_thread={} role={}",
+            slot.apic_id,
+            slot.idle_thread,
+            if cpu == 0 { "bootstrap" } else { "application" }
+        );
+    }
+}
+
 fn map_kernel_range(space: &mut AddressSpace, start: u64, end: u64, rights: Rights, delta: u64) {
     let mut guard = MACHINE.lock();
     let allocator = guard.memory.as_mut().expect("frame allocator established");
@@ -408,7 +513,7 @@ fn map_kernel_range(space: &mut AddressSpace, start: u64, end: u64, rights: Righ
     }
 }
 
-fn build_kernel_space(info: &BootInfo, lapic_phys: u64) {
+fn build_kernel_space(info: &BootInfo, lapic_phys: u64, backend: lapic::Backend) {
     let mut space = {
         let mut guard = MACHINE.lock();
         let allocator = guard.memory.as_mut().expect("frame allocator established");
@@ -423,15 +528,20 @@ fn build_kernel_space(info: &BootInfo, lapic_phys: u64) {
         space
             .map_large_range(HHDM_BASE, 0, large_pages, Rights::KERNEL_RW, allocator)
             .expect("direct map");
-        space
-            .map(
-                layout::LAPIC_VADDR,
-                Frame::containing(lapic_phys),
-                Rights::KERNEL_DEVICE,
-                allocator,
-                Owner::Kernel,
-            )
-            .expect("local APIC mapping");
+        if backend == lapic::Backend::XApic {
+            // In x2APIC mode the registers are model-specific registers and the
+            // memory window is gone; mapping it would install a device page
+            // nothing may read.
+            space
+                .map(
+                    layout::LAPIC_VADDR,
+                    Frame::containing(lapic_phys),
+                    Rights::KERNEL_DEVICE,
+                    allocator,
+                    Owner::Kernel,
+                )
+                .expect("local APIC mapping");
+        }
         space
     };
 
@@ -466,42 +576,8 @@ fn build_kernel_space(info: &BootInfo, lapic_phys: u64) {
     machine.kernel_space = Some(space);
 }
 
-fn map_emergency_stacks() -> [u64; layout::IST_COUNT] {
-    let mut tops = [0u64; layout::IST_COUNT];
-    let mut guard = MACHINE.lock();
-    let machine = &mut *guard;
-    for (slot, top) in tops.iter_mut().enumerate() {
-        let base = layout::ist_slot_base(slot);
-        for page in 0..layout::IST_PAGES {
-            let frame = machine
-                .memory
-                .as_mut()
-                .expect("frame allocator established")
-                .alloc(Owner::Kernel)
-                .expect("emergency stack frame");
-            let space = machine.kernel_space.as_mut().expect("kernel space built");
-            let allocator = machine
-                .memory
-                .as_mut()
-                .expect("frame allocator established");
-            // The slot's first page stays unmapped as a guard.
-            space
-                .map(
-                    base + (page + 1) * PAGE_SIZE,
-                    frame,
-                    Rights::KERNEL_RW,
-                    allocator,
-                    Owner::Kernel,
-                )
-                .expect("emergency stack mapping");
-        }
-        *top = base + layout::IST_SLOT_PAGES * PAGE_SIZE;
-    }
-    tops
-}
-
-fn start_timer(lapic_phys: u64) {
-    lapic::install(layout::LAPIC_VADDR);
+fn start_timer(lapic_phys: u64, backend: lapic::Backend) -> lapic::Calibration {
+    lapic::install(backend, layout::LAPIC_VADDR);
     let Some(controller) = lapic::current() else {
         event!("boot.rejected", "reason=no_local_apic");
         harness::finish(harness::STATUS_PANIC);
@@ -525,7 +601,7 @@ fn start_timer(lapic_phys: u64) {
     event!(
         "time.source",
         "kind={} hz={} invariant_tsc={} reference=pit window_ns={} \
-         cross_core_monotonic=not_exercised_uniprocessor",
+         cross_core_monotonic=checked_at_every_reading",
         time::source().name(),
         time::hz(),
         u8::from(features.invariant_tsc),
@@ -537,16 +613,19 @@ fn start_timer(lapic_phys: u64) {
     controller.start_periodic(trap::TIMER_VECTOR, count);
     event!(
         "timer.armed",
-        "vector=0x{:x} mode=periodic tick_hz={} lapic_hz={} initial_count={count} \
-         quantum_ns={} quantum_ticks={} apic_id={} apic_version=0x{:x} lapic_phys=0x{lapic_phys:x}",
+        "cpu=0 vector=0x{:x} mode=periodic tick_hz={} lapic_hz={} initial_count={count} \
+         quantum_ns={} quantum_ticks={} apic_id={} apic_version=0x{:x} \
+         lapic_phys=0x{lapic_phys:x} backend={}",
         trap::TIMER_VECTOR,
         sched::TICK_HZ,
         calibration.lapic_hz,
         sched::QUANTUM_NS,
         sched::QUANTUM_TICKS,
         controller.id(),
-        controller.version()
+        controller.version(),
+        backend.name()
     );
+    calibration
 }
 
 fn establish_idle_thread(info: &BootInfo) {
@@ -565,7 +644,7 @@ fn establish_idle_thread(info: &BootInfo) {
     thread.fpu = fpu::initial();
     thread.quantum_ticks = sched::QUANTUM_TICKS;
     thread.dispatched_ns = time::monotonic_ns().unwrap_or(0);
-    machine.current = IDLE_THREAD;
+    machine.cpus[0].current = IDLE_THREAD;
     drop(machine);
 
     // SAFETY: bootstrap path with interrupts masked; the boot stack is mapped
@@ -576,7 +655,7 @@ fn establish_idle_thread(info: &BootInfo) {
     }
     event!(
         "sched.idle_established",
-        "thread={IDLE_THREAD} kstack_top=0x{stack_top:x} cr3=0x{cr3:x}"
+        "cpu=0 thread={IDLE_THREAD} kstack_top=0x{stack_top:x} cr3=0x{cr3:x}"
     );
 }
 
@@ -816,6 +895,136 @@ fn reclaim_boot_memory(info: &BootInfo) {
     );
 }
 
+/// Returns the frames deferred reclamation was still holding.
+///
+/// Every other processor has parked and been removed from the set an
+/// invalidation waits for, and this one flushes here, so the condition the
+/// quarantine waits for — no processor can reach these frames through a cached
+/// translation — is satisfied by construction rather than by a timeout. What
+/// the record reports is how much reclamation was deferred and how much was
+/// deferred *permanently*, because a quarantine that overflowed keeps its
+/// frames charged for the rest of the run rather than releasing them early.
+fn drain_quarantine() {
+    tlb::refresh_local();
+    let (released, held, peak, retained, total) = {
+        let mut machine = MACHINE.lock();
+        let allocator = machine.allocator();
+        let released = allocator.drain_quarantine();
+        (
+            released,
+            allocator.quarantined(),
+            allocator.quarantine_peak(),
+            allocator.quarantine_retained(),
+            allocator.quarantine_released(),
+        )
+    };
+    event!(
+        "mm.quarantine",
+        "released_now={released} released_total={total} still_held={held} peak={peak} \
+         retained_permanently={retained} condition=all_processors_invalidated"
+    );
+}
+
+/// What each processor did, and what the invalidation protocol cost.
+///
+/// Per processor rather than summed: "the machine ran four processors" and
+/// "one processor ran everything while three idled" produce the same total, and
+/// only the first is evidence that the scheduling was multiprocessor.
+fn scheduling_summary() {
+    let machine = MACHINE.lock();
+    // The processors that ran, not the ones still running: this summary is
+    // written after the others have parked.
+    let online = machine.cpus_started;
+    let peak = crate::scope::peak_running(&machine.scopes);
+    let mut rows = [(0usize, 0u32, 0u64, 0u64, 0u64, 0u64, 0u64); crate::limits::MAX_CPUS];
+    let mut count = 0usize;
+    for cpu in 0..crate::limits::MAX_CPUS {
+        let slot = machine.cpus[cpu];
+        if slot.apic_id == u32::MAX {
+            continue;
+        }
+        rows[count] = (
+            cpu,
+            slot.apic_id,
+            slot.ticks,
+            slot.dispatches,
+            slot.preemptions,
+            slot.budget_stalls,
+            slot.user_ns,
+        );
+        count += 1;
+    }
+    let migrations: u64 = machine.threads.iter().map(|thread| thread.migrations).sum();
+    let interval = machine.max_charge_interval_ns;
+    drop(machine);
+
+    for slot in 0..count {
+        let (cpu, apic_id, ticks, dispatches, preemptions, stalls, user_ns) = rows[slot];
+        event!(
+            "sched.cpu_summary",
+            "cpu={cpu} apic_id={apic_id} ticks={ticks} dispatches={dispatches} \
+             preemptions={preemptions} budget_stalls={stalls} user_ns={user_ns}"
+        );
+    }
+    // Every scope that was ever given a budget, with the most it was actually
+    // charged in a closed window. A budget nothing was measured against is a
+    // number, not a limit.
+    for index in 0..crate::limits::MAX_SCOPES {
+        let machine = MACHINE.lock();
+        let node = &machine.scopes[index];
+        if node.state == crate::scope::State::Empty || node.limits.cpu_budget_ns == 0 {
+            continue;
+        }
+        let (id, label, budget, parallelism) = (
+            node.id,
+            node.label_str(),
+            node.limits.cpu_budget_ns,
+            node.limits.parallelism,
+        );
+        let (windows, worst, overruns, worst_overrun, total, debt) = (
+            node.windows_closed,
+            node.max_window_ns,
+            node.overruns,
+            node.max_overrun_ns,
+            node.cpu_total_ns,
+            node.cpu_debt_ns,
+        );
+        // The peaks are recorded where the commitment happens, so they answer
+        // the question a closed window cannot: how much was ever promised at
+        // once, and how many threads ever held this scope at one instant.
+        let (committed, peak, grants, refusals) = (
+            node.max_committed_ns,
+            node.max_running,
+            node.dispatch_grants,
+            node.dispatch_refusals,
+        );
+        let (charged, excess) = (node.max_charged_in_window_ns, node.max_excess_ns);
+        event!(
+            "scope.accounting",
+            "scope={index} id={id} label={label} budget_ns={budget} \
+             parallelism={parallelism} windows_closed={windows} max_window_ns={worst} \
+             overruns={overruns} max_overrun_ns={worst_overrun} total_ns={total} \
+             debt_ns={debt} max_committed_ns={committed} max_running={peak} \
+             dispatch_grants={grants} dispatch_refusals={refusals} \
+             max_charged_in_window_ns={charged} max_excess_ns={excess}"
+        );
+        drop(machine);
+    }
+
+    let (published, ipis, flushes, timeouts, spins) = tlb::counters();
+    let (observations, regressions, worst) = time::monotonicity();
+    event!(
+        "sched.summary",
+        "cpus_started={online} peak_simultaneous_threads={peak} migrations={migrations} \
+         quantum_ns={} tick_hz={} max_charge_interval_ns={interval} \
+         invalidations={published} shootdown_ipis={ipis} flushes={flushes} \
+         ack_timeouts={timeouts} max_ack_spins={spins} clock_readings={observations} \
+         clock_regressions={regressions} worst_regression_ns={worst}",
+        crate::sched::QUANTUM_NS,
+        crate::sched::TICK_HZ
+    );
+}
+
 fn summarize(terminal: sched::Terminal) {
     let machine = MACHINE.lock();
     let ticks = machine.ticks;
@@ -905,6 +1114,9 @@ fn summarize(terminal: sched::Terminal) {
             }
         }
     }
+
+    scheduling_summary();
+    crate::device::summarize();
 
     event!(
         "k1.terminal",

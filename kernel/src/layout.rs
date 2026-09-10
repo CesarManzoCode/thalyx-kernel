@@ -12,7 +12,24 @@ pub const DEVICE_AREA: u64 = KERNEL_DYNAMIC_BASE;
 /// Local APIC register page.
 pub const LAPIC_VADDR: u64 = DEVICE_AREA;
 
+/// The firmware's configuration-space window, mapped with one large entry.
+/// Two mebibytes cover the first two buses, which is where every device this
+/// revision assigns lives.
+pub const ECAM_VADDR: u64 = KERNEL_DYNAMIC_BASE + (16 << 20);
+/// Buses that window covers.
+pub const ECAM_BUSES: u8 = 2;
+
+/// Device registers the kernel maps for itself: the parts of a device's
+/// configuration a driver is not allowed to reach directly.
+pub const MMIO_AREA: u64 = KERNEL_DYNAMIC_BASE + (32 << 20);
+/// Pages of that window.
+pub const MMIO_PAGES: u64 = 64;
+
 /// Emergency stacks referenced by the TSS interrupt stack table.
+///
+/// One set per processor: the slot index is `cpu * IST_COUNT + entry`, so a
+/// double fault on one processor never lands on a stack another processor is
+/// faulting onto.
 pub const IST_AREA: u64 = KERNEL_DYNAMIC_BASE + (1 << 20);
 /// Pages per emergency stack.
 pub const IST_PAGES: u64 = 2;
@@ -40,7 +57,8 @@ pub const fn kstack_slot_base(index: usize) -> u64 {
     KSTACK_AREA + (index as u64) * KSTACK_SLOT_PAGES * PAGE_SIZE
 }
 
-/// Base of the emergency stack slot `index`, guard page included.
+/// Base of the emergency stack slot `index`, guard page included. The index
+/// spans every processor's set, not one processor's three.
 #[must_use]
 pub const fn ist_slot_base(index: usize) -> u64 {
     IST_AREA + (index as u64) * IST_SLOT_PAGES * PAGE_SIZE

@@ -346,23 +346,28 @@ impl AddressSpace {
             }
             let child = Frame::containing(entry & ADDRESS_MASK);
             if level == 1 || entry & HUGE != 0 {
-                // Leaf: a data page charged to the domain. K1 never maps a
-                // large page into a user space, so `HUGE` here would be a bug
-                // rather than a page to split; freeing the frame it names is
-                // still the right accounting.
-                // SAFETY: the address space is not active on any CPU, the
-                // domain is dead, and K1 has no DMA, so no reference to the
-                // frame can remain.
-                unsafe { alloc.release(child, owner) };
+                // Leaf: a data page charged to the domain. A large page here
+                // would be a bug rather than a page to split, since no user
+                // space is ever given one; freeing the frame it names is still
+                // the right accounting.
+                //
+                // The frame goes to quarantine, not back to the pool. The
+                // domain is dead and its space is inactive, but another
+                // processor may still hold a translation from before it died,
+                // and a translation is keyed by linear address rather than by
+                // address space.
+                alloc.retire(child, owner);
                 counts.data_frames += 1;
             } else {
                 self.destroy_level(child, level - 1, alloc, owner, counts);
             }
             entries[slot] = 0;
         }
-        // SAFETY: every entry of this table has just been cleared and the table
-        // itself is unreachable from the (inactive) hierarchy.
-        unsafe { alloc.release(frame, owner) };
+        // Every entry of this table has just been cleared and the table itself
+        // is unreachable from the inactive hierarchy. It still enters
+        // quarantine: a paging-structure cache on another processor can hold an
+        // interior entry as readily as a leaf.
+        alloc.retire(frame, owner);
         counts.table_frames += 1;
     }
 
@@ -378,8 +383,9 @@ impl AddressSpace {
         for slot in KERNEL_SLOTS {
             root[slot] = 0;
         }
-        // SAFETY: the caller guarantees the space is inactive and empty.
-        unsafe { alloc.release(self.root, owner) };
+        // The caller guarantees the space is inactive and empty; quarantine
+        // covers the paging-structure caches another processor may still hold.
+        alloc.retire(self.root, owner);
     }
 }
 

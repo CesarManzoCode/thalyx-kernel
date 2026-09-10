@@ -1,0 +1,285 @@
+//! Cross-processor invalidation of translations, and the reclamation that
+//! depends on it.
+//!
+//! Removing a page-table entry does not remove the translation another
+//! processor has already cached. The mechanism here is the conservative one the
+//! memory and concurrency contracts describe, and it is deliberately a
+//! rendezvous rather than a per-range optimisation:
+//!
+//! * a **generation** counts published invalidations. Every removal or
+//!   narrowing of a mapping bumps it, after the entry itself is written;
+//! * every processor records the generation it has flushed to. Flushing is
+//!   complete — a `CR3` reload, which retires every entry because this kernel
+//!   marks no mapping global — so a later generation subsumes every earlier
+//!   one. That is what makes coalescing safe: an acknowledgement of generation
+//!   three cannot leave an obligation from generation two behind, which is the
+//!   race a range-tracking scheme has to solve separately;
+//! * the initiator releases every lock, tells the other processors, and waits
+//!   until each of them has recorded a generation at least as new as the one it
+//!   published. The acknowledgement names the generation, not merely that an
+//!   interrupt arrived;
+//! * a processor about to run a user thread refreshes first. That closes the
+//!   race a snapshot of "processors currently in this address space" cannot: a
+//!   processor entering afterwards was not in the snapshot, and here it does not
+//!   need to be.
+//!
+//! Waiting never happens with a lock held, and the wait itself services
+//! incoming requests, so two processors that shoot down at the same time make
+//! progress instead of waiting for each other. A wait that runs out of patience
+//! is a *failure to observe quiescence*, not permission to proceed: the frames
+//! stay in quarantine and the run says so.
+
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use crate::arch::x86_64::{cpu, lapic, trap};
+use crate::limits::MAX_CPUS;
+
+/// Published invalidations. Starts at one so a processor that has recorded
+/// nothing is distinguishable from one that has recorded the first generation.
+static GENERATION: AtomicU64 = AtomicU64::new(1);
+/// Generation each processor has flushed to.
+static SEEN: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(1) }; MAX_CPUS];
+/// Bitmask of processors that have completed their handshake with the kernel.
+static ONLINE: AtomicU64 = AtomicU64::new(0);
+
+/// Invalidations published.
+static PUBLISHED: AtomicU64 = AtomicU64::new(0);
+/// Interrupts sent to announce them.
+static IPIS: AtomicU64 = AtomicU64::new(0);
+/// Complete flushes performed, on every processor.
+static FLUSHES: AtomicU64 = AtomicU64::new(0);
+/// Waits that ran out of patience before every processor acknowledged.
+static TIMEOUTS: AtomicU64 = AtomicU64::new(0);
+/// Longest wait observed, in spins.
+static MAX_SPINS: AtomicU64 = AtomicU64::new(0);
+
+/// Spins a wait allows before it gives up and reports a failure to observe
+/// quiescence. Large enough that an ordinary kernel critical section on another
+/// processor finishes inside it, small enough that a wedged processor is
+/// reported instead of hanging the machine.
+const WAIT_SPIN_LIMIT: u64 = 200_000_000;
+
+/// Records that `cpu` participates in invalidation from now on.
+///
+/// A processor is added only after it has flushed once, so it can never be
+/// waited for at a generation it never saw.
+pub fn mark_online(cpu: usize) {
+    if cpu >= MAX_CPUS {
+        return;
+    }
+    SEEN[cpu].store(GENERATION.load(Ordering::Acquire), Ordering::Release);
+    ONLINE.fetch_or(1u64 << cpu, Ordering::AcqRel);
+}
+
+/// Removes `cpu` from the set an invalidation waits for.
+///
+/// A parked processor cannot acknowledge anything, and waiting for it would
+/// turn the end of a run into a hang. It is removed only after it has stopped
+/// scheduling, so it holds no translation anyone still cares about.
+pub fn mark_offline(cpu: usize) {
+    if cpu >= MAX_CPUS {
+        return;
+    }
+    SEEN[cpu].store(u64::MAX, Ordering::Release);
+    ONLINE.fetch_and(!(1u64 << cpu), Ordering::AcqRel);
+}
+
+/// Processors currently participating.
+#[must_use]
+pub fn online_mask() -> u64 {
+    ONLINE.load(Ordering::Acquire)
+}
+
+/// Publishes an invalidation and returns the generation that names it.
+///
+/// The caller must already have written the page-table change. On this
+/// architecture ordinary stores are not reordered with each other, so the entry
+/// is visible to any processor that observes this counter.
+pub fn publish() -> u64 {
+    PUBLISHED.fetch_add(1, Ordering::Relaxed);
+    GENERATION.fetch_add(1, Ordering::AcqRel) + 1
+}
+
+/// A fresh generation for a frame entering quarantine.
+///
+/// It bumps the counter without counting an invalidation: nothing new has been
+/// removed from a page table here, but the frame must not come back until every
+/// processor has flushed at a point after this call, and only a strictly newer
+/// generation expresses that.
+pub fn retire_stamp() -> u64 {
+    GENERATION.fetch_add(1, Ordering::AcqRel) + 1
+}
+
+/// Brings the calling processor up to the published generation.
+///
+/// Safe to call from anywhere, including from inside a lock's spin loop: it
+/// takes no lock, and a complete flush is correct at any point.
+pub fn refresh_local() {
+    let cpu = crate::percpu::index();
+    if cpu >= MAX_CPUS {
+        return;
+    }
+    let wanted = GENERATION.load(Ordering::Acquire);
+    if SEEN[cpu].load(Ordering::Relaxed) >= wanted {
+        return;
+    }
+    // SAFETY: the value written back is the address space this processor is
+    // already executing in, so the code and stack running here stay mapped.
+    unsafe { cpu::flush_tlb_all() };
+    FLUSHES.fetch_add(1, Ordering::Relaxed);
+    SEEN[cpu].store(wanted, Ordering::Release);
+}
+
+/// The interrupt one processor sends another to make it refresh.
+pub fn on_shootdown_interrupt() {
+    if let Some(controller) = lapic::current() {
+        controller.end_of_interrupt();
+    }
+    refresh_local();
+}
+
+fn notify_others(me: usize) {
+    let Some(controller) = lapic::current() else {
+        return;
+    };
+    let online = ONLINE.load(Ordering::Acquire);
+    for cpu in 0..MAX_CPUS {
+        if cpu == me || online & (1u64 << cpu) == 0 {
+            continue;
+        }
+        let apic_id = crate::smp::apic_id_of(cpu);
+        if apic_id == u32::MAX {
+            continue;
+        }
+        IPIS.fetch_add(1, Ordering::Relaxed);
+        controller.send_fixed(apic_id, trap::TLB_VECTOR);
+    }
+}
+
+/// Outcome of waiting for an invalidation to be acknowledged everywhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ack {
+    /// Generation waited for.
+    pub generation: u64,
+    /// Processors that acknowledged it.
+    pub acknowledged: u32,
+    /// Processors that were online when the wait started.
+    pub expected: u32,
+    /// Spins the wait took.
+    pub spins: u64,
+    /// Whether the wait gave up without every acknowledgement.
+    pub timed_out: bool,
+}
+
+/// Waits until every online processor has flushed at `generation` or later.
+///
+/// # Panics
+///
+/// Never. A wait that does not complete returns with `timed_out` set, which the
+/// caller must treat as "quiescence was not observed" rather than as an
+/// acknowledgement.
+///
+/// The caller must hold no lock: this is where the concurrency contract's rule
+/// that no lock is held across an acknowledgement wait is enforced by
+/// construction, because the wait itself calls back into the local refresh.
+#[must_use]
+pub fn wait_for(generation: u64) -> Ack {
+    let me = crate::percpu::index();
+    refresh_local();
+    let expected_mask = ONLINE.load(Ordering::Acquire);
+    let expected = expected_mask.count_ones();
+    notify_others(me);
+
+    let mut spins = 0u64;
+    loop {
+        let mut acknowledged = 0u32;
+        let mut outstanding = false;
+        for cpu in 0..MAX_CPUS {
+            if expected_mask & (1u64 << cpu) == 0 {
+                continue;
+            }
+            if SEEN[cpu].load(Ordering::Acquire) >= generation {
+                acknowledged += 1;
+            } else {
+                outstanding = true;
+            }
+        }
+        if !outstanding {
+            let previous = MAX_SPINS.load(Ordering::Relaxed);
+            if spins > previous {
+                MAX_SPINS.store(spins, Ordering::Relaxed);
+            }
+            return Ack {
+                generation,
+                acknowledged,
+                expected,
+                spins,
+                timed_out: false,
+            };
+        }
+        spins += 1;
+        if spins % 1_000_000 == 0 {
+            // A processor spinning for a lock has interrupts masked and will
+            // not take the announcement until it makes progress. Repeating it
+            // costs one write and removes the dependency on the first one
+            // having arrived at a convenient moment.
+            notify_others(me);
+        }
+        if spins >= WAIT_SPIN_LIMIT {
+            TIMEOUTS.fetch_add(1, Ordering::Relaxed);
+            return Ack {
+                generation,
+                acknowledged,
+                expected,
+                spins,
+                timed_out: true,
+            };
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// Publishes an invalidation and waits for it, in one step.
+///
+/// The caller must hold no lock.
+#[must_use]
+pub fn shootdown() -> Ack {
+    let generation = publish();
+    wait_for(generation)
+}
+
+/// The newest generation every online processor has already flushed at.
+///
+/// A frame whose last mapping was removed at or before this generation cannot
+/// be reached through a cached translation on any processor, which is the
+/// condition reclamation waits for.
+#[must_use]
+pub fn safe_generation() -> u64 {
+    let online = ONLINE.load(Ordering::Acquire);
+    if online == 0 {
+        return GENERATION.load(Ordering::Acquire);
+    }
+    let mut safe = u64::MAX;
+    for cpu in 0..MAX_CPUS {
+        if online & (1u64 << cpu) == 0 {
+            continue;
+        }
+        let seen = SEEN[cpu].load(Ordering::Acquire);
+        if seen < safe {
+            safe = seen;
+        }
+    }
+    safe
+}
+
+/// Counters for the run's own record.
+#[must_use]
+pub fn counters() -> (u64, u64, u64, u64, u64) {
+    (
+        PUBLISHED.load(Ordering::Relaxed),
+        IPIS.load(Ordering::Relaxed),
+        FLUSHES.load(Ordering::Relaxed),
+        TIMEOUTS.load(Ordering::Relaxed),
+        MAX_SPINS.load(Ordering::Relaxed),
+    )
+}

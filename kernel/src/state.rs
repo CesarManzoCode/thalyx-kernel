@@ -25,11 +25,13 @@ use thalyx_abi::generated::ReceiptRecord;
 use crate::arch::x86_64::fpu::FpuState;
 use crate::arch::x86_64::paging::AddressSpace;
 use crate::ctrl::ControlLog;
+use crate::device::{Device, DmaGrant, IrqBinding, MAX_DEVICE_MAPS};
 use crate::events::{Signal, Timer};
 use crate::ipc::{Endpoint, Invocation, Message};
 use crate::limits::{
-    MAX_CONTROL_LOGS, MAX_ENDPOINTS, MAX_GRANTS, MAX_INVOCATIONS, MAX_MAPS, MAX_MEMORY_OBJECTS,
-    MAX_MESSAGES, MAX_SCOPES, MAX_SIGNALS, MAX_TIMERS,
+    MAX_CONTROL_LOGS, MAX_CPUS, MAX_DEVICES, MAX_DMA_GRANTS, MAX_ENDPOINTS, MAX_GRANTS,
+    MAX_INVOCATIONS, MAX_IRQ_BINDINGS, MAX_MAPS, MAX_MEMORY_OBJECTS, MAX_MESSAGES, MAX_SCOPES,
+    MAX_SIGNALS, MAX_TIMERS,
 };
 use crate::memobj::{MapRecord, MemoryObject};
 use crate::mm::frame::FrameAllocator;
@@ -43,8 +45,75 @@ pub use crate::limits::{MAX_DOMAINS, MAX_THREADS, MAX_THREADS_PER_DOMAIN};
 
 /// Kernel stack slots, one per thread.
 pub const MAX_KSTACKS: usize = MAX_THREADS;
-/// Table index of the idle thread, which is the bootstrap context itself.
+/// Table index of the bootstrap processor's idle thread, which is the
+/// bootstrap context itself.
 pub const IDLE_THREAD: usize = 0;
+
+/// Thread-table index of the idle thread of processor `cpu`.
+///
+/// The first [`MAX_CPUS`] slots are reserved for them. A processor's idle
+/// thread is the context it runs when nothing else is eligible **on that
+/// processor**, so there is one per processor and no domain owns any of them.
+#[must_use]
+pub const fn idle_thread(cpu: usize) -> usize {
+    cpu
+}
+
+/// What one processor is doing, as the scheduler sees it.
+///
+/// This is the half of per-processor state that is kernel metadata: it is read
+/// and written under the machine lock like every other object. The half the
+/// entry paths need before they can take a lock lives in [`crate::percpu`].
+#[derive(Clone, Copy, Debug)]
+pub struct CpuSlot {
+    /// Whether the processor completed its handshake and may be scheduled on.
+    pub online: bool,
+    /// Local APIC identifier, as the firmware reported it.
+    pub apic_id: u32,
+    /// The processor's own idle thread.
+    pub idle_thread: usize,
+    /// Thread currently dispatched here.
+    pub current: usize,
+    /// Round-robin cursor over the thread table.
+    pub cursor: usize,
+    /// Thread this processor switched away from and has not yet published as
+    /// ready again.
+    ///
+    /// A thread whose stopped context is still being written must not be
+    /// picked by another processor: it would resume from a stack pointer that
+    /// has not been stored yet. So the outgoing thread stays unpickable until
+    /// the incoming context on this processor publishes it.
+    pub previous: usize,
+    /// Timer interrupts this processor took.
+    pub ticks: u64,
+    /// Times this processor dispatched a user thread.
+    pub dispatches: u64,
+    /// Times this processor took a user thread away involuntarily.
+    pub preemptions: u64,
+    /// Dispatches this processor refused for want of budget or a parallelism
+    /// slot.
+    pub budget_stalls: u64,
+    /// Nanoseconds of user execution this processor charged.
+    pub user_ns: u64,
+}
+
+impl CpuSlot {
+    const fn empty() -> Self {
+        Self {
+            online: false,
+            apic_id: u32::MAX,
+            idle_thread: usize::MAX,
+            current: usize::MAX,
+            cursor: 0,
+            previous: usize::MAX,
+            ticks: 0,
+            dispatches: 0,
+            preemptions: 0,
+            budget_stalls: 0,
+            user_ns: 0,
+        }
+    }
+}
 
 /// Lifecycle of a domain.
 ///
@@ -175,6 +244,15 @@ pub struct Domain {
     pub stack_mapped: bool,
     /// Whether the domain was built through the K2 capability path.
     pub managed: bool,
+    /// Bit per processor this domain's address space has ever been dispatched
+    /// on.
+    ///
+    /// A count of who is in the space *right now* answers a different and much
+    /// weaker question: an invalidation has to reach every processor that could
+    /// hold a translation, and a processor that ran here a microsecond ago
+    /// still could. The mask is what makes "reached everyone who could have
+    /// cached it" checkable after the fact.
+    pub cpu_mask: u64,
     /// Pages reserved in the owner scope for this domain's infrastructure.
     pub reserved_pages: u64,
     /// Metadata units reserved in the owner scope for this domain and its
@@ -219,6 +297,7 @@ impl Domain {
             entry: 0,
             segments: 0,
             image_pages: 0,
+            cpu_mask: 0,
             stack_mapped: false,
             managed: false,
             reserved_pages: 0,
@@ -341,6 +420,22 @@ pub struct Thread {
     pub dispatched_ns: u64,
     /// Timer ticks left in the current quantum.
     pub quantum_ticks: u32,
+    /// Execution reserved in the effective scope for the current dispatch.
+    pub dispatch_reserved_ns: u64,
+    /// Window that reservation belongs to.
+    pub dispatch_window: u64,
+    /// Scope the reservation was taken in. Held separately from
+    /// `effective_scope` because a thread may be rebound while it runs, and the
+    /// reservation must be returned where it was taken.
+    pub dispatch_scope: ScopeId,
+    /// Whether the reservation came from the closure reserve.
+    pub dispatch_recovery: bool,
+    /// Whether the thread currently holds a dispatch reservation.
+    pub dispatched: bool,
+    /// Processor the thread last ran on.
+    pub last_cpu: usize,
+    /// Times the thread was dispatched on a processor other than the last one.
+    pub migrations: u64,
     /// Times the timer took the CPU away from the thread.
     pub preemptions: u64,
     /// Detailed preemption records already emitted for this thread.
@@ -376,6 +471,13 @@ impl Thread {
             cpu_ns: 0,
             dispatched_ns: 0,
             quantum_ticks: 0,
+            dispatch_reserved_ns: 0,
+            dispatch_window: 0,
+            dispatch_scope: 0,
+            dispatch_recovery: false,
+            dispatched: false,
+            last_cpu: usize::MAX,
+            migrations: 0,
             preemptions: 0,
             preempt_records: 0,
             syscalls: 0,
@@ -414,18 +516,45 @@ pub struct Machine {
     pub timers: [Timer; MAX_TIMERS],
     /// Control-receipt rings.
     pub logs: [ControlLog; MAX_CONTROL_LOGS],
+    /// Assigned device functions.
+    pub devices: [Device; MAX_DEVICES],
+    /// Mappings of device register windows.
+    pub device_maps: [crate::device::MapRecord; MAX_DEVICE_MAPS],
+    /// Pages devices may reach.
+    pub dma_grants: [DmaGrant; MAX_DMA_GRANTS],
+    /// Device interrupts routed to signals.
+    pub irqs: [IrqBinding; MAX_IRQ_BINDINGS],
+    /// The configuration window, once it is mapped.
+    pub ecam: Option<crate::pci::Ecam>,
+    /// Whether firmware described a remapping unit at all.
+    pub iommu_described: bool,
+    /// Whether this kernel has translation enabled for assigned devices. It
+    /// does not, and the profile is refused rather than approximated.
+    pub iommu_translating: bool,
     /// Occupancy of the kernel stack slots.
     pub kstack_used: [bool; MAX_KSTACKS],
-    /// Index of the running thread.
-    pub current: usize,
-    /// Round-robin cursor over the thread table.
-    pub cursor: usize,
-    /// Timer ticks since the timer was armed.
+    /// Processors, dense-indexed. Slot zero is the bootstrap processor.
+    pub cpus: [CpuSlot; MAX_CPUS],
+    /// Processors that completed their handshake, the bootstrap processor
+    /// included.
+    pub cpus_online: usize,
+    /// Processors that ever completed it. Never decremented, so a summary
+    /// written after the others have parked still says how many ran.
+    pub cpus_started: usize,
+    /// Timer ticks since the timer was armed, summed over every processor.
     pub ticks: u64,
     /// Involuntary switches away from a user thread.
     pub preemptions: u64,
     /// Dispatches refused because a scope had no budget or no parallelism slot.
     pub budget_stalls: u64,
+    /// Longest interval a single charge covered.
+    ///
+    /// A quantum bounds how long a thread is *scheduled* for; this is how long
+    /// it was actually charged for between two observations of the clock. Under
+    /// an emulated platform the two are not the same number, and a budget
+    /// overrun is only attributable if the difference is measured rather than
+    /// assumed.
+    pub max_charge_interval_ns: u64,
     /// Frames reclaimed from loader and module memory after bootstrap.
     pub reclaimed_frames: usize,
     /// User faults contained.
@@ -469,12 +598,21 @@ impl Machine {
             signals: [Signal::empty(); MAX_SIGNALS],
             timers: [Timer::empty(); MAX_TIMERS],
             logs: [const { ControlLog::empty() }; MAX_CONTROL_LOGS],
+            devices: [const { Device::empty() }; MAX_DEVICES],
+            device_maps: [crate::device::MapRecord::empty(); MAX_DEVICE_MAPS],
+            dma_grants: [DmaGrant::empty(); MAX_DMA_GRANTS],
+            irqs: [IrqBinding::empty(); MAX_IRQ_BINDINGS],
+            ecam: None,
+            iommu_described: false,
+            iommu_translating: false,
             kstack_used: [false; MAX_KSTACKS],
-            current: IDLE_THREAD,
-            cursor: 0,
+            cpus: [CpuSlot::empty(); MAX_CPUS],
+            cpus_online: 0,
+            cpus_started: 0,
             ticks: 0,
             preemptions: 0,
             budget_stalls: 0,
+            max_charge_interval_ns: 0,
             reclaimed_frames: 0,
             user_faults: 0,
             modules_rejected: 0,
@@ -486,6 +624,22 @@ impl Machine {
             root_scope: None,
             system_log: None,
             supervisor: None,
+        }
+    }
+
+    /// Thread dispatched on the processor executing this call.
+    ///
+    /// Reading the processor's own identity rather than a single global field
+    /// is the whole difference between a uniprocessor scheduler and this one:
+    /// there is no "the" running thread any more.
+    #[must_use]
+    pub fn current(&self) -> usize {
+        let cpu = crate::percpu::index();
+        let index = self.cpus[cpu.min(MAX_CPUS - 1)].current;
+        if index == usize::MAX {
+            idle_thread(cpu)
+        } else {
+            index
         }
     }
 

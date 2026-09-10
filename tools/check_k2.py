@@ -1150,8 +1150,25 @@ def check_negative_controls(records: list[Record], run: dict) -> Result:
     return result
 
 
+# The operations K3 added to the interface. The K2 package has no device, so it
+# does not exercise them and does not claim to: naming them here is what keeps
+# "the K2 vertical reached everything K2 assigns" a statement about a fixed set
+# rather than a set that shrinks whenever the interface grows. Any *other*
+# operation left untouched still fails this criterion.
+K3_OPERATIONS = {
+    "DEVICE_QUERY",
+    "DEVICE_MAP_REGION",
+    "DEVICE_UNMAP_REGION",
+    "DEVICE_BIND_IRQ",
+    "DEVICE_SET_MASTER",
+    "DEVICE_DMA_MAP",
+    "DEVICE_DMA_UNMAP",
+    "DEVICE_RESET",
+}
+
+
 def check_interface_coverage(records: list[Record], run: dict) -> Result:
-    """Every assigned operation must have been reached by dispatch.
+    """Every operation K2 assigns must have been reached by dispatch.
 
     A run that exercises a third of the interface and one that exercises all of
     it produce the same shape of log, and everything else this gate decides is a
@@ -1164,7 +1181,7 @@ def check_interface_coverage(records: list[Record], run: dict) -> Result:
     everything while the list still names something is a kernel that is
     miscounting -- and trusting either one alone would not notice.
     """
-    result = Result("coverage", "las 51 operaciones asignadas ejercidas")
+    result = Result("coverage", "las 51 operaciones de K2 ejercidas")
     coverage = by_event(records, "k2.coverage")
     if not coverage:
         result.detail = "the run emitted no coverage record"
@@ -1180,26 +1197,41 @@ def check_interface_coverage(records: list[Record], run: dict) -> Result:
         return result
 
     untouched = by_event(records, "k2.operation_untouched")
-    named = ", ".join(r.get("name") or "?" for r in untouched)
-    if reached < assigned:
-        result.detail = (
-            f"{reached} of {assigned} operations were reached; untouched: {named or 'none named'}"
-        )
-        return result
+    names = [r.get("name") or "?" for r in untouched]
+    named = ", ".join(names)
+    expected_untouched = len(K3_OPERATIONS)
+    expected_reached = assigned - expected_untouched
+
     if reached > assigned:
         result.detail = f"{reached} operations were reached but only {assigned} are assigned"
         return result
-    if untouched:
+    # The count and the list have to agree with each other, because the kernel
+    # derives both from one bitmap: a count that claims everything while the
+    # list still names something is a kernel that is miscounting.
+    if reached != assigned - len(untouched):
         result.detail = (
-            f"the count says {reached} of {assigned}, but {len(untouched)} operation(s) are still "
-            f"named as untouched: {named}"
+            f"the count says {reached} of {assigned}, which does not agree with the "
+            f"{len(untouched)} operation(s) named as untouched"
+        )
+        return result
+    outside = [name for name in names if name not in K3_OPERATIONS]
+    if outside:
+        result.detail = (
+            f"{len(outside)} operation(s) K2 assigns were never reached: {', '.join(outside)}"
+        )
+        return result
+    if reached != expected_reached:
+        result.detail = (
+            f"{reached} operations were reached; the {expected_reached} K2 assigns were expected "
+            f"(untouched: {named or 'none named'})"
         )
         return result
 
     result.passed = True
     result.detail = (
-        f"all {assigned} assigned operations were reached by dispatch, and the run names none as "
-        f"untouched"
+        f"all {expected_reached} operations K2 assigns were reached by dispatch; the "
+        f"{len(untouched)} left untouched are the device operations K3 added, which this package "
+        f"has no device to exercise"
     )
     result.evidence = [line_of(record)]
     return result

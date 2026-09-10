@@ -111,6 +111,11 @@
       "name": "CONTROL_LOG",
       "value": 8,
       "doc": "Bounded control-receipt ring with reserved cells."
+    },
+    {
+      "name": "DEVICE",
+      "value": 9,
+      "doc": "A device function the kernel has validated and assigned: its authorised register regions, its interrupt, its DMA grants and its session."
     }
   ],
   "rights": {
@@ -291,6 +296,28 @@
           "name": "LOG_ACK",
           "bit": 10,
           "doc": "Acknowledge consumption."
+        }
+      ],
+      "DEVICE": [
+        {
+          "name": "DEVICE_MAP",
+          "bit": 8,
+          "doc": "Map an authorised register region of this device into a domain."
+        },
+        {
+          "name": "DEVICE_IRQ",
+          "bit": 9,
+          "doc": "Bind this device's interrupt to a signal."
+        },
+        {
+          "name": "DEVICE_DMA",
+          "bit": 10,
+          "doc": "Create and revoke DMA grants over memory objects."
+        },
+        {
+          "name": "DEVICE_CONTROL",
+          "bit": 11,
+          "doc": "Bus mastering, reset and the session. Recovery authority, not driver authority."
         }
       ]
     }
@@ -850,6 +877,94 @@
         "INSPECT"
       ],
       "doc": "Report capacity, reservation and loss."
+    },
+    {
+      "name": "DEVICE_QUERY",
+      "type": "DEVICE",
+      "ordinal": 1,
+      "request": null,
+      "response": "DeviceInfo",
+      "rights": [
+        "INSPECT"
+      ],
+      "doc": "Report identity, state, authorised regions and isolation profile."
+    },
+    {
+      "name": "DEVICE_MAP_REGION",
+      "type": "DEVICE",
+      "ordinal": 2,
+      "request": "DeviceMapRequest",
+      "response": null,
+      "rights": [
+        "DEVICE_MAP"
+      ],
+      "doc": "Map one authorised region of this device into a domain, uncacheable."
+    },
+    {
+      "name": "DEVICE_UNMAP_REGION",
+      "type": "DEVICE",
+      "ordinal": 3,
+      "request": "DeviceMapRequest",
+      "response": null,
+      "rights": [
+        "DEVICE_MAP"
+      ],
+      "doc": "Withdraw that mapping and wait for every processor to retire it."
+    },
+    {
+      "name": "DEVICE_BIND_IRQ",
+      "type": "DEVICE",
+      "ordinal": 4,
+      "request": "DeviceIrqRequest",
+      "response": null,
+      "rights": [
+        "DEVICE_IRQ"
+      ],
+      "doc": "Route one device interrupt to a signal. The kernel programs the vector; the driver never reaches the table that holds it."
+    },
+    {
+      "name": "DEVICE_SET_MASTER",
+      "type": "DEVICE",
+      "ordinal": 5,
+      "request": "DeviceControlRequest",
+      "response": null,
+      "rights": [
+        "DEVICE_CONTROL"
+      ],
+      "doc": "Enable or disable bus mastering. Recovery authority, deliberately separate from the driver's."
+    },
+    {
+      "name": "DEVICE_DMA_MAP",
+      "type": "DEVICE",
+      "ordinal": 6,
+      "request": "DmaMapRequest",
+      "response": "DmaGrantInfo",
+      "rights": [
+        "DEVICE_DMA"
+      ],
+      "doc": "Pin pages and grant the device access to them under the current session."
+    },
+    {
+      "name": "DEVICE_DMA_UNMAP",
+      "type": "DEVICE",
+      "ordinal": 7,
+      "request": "DmaUnmapRequest",
+      "response": null,
+      "rights": [
+        "DEVICE_DMA"
+      ],
+      "doc": "Revoke a grant once the device can no longer be issuing requests against it."
+    },
+    {
+      "name": "DEVICE_RESET",
+      "type": "DEVICE",
+      "ordinal": 8,
+      "request": null,
+      "response": "DeviceInfo",
+      "rights": [
+        "DEVICE_CONTROL"
+      ],
+      "doc": "Stop the device, revoke what it could reach and start a new session."
     }
   ],
   "errors": [
@@ -957,6 +1072,11 @@
       "name": "NOT_SUPPORTED",
       "value": -20,
       "doc": "The operation exists but this revision does not implement it."
+    },
+    {
+      "name": "UNSUPPORTED_PROFILE",
+      "value": -21,
+      "doc": "The isolation profile the caller required is not the one this machine can satisfy. Refused before any effect, never downgraded silently."
     }
   ],
   "enums": {
@@ -1133,6 +1253,52 @@
         "name": "EXPIRED",
         "value": 3
       }
+    ],
+    "DmaProfile": [
+      {
+        "name": "WEAK_TRUSTED_DRIVER",
+        "value": 1
+      },
+      {
+        "name": "STRONG_IOMMU",
+        "value": 2
+      }
+    ],
+    "DeviceState": [
+      {
+        "name": "READY",
+        "value": 1
+      },
+      {
+        "name": "RUNNING",
+        "value": 2
+      },
+      {
+        "name": "STOPPING",
+        "value": 3
+      },
+      {
+        "name": "STOPPED",
+        "value": 4
+      }
+    ],
+    "DeviceRegionKind": [
+      {
+        "name": "VIRTIO_COMMON",
+        "value": 1
+      },
+      {
+        "name": "VIRTIO_NOTIFY",
+        "value": 2
+      },
+      {
+        "name": "VIRTIO_ISR",
+        "value": 3
+      },
+      {
+        "name": "VIRTIO_DEVICE",
+        "value": 4
+      }
     ]
   },
   "structs": [
@@ -1248,6 +1414,15 @@
         {
           "name": "boot_epoch",
           "type": "u64"
+        },
+        {
+          "name": "cpus_online",
+          "type": "u32",
+          "doc": "Processors that completed the kernel's handshake and can be scheduled on."
+        },
+        {
+          "name": "reserved0",
+          "type": "u32"
         }
       ]
     },
@@ -1667,6 +1842,11 @@
         {
           "name": "charged_pages",
           "type": "u64"
+        },
+        {
+          "name": "entry_point",
+          "type": "u64",
+          "doc": "Entry point the image declared. An authority adding a thread needs it, and the domain's creator is the only one that can be told."
         }
       ]
     },
@@ -2382,6 +2562,307 @@
           "type": "u32"
         }
       ]
+    },
+    {
+      "name": "DeviceRegion",
+      "doc": "One register region of a device the driver may be given. Offsets and lengths are the kernel's, validated against the base address register they live in.",
+      "fields": [
+        {
+          "name": "kind",
+          "type": "u32",
+          "doc": "DeviceRegionKind."
+        },
+        {
+          "name": "bar",
+          "type": "u32",
+          "doc": "Base address register the region lives in."
+        },
+        {
+          "name": "offset",
+          "type": "u64",
+          "doc": "Byte offset inside that register's window."
+        },
+        {
+          "name": "length",
+          "type": "u64"
+        },
+        {
+          "name": "flags",
+          "type": "u32",
+          "doc": "Bit 0: currently mapped into some domain."
+        },
+        {
+          "name": "notify_off_multiplier",
+          "type": "u32",
+          "doc": "Meaningful for the notify region only."
+        }
+      ]
+    },
+    {
+      "name": "DeviceInfo",
+      "doc": "Identity, state, authorised regions and isolation profile of one assigned device.",
+      "fields": [
+        {
+          "name": "state",
+          "type": "u32",
+          "doc": "DeviceState."
+        },
+        {
+          "name": "session",
+          "type": "u32",
+          "doc": "Incremented by every reset. An operation naming an older session is refused."
+        },
+        {
+          "name": "bdf",
+          "type": "u32",
+          "doc": "Segment, bus, device and function packed as (segment<<16)|(bus<<8)|(device<<3)|function."
+        },
+        {
+          "name": "vendor_id",
+          "type": "u32"
+        },
+        {
+          "name": "device_id",
+          "type": "u32"
+        },
+        {
+          "name": "class_code",
+          "type": "u32",
+          "doc": "Class, subclass and programming interface."
+        },
+        {
+          "name": "region_count",
+          "type": "u32"
+        },
+        {
+          "name": "irq_bound",
+          "type": "u32",
+          "doc": "Interrupts currently bound to a signal."
+        },
+        {
+          "name": "dma_grants",
+          "type": "u32"
+        },
+        {
+          "name": "dma_profile",
+          "type": "u32",
+          "doc": "DmaProfile: what this machine can actually sustain, not what was asked for."
+        },
+        {
+          "name": "iommu_described",
+          "type": "u32",
+          "doc": "Firmware describes a remapping unit."
+        },
+        {
+          "name": "iommu_translating",
+          "type": "u32",
+          "doc": "This kernel has translation enabled for this device's group."
+        },
+        {
+          "name": "access_platform",
+          "type": "u32",
+          "doc": "The device negotiated platform-mediated access for its DMA."
+        },
+        {
+          "name": "bus_master",
+          "type": "u32",
+          "doc": "Bus mastering is enabled in configuration space."
+        },
+        {
+          "name": "dma_address_bits",
+          "type": "u32",
+          "doc": "Address width the kernel will hand the device."
+        },
+        {
+          "name": "isolation_group",
+          "type": "u32",
+          "doc": "Group this device shares an isolation boundary with."
+        },
+        {
+          "name": "group_members",
+          "type": "u32",
+          "doc": "Functions in that group. A group with more than one member is not a boundary of its own."
+        },
+        {
+          "name": "reserved0",
+          "type": "u32"
+        },
+        {
+          "name": "object_id",
+          "type": "u64"
+        },
+        {
+          "name": "sponsor_scope_id",
+          "type": "u64"
+        },
+        {
+          "name": "label",
+          "type": "u8[16]"
+        },
+        {
+          "name": "regions",
+          "type": "struct:DeviceRegion[4]"
+        }
+      ]
+    },
+    {
+      "name": "DeviceMapRequest",
+      "doc": "Install or withdraw a mapping of one device region in a domain.",
+      "fields": [
+        {
+          "name": "domain_handle",
+          "type": "u64",
+          "doc": "Domain to map into; needs DOMAIN_BUILD through this handle."
+        },
+        {
+          "name": "vaddr",
+          "type": "u64"
+        },
+        {
+          "name": "region_index",
+          "type": "u32"
+        },
+        {
+          "name": "session",
+          "type": "u32",
+          "doc": "Session the caller believes the device is in."
+        }
+      ]
+    },
+    {
+      "name": "DeviceIrqRequest",
+      "doc": "Bind one device interrupt to a signal.",
+      "fields": [
+        {
+          "name": "signal_handle",
+          "type": "u64",
+          "doc": "Signal to raise; needs SIGNAL_RAISE through this handle."
+        },
+        {
+          "name": "bits",
+          "type": "u64",
+          "doc": "Bits to raise when the interrupt arrives."
+        },
+        {
+          "name": "vector_index",
+          "type": "u32",
+          "doc": "Interrupt of the device to bind."
+        },
+        {
+          "name": "session",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "DeviceControlRequest",
+      "doc": "Change bus mastering, or reset the device and its session.",
+      "fields": [
+        {
+          "name": "enable",
+          "type": "u32",
+          "doc": "For bus mastering: one to enable, zero to disable."
+        },
+        {
+          "name": "session",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "DmaMapRequest",
+      "doc": "Grant a device access to the pages of a memory object.",
+      "fields": [
+        {
+          "name": "memory_handle",
+          "type": "u64",
+          "doc": "Memory object to pin; needs the read or write rights being granted."
+        },
+        {
+          "name": "offset_pages",
+          "type": "u32"
+        },
+        {
+          "name": "page_count",
+          "type": "u32"
+        },
+        {
+          "name": "rights",
+          "type": "u32",
+          "doc": "Subset of MEMORY_READ and MEMORY_WRITE, from the device's point of view."
+        },
+        {
+          "name": "required_profile",
+          "type": "u32",
+          "doc": "DmaProfile the caller requires. A machine that cannot sustain it refuses with UNSUPPORTED_PROFILE rather than granting a weaker one."
+        },
+        {
+          "name": "session",
+          "type": "u32"
+        },
+        {
+          "name": "reserved0",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "DmaGrantInfo",
+      "doc": "What a device may reach, and under which session.",
+      "fields": [
+        {
+          "name": "iova",
+          "type": "u64",
+          "doc": "Address the device uses. Not a CPU address and not derived from one by arithmetic."
+        },
+        {
+          "name": "length",
+          "type": "u64"
+        },
+        {
+          "name": "rights",
+          "type": "u32"
+        },
+        {
+          "name": "profile",
+          "type": "u32",
+          "doc": "DmaProfile actually granted."
+        },
+        {
+          "name": "session",
+          "type": "u32"
+        },
+        {
+          "name": "grant_index",
+          "type": "u32"
+        },
+        {
+          "name": "memory_object_id",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "DmaUnmapRequest",
+      "doc": "Revoke a DMA grant. Refused while the device can still be issuing requests against it.",
+      "fields": [
+        {
+          "name": "iova",
+          "type": "u64"
+        },
+        {
+          "name": "length",
+          "type": "u64"
+        },
+        {
+          "name": "session",
+          "type": "u32"
+        },
+        {
+          "name": "reserved0",
+          "type": "u32"
+        }
+      ]
     }
   ],
   "boot_slots": [
@@ -2401,8 +2882,13 @@
       "doc": "Control receipts: read, append and acknowledge."
     },
     {
-      "name": "FIRST_MODULE",
+      "name": "FIRST_DEVICE",
       "slot": 4,
+      "doc": "First assigned device, if the machine has one. Devices follow in enumeration order; DEVICE_QUERY reports which."
+    },
+    {
+      "name": "FIRST_MODULE",
+      "slot": 8,
       "doc": "First sealed image object. Modules follow in package order; MEMORY_QUERY reports the label."
     }
   ]

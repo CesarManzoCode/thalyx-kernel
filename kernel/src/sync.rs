@@ -1,17 +1,23 @@
 //! Kernel synchronisation primitives.
 //!
-//! K1 runs on one core and every kernel path executes with maskable interrupts
-//! masked: exception and interrupt gates clear IF, `IA32_FMASK` clears it on
-//! `syscall`, and the idle path never sets it. A lock therefore cannot be
-//! contended in K1. It is still a real lock rather than an `UnsafeCell` with a
-//! comment, because the ordering discipline the SMP work in K3 has to preserve
-//! is the one expressed here, and because it turns a re-entrancy bug into a
-//! detectable hang instead of silent corruption.
+//! Every kernel path executes with maskable interrupts masked: exception and
+//! interrupt gates clear IF, `IA32_FMASK` clears it on `syscall`, and the only
+//! places that set it are the idle loops, which hold no lock. So a lock is
+//! never contended by a nested context on the same processor, and it is only
+//! ever contended by another processor — one that is running, not one that is
+//! descheduled, which is what makes spinning the right shape of wait.
 //!
 //! Lock order, from `vault/architecture/concurrency.md`: admission metadata and
 //! trees, then resource accounts from ancestor to descendant, then objects by
-//! increasing identifier, then local queues. K1 instantiates only the first and
-//! third levels.
+//! increasing identifier, then local queues.
+//!
+//! One rule of the concurrency contract is enforced here rather than only
+//! documented: no lock may be held while waiting for another processor's
+//! acknowledgement. The spin loop below services pending invalidations. A
+//! processor waiting for a lock therefore keeps answering the processor that is
+//! waiting for it, so the two cannot wait on each other. A complete invalidation
+//! is correct at any point, which is what makes it safe to do from inside a
+//! wait for an unrelated lock.
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
@@ -50,6 +56,7 @@ impl<T> SpinLock<T> {
             .is_err()
         {
             while self.locked.load(Ordering::Relaxed) {
+                crate::tlb::refresh_local();
                 core::hint::spin_loop();
             }
         }
@@ -72,8 +79,11 @@ impl<T> SpinLock<T> {
     /// # Safety
     ///
     /// The caller must know that no other context can reach this cell: the only
-    /// use in K1 is the panic path, which has already stopped scheduling and
-    /// must not hang on a lock a faulted context still holds.
+    /// use is the panic path, which has already masked interrupts and must not
+    /// hang on a lock a faulted context still holds. It is not a guarantee that
+    /// no other processor is running; the panic path accepts that and writes a
+    /// bounded record rather than hanging, which is the trade the concurrency
+    /// contract asks of a failure path.
     // `mut_from_ref` is the right lint in general: handing out `&mut` from `&`
     // hides aliasing behind a safe-looking signature. Here the signature is
     // already `unsafe` and the contract above is what rules aliasing out, which

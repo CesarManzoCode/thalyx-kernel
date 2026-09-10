@@ -38,7 +38,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def check_generated(schema, layout) -> tuple[bool, str]:
     stale = []
-    for path, text in gen_abi.outputs(schema, layout).items():
+    try:
+        produced = gen_abi.outputs(schema, layout)
+    except gen_abi.SchemaError as error:
+        return False, str(error)
+    for path, text in produced.items():
         if not path.exists():
             stale.append(f"{path.relative_to(ROOT)} is missing")
         elif path.read_text() != text:

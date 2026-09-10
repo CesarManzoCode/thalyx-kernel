@@ -22,12 +22,13 @@ use crate::arch::x86_64::trap::TrapFrame;
 use crate::elf::{self, Reject};
 use crate::event;
 use crate::layout;
+use crate::limits::MAX_CPUS;
 use crate::mm::{Owner, Rights};
 use crate::obj::ScopeId;
 use crate::scope::{self, Resource};
 use crate::state::{
-    Domain, DomainState, ExitReason, FaultRecord, IDLE_THREAD, MACHINE, MAX_DOMAINS, MAX_KSTACKS,
-    MAX_THREADS, Machine, ThreadKind, ThreadState, Wait,
+    Domain, DomainState, ExitReason, FaultRecord, MACHINE, MAX_DOMAINS, MAX_KSTACKS, MAX_THREADS,
+    Machine, ThreadKind, ThreadState, Wait,
 };
 
 /// Why a domain could not be created.
@@ -115,7 +116,7 @@ impl ActivationRefusal {
     }
 }
 
-fn allocate_kernel_stack(machine: &mut Machine) -> Result<(usize, u64), CreateError> {
+pub(crate) fn allocate_kernel_stack(machine: &mut Machine) -> Result<(usize, u64), CreateError> {
     let slot = machine
         .kstack_used
         .iter()
@@ -149,12 +150,13 @@ fn allocate_kernel_stack(machine: &mut Machine) -> Result<(usize, u64), CreateEr
             let vaddr = base + (page + 1) * PAGE_SIZE;
             let (space, allocator) = split_space(machine);
             if let Some(frame) = space.unmap(vaddr) {
-                // SAFETY: the mapping was just removed and no other reference
-                // to the frame exists; the range was never handed to a thread.
-                unsafe {
-                    allocator.release(frame, Owner::Kernel);
-                    cpu::invlpg(vaddr);
-                }
+                // The range was never handed to a thread, but the kernel half
+                // is shared, so the entry could have been walked on another
+                // processor. Quarantine rather than immediate reuse.
+                allocator.retire(frame, Owner::Kernel);
+                // SAFETY: the entry was just removed from the address space
+                // this processor is running in.
+                unsafe { cpu::invlpg(vaddr) };
             }
         }
         return Err(error);
@@ -173,14 +175,16 @@ fn release_kernel_stack(machine: &mut Machine, slot: usize) {
         let vaddr = base + (page + 1) * PAGE_SIZE;
         let (space, allocator) = split_space(machine);
         if let Some(frame) = space.unmap(vaddr) {
-            // SAFETY: the thread that used this stack is dead and the CPU is no
-            // longer executing on it, which the caller established by switching
-            // away first. K1 has no DMA and no other core, so the removed
-            // translation cannot be in use anywhere.
-            unsafe {
-                allocator.release(frame, Owner::Kernel);
-                cpu::invlpg(vaddr);
-            }
+            // The mapping is gone from this processor's tables, but another
+            // processor may still hold the translation: the kernel half is
+            // shared, so this address means the same thing everywhere. The
+            // frame therefore goes to quarantine and comes back only once every
+            // processor has invalidated past this point.
+            allocator.retire(frame, Owner::Kernel);
+            // SAFETY: the entry was just removed from the address space this
+            // processor is running in; invalidating it is what makes the
+            // removal take effect here.
+            unsafe { cpu::invlpg(vaddr) };
         }
     }
     machine.kstack_used[slot] = false;
@@ -235,7 +239,7 @@ pub fn create_in(
         .threads
         .iter()
         .enumerate()
-        .position(|(slot, thread)| slot != IDLE_THREAD && thread.state == ThreadState::Empty)
+        .position(|(slot, thread)| slot >= MAX_CPUS && thread.state == ThreadState::Empty)
         .ok_or(CreateError::ThreadTableFull)?;
     let id = index as u16;
     let owner = Owner::Domain(id);
@@ -583,7 +587,7 @@ pub fn terminate_on_fault(frame: &TrapFrame, cr2: u64) -> ! {
 
     let (domain_index, thread_index) = {
         let mut machine = MACHINE.lock();
-        let thread_index = machine.current;
+        let thread_index = machine.current();
         let domain_index = machine.threads[thread_index].domain;
         machine.user_faults += 1;
         machine.domains[domain_index].fault = Some(record);
@@ -621,7 +625,7 @@ pub fn terminate_on_fault(frame: &TrapFrame, cr2: u64) -> ! {
 pub fn terminate_voluntarily(code: u64) -> ! {
     {
         let mut machine = MACHINE.lock();
-        let thread_index = machine.current;
+        let thread_index = machine.current();
         let domain_index = machine.threads[thread_index].domain;
         terminate_in(&mut machine, domain_index, ExitReason::Voluntary, code);
     }
@@ -638,25 +642,72 @@ pub fn domain_name(index: usize) -> &'static str {
     machine.domains[index].name_str()
 }
 
-/// Reclaims every domain that has stopped and is not the current address space.
+/// Whether nothing anywhere in the machine is still standing on `index`.
 ///
-/// Called from the idle thread, which runs on its own kernel stack in the
-/// kernel's own address space, so nothing being freed can still be in use.
+/// "Not the address space this processor is in" was a sufficient test with one
+/// processor and is not one with several. Three things have to be true of every
+/// online processor, and each of them is a way a reclamation could pull the
+/// ground out from under a processor that is still running:
+///
+/// * it must not be running a thread of this domain, or the reclamation would
+///   free a kernel stack a processor is executing on;
+/// * it must not still be *leaving* one — the thread it switched away from and
+///   has not yet published — because until that publication the outgoing
+///   context is still being written on that stack;
+/// * neither of those threads may name this address space, because a processor
+///   loads the new root only after it has released the lock, so between the two
+///   it is still executing with the old one in `CR3`.
+///
+/// The dying thread itself satisfies all three the moment its own switch
+/// completes, which is exactly when the stack becomes free.
+fn reapable(machine: &crate::state::Machine, index: usize) -> bool {
+    let Some(space) = machine.domains[index].space.as_ref() else {
+        return false;
+    };
+    let cr3 = space.cr3();
+    for cpu in 0..crate::limits::MAX_CPUS {
+        let slot = machine.cpus[cpu];
+        if !slot.online {
+            continue;
+        }
+        for thread in [slot.current, slot.previous] {
+            if thread == usize::MAX || thread >= machine.threads.len() {
+                continue;
+            }
+            let record = &machine.threads[thread];
+            if record.cr3 == cr3 {
+                return false;
+            }
+            if record.domain == index
+                && record.domain_generation == machine.domains[index].generation
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Reclaims every domain that has stopped and that no processor is still
+/// standing on.
 pub fn reap_dead() {
     loop {
         let mut machine = MACHINE.lock();
-        let active_cr3 = cpu::read_cr3();
-        let candidate = machine.domains.iter().position(|domain| {
-            matches!(domain.state, DomainState::Faulted | DomainState::Stopping)
-                && domain
-                    .space
-                    .as_ref()
-                    .is_some_and(|space| space.cr3() != active_cr3)
+        let candidate = (0..MAX_DOMAINS).find(|&index| {
+            matches!(
+                machine.domains[index].state,
+                DomainState::Faulted | DomainState::Stopping
+            ) && reapable(&machine, index)
         });
         let Some(index) = candidate else { return };
 
         let owner = Owner::Domain(index as u16);
         let charged_before = machine.allocator().charged(owner);
+        // Counted before the slots are emptied. Read afterwards it is always
+        // zero, and a domain that held two threads would return one of them to
+        // its scope: the scope would then never see itself as empty, and a
+        // drain waiting on it would wait forever.
+        let threads = machine.domains[index].thread_count() as u32;
 
         for slot in 0..crate::state::MAX_THREADS_PER_DOMAIN {
             let Some(thread_index) = machine.domains[index].threads[slot].take() else {
@@ -684,6 +735,7 @@ pub fn reap_dead() {
         };
 
         let charged_after = machine.allocator().charged(owner);
+        let quarantined = machine.allocator().quarantined_for(owner);
         let free_frames = machine.allocator().free_frames();
 
         // The scope is credited back exactly what it was charged for this
@@ -704,7 +756,6 @@ pub fn reap_dead() {
             Resource::Metadata,
             metadata,
         );
-        let threads = machine.domains[index].thread_count() as u32;
         machine.scopes[scope_index as usize].threads = machine.scopes[scope_index as usize]
             .threads
             .saturating_sub(threads.max(1));
@@ -723,7 +774,7 @@ pub fn reap_dead() {
             "mm.reclaimed",
             "domain={index} name={name} reason={reason} data_frames={data} \
              table_frames={tables} charged_before={charged_before} charged_after={charged_after} \
-             free_frames={free_frames}"
+             quarantined={quarantined} free_frames={free_frames} release=deferred"
         );
     }
 }
@@ -753,7 +804,7 @@ pub fn add_thread_in(
         .threads
         .iter()
         .enumerate()
-        .position(|(slot, thread)| slot != IDLE_THREAD && thread.state == ThreadState::Empty)
+        .position(|(slot, thread)| slot >= MAX_CPUS && thread.state == ThreadState::Empty)
         .ok_or(CreateError::ThreadTableFull)?;
 
     let owner_scope = machine.domains[index].owner_scope;

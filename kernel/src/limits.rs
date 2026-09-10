@@ -14,10 +14,18 @@
 
 use thalyx_abi::limit;
 
+/// Processors the kernel can hold at once, the bootstrap processor included.
+///
+/// A capacity, not a count: the number that actually run is what the firmware
+/// describes and the handshake confirms, and a machine with more processors
+/// than this leaves the extras offline and says so rather than silently
+/// scheduling on a table it does not have.
+pub const MAX_CPUS: usize = 8;
 /// Domains the kernel can hold at once.
-pub const MAX_DOMAINS: usize = 8;
-/// Threads the kernel can hold at once, the idle thread included.
-pub const MAX_THREADS: usize = 16;
+pub const MAX_DOMAINS: usize = 10;
+/// Threads the kernel can hold at once, one idle thread per processor
+/// included.
+pub const MAX_THREADS: usize = 8 + 24;
 /// Threads one domain may hold.
 pub const MAX_THREADS_PER_DOMAIN: usize = 4;
 /// Capability slots in one domain's table.
@@ -53,4 +61,14 @@ pub const CONTROL_LOG_RESERVED: usize = limit::CONTROL_LOG_RESERVED as usize;
 pub const CPU_WINDOW_NS: u64 = limit::CPU_WINDOW_NS;
 
 const _: () = assert!(CONTROL_LOG_RESERVED < CONTROL_LOG_CAPACITY);
-const _: () = assert!(MAX_THREADS_PER_DOMAIN * MAX_DOMAINS >= MAX_THREADS - 1);
+/// Device functions the kernel can assign at once.
+pub const MAX_DEVICES: usize = 4;
+/// Memory regions of one device a driver may be given.
+pub const MAX_DEVICE_REGIONS: usize = 4;
+/// Distinct DMA grants the kernel can hold at once.
+pub const MAX_DMA_GRANTS: usize = 16;
+/// Interrupt bindings the kernel can hold at once.
+pub const MAX_IRQ_BINDINGS: usize = 8;
+
+const _: () = assert!(MAX_THREADS_PER_DOMAIN * MAX_DOMAINS >= MAX_THREADS - MAX_CPUS);
+const _: () = assert!(MAX_CPUS <= 64);

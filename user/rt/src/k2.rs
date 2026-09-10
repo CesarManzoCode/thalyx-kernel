@@ -17,9 +17,10 @@
 //! naming service; a domain receives capabilities or it has none.
 
 use thalyx_abi::generated::{
-    BindFacetRequest, CallResult, CapInfo, DeriveRequest, DescriptorHeader, DomainCreateRequest,
-    DomainInfo, DrainReport, EffectRequest, EndpointCreateRequest, EndpointInfo,
-    FaultChannelRequest, InstallCapRequest, InvocationInfo, Limits, LogAckRequest,
+    BindFacetRequest, CallResult, CapInfo, DeriveRequest, DescriptorHeader, DeviceControlRequest,
+    DeviceInfo, DeviceIrqRequest, DeviceMapRequest, DmaGrantInfo, DmaMapRequest, DmaUnmapRequest,
+    DomainCreateRequest, DomainInfo, DrainReport, EffectRequest, EndpointCreateRequest,
+    EndpointInfo, FaultChannelRequest, InstallCapRequest, InvocationInfo, Limits, LogAckRequest,
     LogAppendRequest, LogInfo, LogReadResult, MapRequest, MemoryBytes, MemoryCopyRequest,
     MemoryCreateRequest, MemoryInfo, ReceiveResult, ReplyRequest, ResolveRequest,
     ScopeCreateRequest, ScopeInfo, ScopeLimits, SendRequest, SignalBits, SignalInfo,
@@ -207,6 +208,8 @@ pub fn limits() -> Result<Limits, i64> {
         cpu_quantum_ns: 0,
         page_size: 0,
         boot_epoch: 0,
+        cpus_online: 0,
+        reserved0: 0,
     };
     // SAFETY: the pointer names this program's own `Limits`, which is exactly
     // the length passed, and the entry only writes it.
@@ -619,6 +622,138 @@ pub fn memory_seal(memory: u64) -> Result<MemoryInfo, i64> {
     let mut desc = Desc::new();
     let len = desc.prepare(op::MEMORY_SEAL, 0);
     match call(memory, op::MEMORY_SEAL, &mut desc, len, 0, 0) {
+        Ok(_) => Ok(desc.body()),
+        Err(code) => Err(code),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Devices
+// ---------------------------------------------------------------------------
+
+/// Reads a device's identity, state, authorised windows and isolation profile.
+pub fn device_query(device: u64) -> Result<DeviceInfo, i64> {
+    query::<DeviceInfo>(device, op::DEVICE_QUERY).map(|(info, _)| info)
+}
+
+/// Maps one authorised register window of a device into a domain.
+pub fn device_map_region(
+    device: u64,
+    domain_handle: u64,
+    region_index: u32,
+    vaddr: u64,
+    session: u32,
+) -> Outcome {
+    with(
+        device,
+        op::DEVICE_MAP_REGION,
+        0,
+        DeviceMapRequest {
+            domain_handle,
+            vaddr,
+            region_index,
+            session,
+        },
+    )
+}
+
+/// Withdraws a device mapping and waits for every processor to retire it.
+pub fn device_unmap_region(device: u64, domain_handle: u64, vaddr: u64, session: u32) -> Outcome {
+    with(
+        device,
+        op::DEVICE_UNMAP_REGION,
+        0,
+        DeviceMapRequest {
+            domain_handle,
+            vaddr,
+            region_index: 0,
+            session,
+        },
+    )
+}
+
+/// Routes one device interrupt to a signal.
+pub fn device_bind_irq(
+    device: u64,
+    signal_handle: u64,
+    bits: u64,
+    vector_index: u32,
+    session: u32,
+) -> Outcome {
+    with(
+        device,
+        op::DEVICE_BIND_IRQ,
+        0,
+        DeviceIrqRequest {
+            signal_handle,
+            bits,
+            vector_index,
+            session,
+        },
+    )
+}
+
+/// Enables or disables bus mastering. Recovery authority, not the driver's.
+pub fn device_set_master(device: u64, enable: bool, session: u32) -> Outcome {
+    with(
+        device,
+        op::DEVICE_SET_MASTER,
+        0,
+        DeviceControlRequest {
+            enable: u32::from(enable),
+            session,
+        },
+    )
+}
+
+/// Grants a device access to pages of a memory object.
+#[allow(clippy::too_many_arguments)]
+pub fn device_dma_map(
+    device: u64,
+    memory_handle: u64,
+    offset_pages: u32,
+    page_count: u32,
+    rights: u32,
+    required_profile: u32,
+    session: u32,
+) -> Result<DmaGrantInfo, i64> {
+    let mut desc = Desc::new();
+    let len = desc.prepare(op::DEVICE_DMA_MAP, 0);
+    desc.set_body(DmaMapRequest {
+        memory_handle,
+        offset_pages,
+        page_count,
+        rights,
+        required_profile,
+        session,
+        reserved0: 0,
+    });
+    match call(device, op::DEVICE_DMA_MAP, &mut desc, len, 0, 0) {
+        Ok(_) => Ok(desc.body()),
+        Err(code) => Err(code),
+    }
+}
+
+/// Revokes a DMA grant. Refused while the device can still be issuing requests.
+pub fn device_dma_unmap(device: u64, iova: u64, length: u64, session: u32) -> Outcome {
+    with(
+        device,
+        op::DEVICE_DMA_UNMAP,
+        0,
+        DmaUnmapRequest {
+            iova,
+            length,
+            session,
+            reserved0: 0,
+        },
+    )
+}
+
+/// Stops a device, takes back what it could reach, and starts a new session.
+pub fn device_reset(device: u64) -> Result<DeviceInfo, i64> {
+    let mut desc = Desc::new();
+    let len = desc.prepare(op::DEVICE_RESET, 0);
+    match call(device, op::DEVICE_RESET, &mut desc, len, 0, 0) {
         Ok(_) => Ok(desc.body()),
         Err(code) => Err(code),
     }
@@ -1181,6 +1316,51 @@ pub mod report {
     pub const DOMAIN_STOPPED: u64 = 0x2024;
     /// A signal's bits and sequence were read without waiting. Value: sequence.
     pub const SIGNAL_OBSERVED: u64 = 0x2025;
+
+    // K3. Numbered in their own range so a K2 note and a K3 note can never be
+    // confused by a gate reading one log.
+
+    /// The program read how many processors it can be scheduled on.
+    pub const CPUS_ONLINE: u64 = 0x3001;
+    /// A worker finished an interval of shared work. Value: its own count.
+    pub const WORK_INTERVAL: u64 = 0x3002;
+    /// A worker observed the aggregate counter two workers share.
+    pub const SHARED_COUNTER: u64 = 0x3003;
+    /// The supervisor read a scope's window usage. Value: nanoseconds used.
+    pub const WINDOW_USED: u64 = 0x3004;
+    /// A call was admitted before its origin was fenced. Value: how many.
+    pub const ADMITTED_BEFORE_FENCE: u64 = 0x3005;
+    /// A call was refused after its origin was fenced. Value: the status.
+    pub const REFUSED_AFTER_FENCE: u64 = 0x3006;
+    /// A device was queried. Value: its session.
+    pub const DEVICE_OBSERVED: u64 = 0x3007;
+    /// A device register window was mapped. Value: the address.
+    pub const REGION_MAPPED: u64 = 0x3008;
+    /// A device interrupt was bound to a signal. Value: the vector.
+    pub const IRQ_BOUND: u64 = 0x3009;
+    /// A DMA grant was made. Value: the address the device uses.
+    pub const DMA_GRANTED: u64 = 0x300A;
+    /// The strong isolation profile was required and refused. Value: status.
+    pub const PROFILE_REFUSED: u64 = 0x300B;
+    /// The transport finished its negotiation. Value: the status byte.
+    pub const TRANSPORT_READY: u64 = 0x300C;
+    /// A block request completed. Value: the device's status byte.
+    pub const BLOCK_COMPLETED: u64 = 0x300D;
+    /// A used-ring entry was rejected by the driver's own validator.
+    pub const RING_REJECTED: u64 = 0x300E;
+    /// A used-ring entry was accepted. Value: the descriptor identifier.
+    pub const RING_ACCEPTED: u64 = 0x300F;
+    /// An operation naming a session the reset replaced was refused.
+    pub const STALE_SESSION_REFUSED: u64 = 0x3010;
+    /// A device was reset by recovery authority. Value: the new session.
+    pub const DEVICE_RESET: u64 = 0x3011;
+    /// A worker read a page a mapping still covered. Value: the word read.
+    pub const PAGE_READ: u64 = 0x3012;
+    /// A sealed object read the same twice with time in between.
+    pub const SEAL_HELD: u64 = 0x3013;
+    /// The ring validator was run against entries this program forged in
+    /// memory the device cannot reach. Value: damaged entries refused.
+    pub const VALIDATOR_SELF_TEST: u64 = 0x3015;
 }
 
 /// Reports one observation on the diagnostic plane.

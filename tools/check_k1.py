@@ -189,20 +189,77 @@ def check_memory(records: list[Record], run: dict) -> Result:
         result.detail = "the kernel is still running on the loader's page tables"
         return result
     # Taking ownership is only half of it: a kernel that never gave a frame back
-    # would pass every check above. Each domain's charge must return to zero.
-    leaked = [record for record in reclaimed if record.number("charged_after") != 0]
+    # would pass every check above. Each domain's charge must return to zero --
+    # but not necessarily at the instant its address space is torn down. Once
+    # translations are invalidated across processors, a frame whose mapping has
+    # just been removed goes to quarantine, stays charged to its owner, and
+    # comes back only when every processor has invalidated past it.
+    #
+    # So the check is in two parts, and together they are stricter than the
+    # single instant they replace. At the teardown, whatever is still charged
+    # must be exactly what is in quarantine: a frame that is neither released
+    # nor quarantined is a leak, and equality is what says so. At the end of the
+    # run, with every other processor parked, the quarantine must be empty and
+    # nothing may have been retained permanently, and every domain's final
+    # charge must be zero.
     if not reclaimed:
         result.detail = "no domain memory was ever reclaimed"
         return result
-    if leaked:
-        result.detail = f"{len(leaked)} domain(s) still held frames after reclaim"
+    unaccounted = [
+        record
+        for record in reclaimed
+        if record.number("charged_after") != record.number("quarantined")
+    ]
+    if unaccounted:
+        names = ", ".join(str(record.get("name")) for record in unaccounted)
+        result.detail = (
+            f"{len(unaccounted)} domain(s) held frames that are neither released nor "
+            f"in quarantine: {names}"
+        )
         return result
+
+    quarantine = by_event(records, "mm.quarantine")
+    if not quarantine:
+        result.detail = "the run never drained deferred reclamation"
+        return result
+    final = quarantine[-1]
+    if final.number("still_held") != 0:
+        result.detail = (
+            f"deferred reclamation still holds {final.number('still_held')} frames at the "
+            "end of the run"
+        )
+        return result
+    if final.number("retained_permanently") != 0:
+        result.detail = (
+            f"{final.number('retained_permanently')} frames were retained permanently "
+            "because the quarantine overflowed"
+        )
+        return result
+
+    summaries = by_event(records, "k1.domain_summary")
+    if not summaries:
+        result.detail = "no domain summary to check the final charge against"
+        return result
+    still_charged = [record for record in summaries if record.number("charged_frames") != 0]
+    if still_charged:
+        names = ", ".join(str(record.get("name")) for record in still_charged)
+        result.detail = f"{len(still_charged)} domain(s) end the run still charged: {names}"
+        return result
+
     result.passed = True
     result.detail = (
         f"kernel owns the frame bitmap and its own tables (cr3={paging[0].get('cr3')}); "
-        f"all {len(reclaimed)} domains reclaimed to zero charged frames"
+        f"all {len(reclaimed)} domains reclaimed with every retained frame accounted as "
+        f"quarantined, and {final.number('released_total')} frames released once every "
+        f"processor had invalidated"
     )
-    result.evidence = [line_of(frames[0]), line_of(paging[0]), line_of(mapped[0]), line_of(reclaimed[-1])]
+    result.evidence = [
+        line_of(frames[0]),
+        line_of(paging[0]),
+        line_of(mapped[0]),
+        line_of(reclaimed[-1]),
+        line_of(final),
+    ]
     return result
 
 

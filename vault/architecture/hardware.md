@@ -13,6 +13,8 @@ El primer conjunto de dispositivos es consola serie para diagnóstico, timer/API
 
 QEMU TCG sirve para corrección y fallos. KVM y hardware físico son entornos diferentes y se registran por separado. Un driver de usuario sin IOMMU sigue perteneciendo al TCB de memoria frente a DMA.
 
+Eso último dejó de ser una advertencia general al ejecutarse: el driver virtio-blk de K3 corre en usuario, con ventanas de registros acotadas y buffers concedidos, **y pertenece al TCB de memoria**, porque en esa plataforma no hay unidad de remapeo programada. El kernel lo declara en cada registro que menciona el perfil y rechaza el perfil fuerte en lugar de aproximarlo. [ADR-009](../decisions/ADR-009-device-path-and-dma-profiles.md), [K3](../evidence/k3-smp-devices.md).
+
 ## Lenguaje y límites de confianza
 
 El kernel usa Rust `no_std`, target `x86_64-unknown-none`, y ensamblador mínimo para entrada, interrupciones, cambio de contexto y transiciones de privilegio. El código de dispositivos puede usar `unsafe` en procesos separados. No se incorpora Linux ni otro kernel como implementación base.
@@ -52,6 +54,8 @@ La época de arranque debe ser fresca; generación de claves requiere además en
 ## Dispositivos y plataforma física
 
 Virtio negocia features y valida anillos, longitudes y completions. Se exigen barreras correctas y soporte de flush para declarar el contrato de almacenamiento durable. Un reset invalida la sesión del driver; los clientes no reutilizan descriptores antiguos.
+
+K3 ejecuta esa negociación y esa validación, y prueba las ramas de rechazo del validador contra entradas que el propio driver fabrica en memoria que el dispositivo no puede alcanzar. El reset lo hace quien asignó el dispositivo, no quien lo conduce, se confirma releyendo el estado del transporte, y las operaciones que el driver recordaba de la sesión anterior se rechazan. Lo que **no** está ejecutado es el contrato de almacenamiento durable: el flush se emite y completa, y nada de esta fase declara durabilidad a partir de eso.
 
 El hardware físico de primera aceptación debe inventariar CPU, firmware, RAM, grupos IOMMU y dispositivo de almacenamiento concretos. La información histórica de equipos usados con Thalyx orienta, pero no certifica la máquina donde correrá Thalyx-Kernel. K1 puede comenzar sin ese inventario; la validación DMA fuerte no.
 

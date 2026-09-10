@@ -11,16 +11,27 @@
 //! IPC with facets and work tickets, effect admission, signals and timers, a
 //! control-receipt plane, and a supervisor that receives its authority as an
 //! explicit set of boot capabilities and builds the rest of the system through
-//! the interface. SMP, devices, DMA and durable state remain absent rather than
-//! sketched.
+//! the interface.
+//!
+//! K3 removes the assumption the two of them were allowed to make: that there
+//! is one processor, and therefore that a machine lock and the absence of DMA
+//! are enough for a barrier to mean something. It brings the other processors
+//! up through the start-up protocol, gives each of them its own descriptor
+//! tables, stacks and timer, reserves budget before a dispatch instead of
+//! checking it, invalidates translations across processors before a page is
+//! reused or a seal is published, and puts a device behind capabilities so a
+//! driver can be a domain rather than part of the kernel. Durable state remains
+//! absent rather than sketched.
 
 #![no_std]
 #![no_main]
 
+mod acpi;
 mod api;
 mod arch;
 mod boot;
 mod ctrl;
+mod device;
 mod diag;
 mod domain;
 mod elf;
@@ -34,12 +45,16 @@ mod memobj;
 mod mm;
 mod obj;
 mod panic;
+mod pci;
+mod percpu;
 mod sched;
 mod scope;
+mod smp;
 mod state;
 mod sync;
 mod syscall;
 mod time;
+mod tlb;
 mod trap;
 mod ucopy;
 

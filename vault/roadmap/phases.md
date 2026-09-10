@@ -39,6 +39,8 @@ Separar driver virtio-blk, IRQ y buffers; comenzar con perfil QEMU que declare s
 
 Evidencia: EXP-02–06 concurrentes, no reutilización tras revocación incompleta y contabilidad conservada. El perfil sin IOMMU sigue siendo útil para desarrollo, pero no satisface aislamiento de drivers no confiables.
 
+**Ejecutado**, salvo la unidad de remapeo. K3 implementa el arranque de APs, la planificación agregada, la invalidación entre núcleos con acuse, la reclamación diferida y el camino de dispositivo entero con reset y quiescencia; **no** programa la IOMMU y por tanto no habilita el perfil fuerte, que se rechaza con `UNSUPPORTED_PROFILE` en lugar de aproximarse. Esa parte necesita el inventario de hardware físico de [OQ-05](open-questions.md) y queda registrada en [ADR-009](../decisions/ADR-009-device-path-and-dma-profiles.md). [Qué se ejecutó exactamente](../evidence/k3-smp-devices.md).
+
 ## K4 — Estado administrado durable
 
 Implementar primero el servicio RAM con versiones, workspace, validación de entradas y CAS. Después log, PREPARE/COMMIT/ABORT, flush, resultado por petición, high-water marks, cuotas y compactación en dos arenas. Diseñar fixtures de formato antes de escribir datos que se pretendan conservar.

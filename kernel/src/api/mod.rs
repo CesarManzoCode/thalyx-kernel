@@ -27,6 +27,7 @@
 //! wrong.
 
 pub mod capops;
+pub mod devops;
 pub mod domainops;
 pub mod evtops;
 pub mod ipcops;
@@ -123,6 +124,10 @@ pub fn object_alive(machine: &Machine, object: ObjRef) -> bool {
             .logs
             .get(index)
             .is_some_and(|l| l.used && l.generation == object.generation),
+        ObjKind::Device => machine
+            .devices
+            .get(index)
+            .is_some_and(|d| d.used && d.generation == object.generation),
     }
 }
 
@@ -142,6 +147,7 @@ pub fn object_id(machine: &Machine, object: ObjRef) -> u64 {
         ObjKind::Signal => machine.signals[index].id,
         ObjKind::Timer => machine.timers[index].id,
         ObjKind::ControlLog => machine.logs[index].id,
+        ObjKind::Device => machine.devices[index].id,
     }
 }
 
@@ -162,6 +168,7 @@ fn adjust_object_refs(machine: &mut Machine, object: ObjRef, delta: i32) {
         ObjKind::Signal => apply(&mut machine.signals[index].refs),
         ObjKind::Timer => apply(&mut machine.timers[index].refs),
         ObjKind::ControlLog => apply(&mut machine.logs[index].refs),
+        ObjKind::Device => apply(&mut machine.devices[index].refs),
     }
 }
 
@@ -527,7 +534,6 @@ fn simple(
         op::SCOPE_CREATE_TIMER => evtops::create_timer(machine, ctx, staging),
 
         op::DOMAIN_MAP => domainops::map(machine, ctx, staging),
-        op::DOMAIN_UNMAP => domainops::unmap(machine, ctx, staging),
         op::DOMAIN_INSTALL_CAP => domainops::install_cap(machine, ctx, staging),
         op::DOMAIN_ADD_THREAD => domainops::add_thread(machine, ctx, staging),
         op::DOMAIN_SET_FAULT_CHANNEL => domainops::set_fault_channel(machine, ctx, staging),
@@ -537,7 +543,6 @@ fn simple(
 
         op::MEMORY_QUERY => memops::query(machine, ctx, staging),
         op::MEMORY_COPY => memops::copy(machine, ctx, staging),
-        op::MEMORY_SEAL => memops::seal(machine, ctx, staging),
         op::MEMORY_WRITE => memops::write(machine, ctx, staging),
         op::MEMORY_READ => memops::read(machine, ctx, staging),
 
@@ -564,6 +569,13 @@ fn simple(
         op::LOG_ACK => logops::acknowledge(machine, ctx, staging),
         op::LOG_QUERY => logops::query(machine, ctx, staging),
 
+        op::DEVICE_QUERY => devops::query(machine, ctx, staging),
+        op::DEVICE_MAP_REGION => devops::map_region(machine, ctx, staging),
+        op::DEVICE_BIND_IRQ => devops::bind_irq(machine, ctx, staging),
+        op::DEVICE_SET_MASTER => devops::set_master(machine, ctx, staging),
+        op::DEVICE_DMA_MAP => devops::dma_map(machine, ctx, staging),
+        op::DEVICE_DMA_UNMAP => devops::dma_unmap(machine, ctx, staging),
+
         _ => Err(status::NOT_SUPPORTED),
     }
 }
@@ -580,10 +592,22 @@ const fn observes_lineage(operation: u32) -> bool {
 }
 
 /// True for the operations that own their own locking because they can wait.
+///
+/// Three of them wait for another domain. The other two wait for the other
+/// *processors*: withdrawing a mapping and publishing a seal are not complete
+/// until every processor has retired the translations they removed, and that
+/// acknowledgement cannot be waited for while holding the lock the
+/// acknowledging processors need.
 const fn waits(operation: u32) -> bool {
     matches!(
         operation,
-        op::ENDPOINT_CALL | op::ENDPOINT_RECEIVE | op::SIGNAL_WAIT
+        op::ENDPOINT_CALL
+            | op::ENDPOINT_RECEIVE
+            | op::SIGNAL_WAIT
+            | op::MEMORY_SEAL
+            | op::DOMAIN_UNMAP
+            | op::DEVICE_UNMAP_REGION
+            | op::DEVICE_RESET
     )
 }
 
@@ -690,6 +714,10 @@ pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64)
             op::ENDPOINT_CALL => ipcops::call(&ctx_base, spec, &mut staging),
             op::ENDPOINT_RECEIVE => ipcops::receive(&ctx_base, spec, &mut staging),
             op::SIGNAL_WAIT => evtops::wait(&ctx_base, spec, &mut staging),
+            op::MEMORY_SEAL => memops::seal(&ctx_base, spec, &mut staging),
+            op::DOMAIN_UNMAP => domainops::unmap(&ctx_base, spec, &mut staging),
+            op::DEVICE_UNMAP_REGION => devops::unmap_region(&ctx_base, spec, &mut staging),
+            op::DEVICE_RESET => devops::reset(&ctx_base, spec, &mut staging),
             _ => Err(status::NOT_SUPPORTED),
         }
     } else {

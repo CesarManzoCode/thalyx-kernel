@@ -7,15 +7,30 @@
 //! into the shared trap return path, which restores the frame and executes
 //! `iretq`.
 
-use core::arch::naked_asm;
+use core::arch::{global_asm, naked_asm};
 
 use super::gdt;
 use super::trap::TrapFrame;
 
 unsafe extern "C" {
-    /// Shared trap return path. Used here as an address, never called.
-    fn thalyx_trap_return();
+    /// First instructions of a thread that has never run. Used here as an
+    /// address, never called.
+    fn thalyx_thread_start();
 }
+
+// A thread that has never run resumes into assembly, not into Rust, so it has
+// no natural place to publish the thread the processor switched away from. This
+// gives it one: the same publication every other resumption performs, then the
+// shared return path.
+global_asm!(
+    ".text",
+    ".balign 16",
+    ".global thalyx_thread_start",
+    "thalyx_thread_start:",
+    "call {finish_switch}",
+    "jmp thalyx_trap_return",
+    finish_switch = sym crate::sched::finish_switch,
+);
 
 /// Layout a stopped thread's kernel stack holds at its saved stack pointer.
 #[repr(C)]
@@ -94,7 +109,7 @@ pub unsafe fn prepare_user_thread(
         r12: 0,
         rbx: 0,
         rbp: 0,
-        resume: thalyx_trap_return as *const () as u64,
+        resume: thalyx_thread_start as *const () as u64,
         frame: TrapFrame {
             rax: 0,
             rbx: 0,

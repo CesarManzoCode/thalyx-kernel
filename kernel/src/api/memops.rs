@@ -14,6 +14,7 @@
 //! acknowledgement and the device quiescence a full seal needs belong to K3 and
 //! are not claimed.
 
+use thalyx_abi::generated::OpSpec;
 use thalyx_abi::generated::{
     MemoryBytes, MemoryCopyRequest, MemoryCreateRequest, MemoryInfo, object_type, right, status,
 };
@@ -27,7 +28,7 @@ use crate::memobj::{MemoryObject, State};
 use crate::mm::{Owner, Rights};
 use crate::obj::{ObjKind, ObjRef};
 use crate::scope::{self, Resource};
-use crate::state::Machine;
+use crate::state::{MACHINE, Machine};
 use crate::ucopy::Staging;
 
 /// Translates interface memory rights into a platform mapping request.
@@ -114,6 +115,7 @@ pub fn create(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
         sponsor,
         map_count: 0,
         writable_maps: 0,
+        dma_grants: 0,
         label: request.label,
         refs: 0,
     };
@@ -292,12 +294,43 @@ pub fn read(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u
     Ok(request.length)
 }
 
-/// Withdraws one mapping and invalidates its translations.
+/// Processors executing in the address space rooted at `cr3` right now.
 ///
-/// Without PCID, loading CR3 flushes every non-global translation, so a mapping
-/// removed from an address space that is not the current one cannot survive
-/// into that space's next run. Only the current space needs an explicit
-/// invalidation, which is what this does.
+/// Measured rather than inferred, and measured at the moment a withdrawal is
+/// published. "The mapping was removed" and "the mapping was removed while two
+/// other processors were executing in that space" are different claims, and
+/// only the second one is about the race this mechanism exists for.
+#[must_use]
+pub fn cpus_in_space(machine: &Machine, cr3: u64) -> u32 {
+    let mut count = 0;
+    for cpu in 0..crate::limits::MAX_CPUS {
+        let slot = machine.cpus[cpu];
+        if !slot.online || slot.current == usize::MAX || slot.current >= machine.threads.len() {
+            continue;
+        }
+        if machine.threads[slot.current].cr3 == cr3 {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Withdraws one mapping, invalidates it here and publishes it everywhere.
+///
+/// Two things are needed and they are not the same thing. The processor running
+/// this call has to stop using the translation immediately, because it may
+/// return straight to user code without a context switch, and that is the
+/// per-page invalidation below. Every *other* processor has to stop using it
+/// too, and it is not running this code: what it gets is a published
+/// invalidation generation, which it retires before it next runs a user thread
+/// and which an initiator can wait for. Publishing here rather than at each
+/// call site is what makes it impossible to remove a mapping without announcing
+/// it.
+///
+/// Waiting for the announcement is a separate decision, because only some
+/// callers need the removal to be complete before they answer. Those wait; the
+/// rest rely on the frames staying in quarantine until every processor has
+/// caught up.
 pub fn withdraw_map(machine: &mut Machine, map_index: usize) -> u32 {
     let record = machine.maps[map_index];
     if !record.used {
@@ -342,79 +375,25 @@ pub fn withdraw_map(machine: &mut Machine, map_index: usize) -> u32 {
         .maps_pending
         .saturating_sub(1);
     scope::release(&mut machine.scopes, scope, Resource::Metadata, 1);
+    let grant = record.grant;
     machine.maps[map_index] = crate::memobj::MapRecord::empty();
+    // The reference the mapping held on its authorising grant. Releasing it
+    // here, after the record is gone, is what lets a node whose last handle was
+    // closed while the mapping stood be collected now.
+    if grant != crate::obj::NO_GRANT {
+        machine.grants[grant as usize].refs = machine.grants[grant as usize].refs.saturating_sub(1);
+        crate::api::collect_grant(machine, grant);
+    }
+    if removed != 0 {
+        crate::tlb::publish();
+    }
     removed
 }
 
-/// Refuses new writers, withdraws the existing ones, then publishes the seal.
-pub fn seal(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u64, i64> {
-    let index = ctx.cap.object.index as usize;
-    let id = machine.memories[index].id;
-    let generation = machine.memories[index].generation;
-    match machine.memories[index].state {
-        State::Sealed => {
-            let object = &machine.memories[index];
-            let info = MemoryInfo {
-                state: object.state.abi(),
-                max_rights: object.max_rights,
-                map_count: object.map_count,
-                writable_maps: object.writable_maps,
-                pages: u64::from(object.pages),
-                object_id: object.id,
-                sponsor_scope_id: machine.scopes[object.sponsor as usize].id,
-                label: object.label,
-            };
-            begin_response(staging, ctx.operation);
-            staging.write(BODY, info);
-            return Ok(0);
-        }
-        State::Mutable => {}
-        _ => return Err(status::STATE_CONFLICT),
-    }
-
-    // Admission of writers closes first. Anything that observes the object from
-    // here on sees a state that refuses a writable mapping, so no new alias can
-    // appear behind the withdrawal below.
-    machine.memories[index].state = State::Sealing;
-
-    let mut withdrawn = 0u32;
-    let mut pages = 0u32;
-    for map_index in 0..machine.maps.len() {
-        let record = machine.maps[map_index];
-        if !record.used
-            || record.memory as usize != index
-            || record.memory_generation != generation
-            || record.rights & right::MEMORY_WRITE == 0
-        {
-            continue;
-        }
-        event!(
-            "mem.writer_withdrawn",
-            "object={id} domain={} vaddr=0x{:x} offset_pages={} pages={} reason=sealing",
-            record.domain,
-            record.vaddr,
-            record.offset_pages,
-            record.pages
-        );
-        pages += withdraw_map(machine, map_index);
-        withdrawn += 1;
-    }
-
-    if machine.memories[index].writable_maps != 0 {
-        // The promise could not be made. The object stays unsealed rather than
-        // being published as immutable bytes that something can still write.
-        machine.memories[index].state = State::Mutable;
-        event!(
-            "mem.seal_failed",
-            "object={id} writable_maps={} reason=alias_remains",
-            machine.memories[index].writable_maps
-        );
-        return Err(status::STATE_CONFLICT);
-    }
-    machine.memories[index].state = State::Sealed;
-
+/// Describes a memory object as the interface reports it.
+fn describe(machine: &Machine, index: usize) -> MemoryInfo {
     let object = &machine.memories[index];
-    let info = MemoryInfo {
+    MemoryInfo {
         state: object.state.abi(),
         max_rights: object.max_rights,
         map_count: object.map_count,
@@ -423,16 +402,162 @@ pub fn seal(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u
         object_id: object.id,
         sponsor_scope_id: machine.scopes[object.sponsor as usize].id,
         label: object.label,
+    }
+}
+
+/// Refuses new writers, withdraws the existing ones, waits for every processor
+/// to have retired their translations, and only then publishes the seal.
+///
+/// The order is the memory contract's and the wait is the part that makes it a
+/// promise rather than a bit. Removing the page-table entries stops the
+/// processor running this call; it does nothing about a processor that already
+/// has the translation cached, and that processor can write through it. So the
+/// seal is published after every online processor has acknowledged an
+/// invalidation newer than the withdrawal — not after a message was sent, and
+/// not after a snapshot of the processors that looked interested at the time.
+///
+/// This is why the operation owns its own locking: the acknowledgement cannot
+/// be waited for with the machine lock held, because the processors being
+/// waited for need it.
+///
+/// A wait that runs out of patience does not seal. The object stays in
+/// `Sealing`, where no new writer can appear and the withdrawn ones are gone,
+/// and the caller is told the drain is incomplete. Retrying is allowed and
+/// finishes the transition; declaring the bytes immutable is not.
+pub fn seal(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64> {
+    let (index, id, generation, withdrawn, pages, live, mask) = {
+        let mut machine = MACHINE.lock();
+        let mut writers = [false; crate::state::MAX_DOMAINS];
+        let cap = resolve(
+            &machine,
+            ctx.domain,
+            ctx.handle,
+            spec.object_type,
+            spec.rights,
+            crate::api::now_ns(),
+        )?;
+        let index = cap.object.index as usize;
+        let id = machine.memories[index].id;
+        let generation = machine.memories[index].generation;
+        match machine.memories[index].state {
+            State::Sealed => {
+                let info = describe(&machine, index);
+                drop(machine);
+                begin_response(staging, ctx.operation);
+                staging.write(BODY, info);
+                return Ok(0);
+            }
+            // A previous attempt reached `Sealing` and could not observe
+            // quiescence. The transition is monotonic, so this continues it
+            // rather than starting over.
+            State::Mutable | State::Sealing => {}
+            State::Empty => return Err(status::STATE_CONFLICT),
+        }
+
+        // A device that can reach these pages is a writer the page tables
+        // cannot withdraw. Sealing while one exists would promise immutability
+        // the kernel has no mechanism to keep, so it is refused and the caller
+        // is told to finish the device's own withdrawal first.
+        if machine.memories[index].dma_grants != 0 {
+            let grants = machine.memories[index].dma_grants;
+            event!(
+                "mem.seal_failed",
+                "object={id} dma_grants={grants} reason=device_can_still_reach_pages"
+            );
+            return Err(status::STATE_CONFLICT);
+        }
+
+        // Admission of writers closes first. Anything that observes the object
+        // from here on sees a state that refuses a writable mapping, so no new
+        // alias can appear behind the withdrawal below.
+        machine.memories[index].state = State::Sealing;
+
+        let mut withdrawn = 0u32;
+        let mut pages = 0u32;
+        for map_index in 0..machine.maps.len() {
+            let record = machine.maps[map_index];
+            if !record.used
+                || record.memory as usize != index
+                || record.memory_generation != generation
+                || record.rights & right::MEMORY_WRITE == 0
+            {
+                continue;
+            }
+            event!(
+                "mem.writer_withdrawn",
+                "object={id} domain={} vaddr=0x{:x} offset_pages={} pages={} reason=sealing",
+                record.domain,
+                record.vaddr,
+                record.offset_pages,
+                record.pages
+            );
+            writers[record.domain as usize] = true;
+            pages += withdraw_map(&mut machine, map_index);
+            withdrawn += 1;
+        }
+        let mut live = 0u32;
+        let mut mask = 0u64;
+        for domain in 0..crate::state::MAX_DOMAINS {
+            if !writers[domain] {
+                continue;
+            }
+            if let Some(space) = machine.domains[domain].space.as_ref() {
+                live += cpus_in_space(&machine, space.cr3());
+            }
+            mask |= machine.domains[domain].cpu_mask;
+        }
+        (index, id, generation, withdrawn, pages, live, mask)
     };
-    begin_response(staging, ctx.operation);
-    staging.write(BODY, info);
+
+    // No lock is held here, which is the point.
+    let ack = crate::tlb::shootdown();
+
+    let mut machine = MACHINE.lock();
+    if machine.memories[index].generation != generation
+        || machine.memories[index].state == State::Empty
+    {
+        return Err(status::PEER_DEAD);
+    }
+    if machine.memories[index].writable_maps != 0 {
+        event!(
+            "mem.seal_failed",
+            "object={id} writable_maps={} reason=alias_remains",
+            machine.memories[index].writable_maps
+        );
+        return Err(status::STATE_CONFLICT);
+    }
+    if ack.timed_out {
+        event!(
+            "mem.seal_failed",
+            "object={id} reason=invalidation_unacknowledged generation={} \
+             acknowledged={} expected={} spins={} state=sealing",
+            ack.generation,
+            ack.acknowledged,
+            ack.expected,
+            ack.spins
+        );
+        return Err(status::DRAIN_INCOMPLETE);
+    }
+    machine.memories[index].state = State::Sealed;
+
+    let info = describe(&machine, index);
+    let map_count = machine.memories[index].map_count;
+    let label = machine.memories[index].label_str();
+    let object_pages = machine.memories[index].pages;
     event!(
         "mem.sealed",
-        "object={id} label={} pages={} writers_withdrawn={withdrawn} pages_unmapped={pages} \
-         remaining_maps={} perimeter=uniprocessor_no_dma",
-        machine.memories[index].label_str(),
-        machine.memories[index].pages,
-        machine.memories[index].map_count
+        "object={id} label={label} pages={object_pages} writers_withdrawn={withdrawn} \
+         pages_unmapped={pages} remaining_maps={map_count} \
+         invalidation_generation={} acknowledged_cpus={} expected_cpus={} \
+         writer_cpus_at_withdrawal={live} writer_cpu_mask=0x{mask:x} \
+         writer_cpus_ever={} perimeter=cpu_translations_retired dma=none",
+        ack.generation,
+        ack.acknowledged,
+        ack.expected,
+        mask.count_ones()
     );
+    drop(machine);
+    begin_response(staging, ctx.operation);
+    staging.write(BODY, info);
     Ok(u64::from(withdrawn))
 }
