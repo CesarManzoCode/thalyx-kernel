@@ -5,7 +5,7 @@ status: observed
 ---
 # Estado actual
 
-**2026-09-09 · Fundación 0.1.0 · K0, K1, K2 y K3 completos. K4 en curso; K5–K6 pendientes.**
+**2026-09-10 · Fundación 0.1.0 · K0, K1, K2 y K3 completos. K4 en curso; K5–K6 pendientes.**
 
 > **Punto de reanudación.** Este documento es el checkpoint. La sección [Reanudar aquí](#reanudar-aquí) dice exactamente dónde empieza el trabajo siguiente; no hace falta reauditar K0, K1, K2 ni K3.
 
@@ -161,6 +161,20 @@ Ese último control encontró algo que conviene decir en lugar de fingir que se 
 
 El esquema creció dos modos de fallo, `IO_ERROR` y `REORDER`, y el campo reservado de la directiva pasó a ser `stop_at_next_flush`, que hace terminar la ejecución donde habría flush para que un modo que solo importa antes de un flush pueda observarse después de uno.
 
+### Servicio, cliente y supervisor
+
+`user/k4store` es el motor del almacén con un bucle de protocolo delante: catorce operaciones, el principal tomado de la faceta que el kernel autenticó y nunca de un campo de la petición, y la capacidad prestada tomada del mensaje y no de un número. `user/k4client` es una imagen y cuatro papeles —publicador, rival, lector y broker— escritos en una página que el supervisor mapea de solo lectura. `user/k4super` construye la ejecución: driver, servicio y clientes, cada uno con lo que le corresponde y nada más.
+
+### La imagen K4 y su arnés
+
+`tools/build_image.py` tiene fase `k4`, y `tools/run_k4.py` ejecuta un **caso**: un escenario, una directiva de fallos y un número de tramos sobre un medio creado una vez y arrastrado de un tramo al siguiente. Solo el primer tramo se corta; los demás son la recuperación, y reciben una directiva que no nombra ningún punto. El anfitrión solo escribe la directiva, en un bloque fuera del almacén: lo que un medio contiene es lo que el invitado puso ahí.
+
+### Lo que la primera ejecución corrigió, y lo que todavía no
+
+La primera ejecución de extremo a extremo arranca cuatro procesadores, levanta el driver, formatea un almacén, sirve lecturas y publicaciones, y llega hasta el outbox. Corrigió cuatro cosas que compilar no podía ver: una cadena de descriptores que decía que una transferencia había ocurrido sin mover un byte; un supervisor que guardaba todas las asas que había creado y agotaba la tabla global de grants; una petición que no puede cruzar la llamada sin `TRANSFER`; y una espera que consultaba bits en vez de consumirlos.
+
+Lo que **no** está resuelto: un `ENDPOINT_CALL` del servicio al broker se rechaza por límite, y no existe todavía puerta K4. Ninguna afirmación de durabilidad se sostiene aún.
+
 ## Evidencia ejecutada aquí
 
 | Comprobación | Resultado y alcance |
@@ -218,7 +232,7 @@ El plano de diagnóstico de K1 sigue presente, sigue sin ser el plano de recibos
 
 ## Reanudar aquí
 
-**Último hito terminado y pusheado:** **K4, formato del almacén fijado**. Rama `feat/k4-durable-managed-state`, sin fusionar. K3 quedó completo en `feat/k3-smp-devices`.
+**Último hito terminado y pusheado:** **K4, la imagen y el arnés, con lo que la primera ejecución corrigió**. Rama `feat/k4-durable-managed-state`, sin fusionar. K3 quedó completo en `feat/k3-smp-devices`.
 
 **Qué está verde, medido en este árbol y con el mismo binario de kernel en las tres fases:** puerta K1 13/13, puerta K2 21/21, autocomprobación K2 28/28, puerta K3 28/28 en los dos perfiles de plataforma, autocomprobación K3 57/57, cobertura K2 51/51 y K3 37/59 con las 26 requeridas dentro, ABI 4/4, vault 43 notas PASS, modelos PASS, `fmt` limpio.
 
@@ -226,7 +240,7 @@ El plano de diagnóstico de K1 sigue presente, sigue sin ser el plano de recibos
 
 **Qué no demostró, y está escrito así en la evidencia:** aislamiento de DMA, hardware físico, escalabilidad, más de un dispositivo, rutas de interrupción legadas y cobertura de caminos. [Detalle y límites](../evidence/k3-smp-devices.md).
 
-**Siguiente paso exacto al reanudar:** el bucle de servicio de `user/k4store` (`src/main.rs`), que es lo único que falta para que el motor del almacén ya escrito —formato, recuperación, replay, admisión, publicación, compactación y outbox— sea alcanzable por un protocolo. Después, el cliente y el supervisor del paquete K4, la fase `k4` de la imagen, la ejecución y la puerta. El formato ya no es una decisión pendiente. Nada de K3 queda pendiente.
+**Siguiente paso exacto al reanudar:** explicar y corregir el rechazo por límite del `ENDPOINT_CALL` del servicio al broker en la ejecución K4 —el registro que lo nombra es `k2.refused domain=2 name=k4store op=ENDPOINT_CALL status=-9`, y el kernel ya emite `k2.grants_exhausted` cuando la tabla global es la causa—. Después: llevar la vertical entera hasta el final sin fallos, escribir `tools/check_k4.py` con sus controles negativos, ejecutar los casos de corte y recuperación, y cerrar EXP-07/08/09 en alcance K4. El formato ya no es una decisión pendiente. Nada de K3 queda pendiente.
 
 **Bugs encontrados por ejecución en K3, todos corregidos:** seis del kernel, dos de la evidencia y dos del paquete. Los tres fatales comparten familia —suponer que el estado de un hilo basta para decir de quién es— y ninguno era visible con un procesador. Están descritos uno a uno en [la evidencia](../evidence/k3-smp-devices.md).
 
