@@ -31,7 +31,7 @@
 
 use thalyx_abi::boot_handle;
 use thalyx_abi::generated::{
-    ScopeLimits, boot_slot, dma_profile, domain_state, memory_state, right, status,
+    ScopeLimits, boot_slot, dma_profile, domain_state, memory_state, receipt_kind, right, status,
 };
 use thalyx_user_k4fmt as k4;
 use thalyx_user_k4fmt::pkg::{
@@ -545,28 +545,111 @@ fn build_client(
     Some(domain)
 }
 
-/// Waits for the service to say it is admitting requests.
+/// What the auditor has seen of the control plane so far.
+///
+/// The service records what it did; this reads what the kernel recorded about
+/// it. They are different statements, and keeping the second is what lets the
+/// gate ask whether a publication the medium holds was ever admitted, rather
+/// than taking the service's word for both halves.
+#[derive(Default)]
+struct Audit {
+    /// Receipts read and acknowledged.
+    drained: u64,
+    /// Effect admissions among them: one per publication the kernel let begin.
+    effects: u64,
+    /// The sequence the next receipt must carry if coverage is unbroken.
+    expected: u64,
+    /// Sequences that never arrived, counted rather than assumed absent.
+    gaps: u64,
+    /// What the log itself says it dropped.
+    lost: u32,
+    /// The deepest occupancy observed.
+    high_water: u32,
+}
+
+/// Consumes every receipt the log is holding, and says what was in them.
+///
+/// The log is a ring the kernel refuses admissions to protect: a covered
+/// operation reserves a cell before it may happen, so a full log does not lose
+/// receipts, it stops the machine admitting the work they would cover. Someone
+/// has to consume it, and it cannot be the service being audited. It is the
+/// supervisor, because the supervisor is the authority the service was built
+/// by and the only domain in this package that holds the log with the right to
+/// acknowledge.
+///
+/// Reading does not consume. Acknowledging through the last sequence read is
+/// what frees the cells, and it happens after the batch has been counted, so a
+/// receipt is never dropped before it has been looked at.
+fn drain_receipts(log: u64, audit: &mut Audit) {
+    loop {
+        let Ok(batch) = k2::log_read(log) else { return };
+        if batch.lost > audit.lost {
+            audit.lost = batch.lost;
+            k2::note(note::AUDIT_LOST, u64::from(batch.lost));
+        }
+        if batch.count == 0 {
+            return;
+        }
+        let mut through = 0u64;
+        for record in batch.records.iter().take(batch.count as usize) {
+            if audit.expected != 0 && record.sequence != audit.expected {
+                audit.gaps += 1;
+                k2::note(note::AUDIT_GAP, audit.expected);
+            }
+            audit.expected = record.sequence + 1;
+            audit.drained += 1;
+            if record.kind == receipt_kind::EFFECT {
+                audit.effects += 1;
+                k2::note(note::AUDIT_EFFECT, record.object_id);
+            }
+            through = record.sequence;
+        }
+        if let Err(code) = k2::log_acknowledge(log, through) {
+            k2::note(report::UNEXPECTED, code as u64);
+            return;
+        }
+    }
+}
+
+/// Reads how full the log got, before draining it.
+fn observe_log(log: u64, audit: &mut Audit) {
+    if let Ok(info) = k2::log_query(log)
+        && info.used > audit.high_water
+    {
+        audit.high_water = info.used;
+    }
+}
+
+/// Waits for the service to say it is admitting requests, auditing meanwhile.
 ///
 /// A wait consumes the bits it observed, so what it returns is the only report
 /// of them: querying the signal afterwards would find them already gone. That
-/// is why nothing here polls.
-fn await_ready(signal: u64) -> bool {
+/// is why nothing here polls the signal. The log is different -- nothing wakes
+/// anyone when a receipt is written -- so the wait is taken in slices and the
+/// log is drained between them. Waiting the whole deadline in one call is what
+/// let the log fill while the service was still formatting the medium.
+fn await_ready(signal: u64, log: u64, audit: &mut Audit) -> bool {
     let deadline = k2::now_ns() + READY_DEADLINE_NS;
     loop {
-        match k2::signal_wait(signal, bit::READY | bit::CRASH | bit::RESTART, deadline) {
+        observe_log(log, audit);
+        drain_receipts(log, audit);
+        let slice = (k2::now_ns() + POLL_NS).min(deadline);
+        match k2::signal_wait(signal, bit::READY | bit::CRASH | bit::RESTART, slice) {
             Ok(info) => {
                 k2::note(report::SIGNAL_OBSERVED, info.bits);
                 if info.bits & bit::READY != 0 {
+                    drain_receipts(log, audit);
                     return true;
                 }
                 if info.bits & (bit::CRASH | bit::RESTART) != 0 {
                     return false;
                 }
             }
-            Err(code) => {
+            Err(code) if code != status::TIMED_OUT => {
                 k2::note(report::UNEXPECTED, code as u64);
                 return false;
             }
+            Err(_) => {}
         }
         if k2::now_ns() >= deadline {
             return false;
@@ -761,7 +844,8 @@ fn run() -> ! {
     run.store_domain = store_domain;
     k2::note(note::SUPER_BUILT, 2);
 
-    if !await_ready(signal) {
+    let mut audit = Audit::default();
+    if !await_ready(signal, log, &mut audit) {
         // The service did not get as far as admitting requests. That is a
         // result of the run, not a failure of the supervisor: the medium says
         // what happened, and the gate reads the medium.
@@ -809,9 +893,6 @@ fn run() -> ! {
             Some(domain) => {
                 clients[built] = domain;
                 built += 1;
-                if store_facet != 0 {
-                    drop_handle(store_facet);
-                }
             }
             None => fail(30 + built as u64, status::INVALID_HANDLE),
         }
@@ -820,6 +901,13 @@ fn run() -> ! {
     // belongs. What it still names is what it still uses: the store's image for
     // a replacement, the clients' domains to see them finish, the two signals,
     // the buffer, and the log.
+    // Including the facets of principals this scenario did not build: a run
+    // that binds four and uses three still holds four handles.
+    for handle in principals {
+        if handle != 0 {
+            drop_handle(handle);
+        }
+    }
     drop_handle(broker_endpoint);
     drop_handle(store_endpoint);
     drop_handle(client_image);
@@ -835,7 +923,12 @@ fn run() -> ! {
     let deadline = k2::now_ns() + RUN_DEADLINE_NS;
     let mut restarts = 0u64;
     loop {
+        // Before anything else, because everything else in this loop waits and
+        // the log fills while it does.
+        observe_log(log, &mut audit);
+        drain_receipts(log, &mut audit);
         let _ = k2::signal_wait(done, bit::CLIENT_DONE, k2::now_ns() + POLL_NS);
+        drain_receipts(log, &mut audit);
         // Consuming rather than querying, for the reason `await_ready` gives.
         if let Ok(info) = k2::signal_wait(signal, bit::CRASH | bit::RESTART, k2::now_ns() + POLL_NS)
         {
@@ -886,6 +979,16 @@ fn run() -> ! {
         }
     }
 
+    // The last receipts, including the ones the run's own ending wrote.
+    observe_log(log, &mut audit);
+    drain_receipts(log, &mut audit);
+    k2::note(note::AUDIT_DRAINED, audit.drained);
+    k2::note(note::AUDIT_EFFECT, audit.effects);
+    k2::note(
+        note::AUDIT_HIGH_WATER,
+        u64::from(audit.high_water) | (audit.gaps << 32),
+    );
+    k2::note(note::AUDIT_LOST, u64::from(audit.lost));
     k2::note(note::SUPER_FINISHED, 1);
     rt::exit(0)
 }

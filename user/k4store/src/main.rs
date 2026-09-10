@@ -984,6 +984,7 @@ fn run() -> ! {
             _ => {
                 let reply = refused(store_status::INVALID_REQUEST);
                 let _ = k2::invocation_reply(invocation, u64::from(reply.status), reply.as_bytes());
+                let _ = k2::cap_close(invocation);
                 continue;
             }
         };
@@ -1014,14 +1015,20 @@ fn run() -> ! {
             k2::note(note::CONTROL_INCOMPLETE, service_state.control_lost);
         }
 
-        if !service_state.honour_demand(invocation, &reply) {
-            continue;
+        // The ticket outlives the reply on purpose -- an effect is admitted
+        // against it and resolved after the answer -- but not the request. A
+        // service that kept one per call would hold an invocation record for
+        // every request it had already answered, and the machine's table, not
+        // the medium, is what would run out first.
+        let answered = service_state.honour_demand(invocation, &reply);
+        if answered {
+            if let Err(code) =
+                k2::invocation_reply(invocation, u64::from(reply.status), reply.as_bytes())
+            {
+                k2::note(report::UNEXPECTED, code as u64);
+            }
         }
-        if let Err(code) =
-            k2::invocation_reply(invocation, u64::from(reply.status), reply.as_bytes())
-        {
-            k2::note(report::UNEXPECTED, code as u64);
-        }
+        let _ = k2::cap_close(invocation);
     }
 }
 

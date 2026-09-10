@@ -695,6 +695,7 @@ fn run() -> ! {
                     ..DiskReply::default()
                 };
                 let _ = k2::invocation_reply(invocation, 0, reply.as_bytes());
+                let _ = k2::cap_close(invocation);
                 continue;
             }
         };
@@ -704,6 +705,11 @@ fn run() -> ! {
         {
             k2::note(report::UNEXPECTED, code as u64);
         }
+        // The ticket is a handle on the request, and the request is over. A
+        // driver that keeps one per call holds a table slot and an invocation
+        // record for work it has already finished, and the run ends by running
+        // out of records rather than out of medium.
+        let _ = k2::cap_close(invocation);
     }
 }
 

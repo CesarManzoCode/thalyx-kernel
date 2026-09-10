@@ -36,6 +36,22 @@ use crate::ucopy::Staging;
 /// sender nothing while costing the kernel a table.
 const MESSAGE_OVERHEAD_BYTES: u64 = 64;
 
+/// Refuses an admission and says which of its five reservations ran out.
+///
+/// Admission reserves a queue cell, capability slots, a message record, an
+/// invocation record, the sender's queue bytes and a receipt cell, and every
+/// one of them answers `LIMIT_EXHAUSTED`. A caller that gets that answer knows
+/// only that something bounded was full, and the five have nothing in common:
+/// one is the receiver's fault, one the sender's, and three are the machine's.
+/// Naming the table and what it held is what turns the refusal into evidence.
+fn exhausted(resource: &str, used: u64, capacity: u64) -> i64 {
+    event!(
+        "k2.admission_exhausted",
+        "resource={resource} used={used} capacity={capacity}"
+    );
+    status::LIMIT_EXHAUSTED
+}
+
 /// Rights an invocation capability carries when a receiver takes the message.
 const TICKET_RIGHTS: u32 = right::INSPECT
     | right::TRANSFER
@@ -267,19 +283,40 @@ fn admit(
         return Err(status::QUEUE_FULL);
     }
     if machine.domains[receiver].caps.free_slots() < count {
-        return Err(status::LIMIT_EXHAUSTED);
+        let free = machine.domains[receiver].caps.free_slots() as u64;
+        return Err(exhausted("receiver_cap_slots", count as u64, free));
     }
 
-    let message_index = machine
-        .messages
-        .iter()
-        .position(|message| !message.used)
-        .ok_or(status::LIMIT_EXHAUSTED)?;
-    let invocation_index = machine
+    let message_index = match machine.messages.iter().position(|message| !message.used) {
+        Some(index) => index,
+        None => {
+            let used = machine
+                .messages
+                .iter()
+                .filter(|message| message.used)
+                .count() as u64;
+            return Err(exhausted("messages", used, machine.messages.len() as u64));
+        }
+    };
+    let invocation_index = match machine
         .invocations
         .iter()
         .position(|invocation| invocation.state == State::Empty)
-        .ok_or(status::LIMIT_EXHAUSTED)?;
+    {
+        Some(index) => index,
+        None => {
+            let used = machine
+                .invocations
+                .iter()
+                .filter(|invocation| invocation.state != State::Empty)
+                .count() as u64;
+            return Err(exhausted(
+                "invocations",
+                used,
+                machine.invocations.len() as u64,
+            ));
+        }
+    };
 
     let origin_scope = machine.threads[ctx.thread].effective_scope;
     let charged = if ordinary {
@@ -290,7 +327,12 @@ fn admit(
             Resource::QueueBytes,
             bytes,
         ) {
-            return Err(status::LIMIT_EXHAUSTED);
+            let scope = &machine.scopes[origin_scope as usize];
+            return Err(exhausted(
+                "queue_bytes",
+                scope.queue_bytes.saturating_add(bytes),
+                scope.limits.queue_bytes,
+            ));
         }
         bytes
     } else {
@@ -306,7 +348,17 @@ fn admit(
                 charged,
             );
         }
-        return Err(status::LIMIT_EXHAUSTED);
+        let (used, capacity) = match machine.system_log {
+            Some(index) => {
+                let log = &machine.logs[index as usize];
+                (
+                    (log.count as u64).saturating_add(u64::from(log.pending_reservations)),
+                    log.ordinary_capacity() as u64,
+                )
+            }
+            None => (0, 0),
+        };
+        return Err(exhausted("receipt_cells", used, capacity));
     }
 
     // Everything is reserved. From here the transfer either completes or is
@@ -804,11 +856,7 @@ fn release_invocation(machine: &mut Machine, index: usize) {
         crate::api::collect_grant(machine, grant);
     }
     machine.invocations[index].state = State::Resolved;
-    if machine.invocations[index].refs == 0 {
-        let generation = machine.invocations[index].generation;
-        machine.invocations[index] = Invocation::empty();
-        machine.invocations[index].generation = generation;
-    }
+    crate::api::collect_invocation(machine, index);
 }
 
 /// Consumes the one-shot reply of an invocation.

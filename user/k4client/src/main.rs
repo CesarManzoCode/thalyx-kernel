@@ -71,7 +71,7 @@ const STAGE_BYTES: usize = (STAGE_PAGES as usize) * 4096;
 const BROKER_KEYS: usize = 8;
 
 /// How long a broker waits for an intent before deciding the run is over.
-const BROKER_IDLE_NS: u64 = 3_000_000_000;
+const BROKER_IDLE_NS: u64 = 1_000_000_000;
 
 /// Idle waits a broker takes before it stops.
 const BROKER_IDLE_ROUNDS: u32 = 4;
@@ -859,6 +859,7 @@ fn run_broker(endpoint: u64, config: &ClientConfig) {
                 reserved0: 0,
             };
             let _ = k2::invocation_reply(invocation, 0, answer.as_bytes());
+            let _ = k2::cap_close(invocation);
             continue;
         };
         let slot = match keys.iter().take(held).position(|key| *key == intent.key) {
@@ -885,6 +886,9 @@ fn run_broker(endpoint: u64, config: &ClientConfig) {
             reserved0: 0,
         };
         let _ = k2::invocation_reply(invocation, u64::from(status), answer.as_bytes());
+        // The ticket is a handle on a request that is over, and every one kept
+        // is an invocation record the machine cannot reuse.
+        let _ = k2::cap_close(invocation);
     }
 }
 

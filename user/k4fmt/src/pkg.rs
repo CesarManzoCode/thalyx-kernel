@@ -379,6 +379,17 @@ pub mod note {
     pub const SUPER_RESTARTED: u64 = 0x4042;
     /// The supervisor reached the end of its script. Value: 1.
     pub const SUPER_FINISHED: u64 = 0x4043;
+    /// The auditor consumed receipts. Value: how many, in total.
+    pub const AUDIT_DRAINED: u64 = 0x4044;
+    /// The auditor saw an effect admission. Value: the invocation it covers.
+    pub const AUDIT_EFFECT: u64 = 0x4045;
+    /// The receipt sequence skipped. Value: the sequence that did not arrive.
+    pub const AUDIT_GAP: u64 = 0x4046;
+    /// The log says it dropped receipts. Value: how many, in total.
+    pub const AUDIT_LOST: u64 = 0x4047;
+    /// The deepest the log was seen, and the gaps found. Value: the high
+    /// water mark, with the number of sequence gaps above bit 32.
+    pub const AUDIT_HIGH_WATER: u64 = 0x4048;
 }
 
 /// What the service asks a broker to do, and the key it must be idempotent on.
