@@ -132,7 +132,9 @@
       { "name": "DROP_WRITE", "value": 2, "doc": "Never issue the write at the named point; carry on as if it had been." },
       { "name": "TEAR_WRITE", "value": 3, "doc": "Issue only the first sector of that record, then stop." },
       { "name": "LOSE_RESPONSE", "value": 4, "doc": "Complete durably and end the machine before the caller is answered." },
-      { "name": "KILL_SERVICE", "value": 5, "doc": "Stop the service domain at the named point; the machine keeps running." }
+      { "name": "KILL_SERVICE", "value": 5, "doc": "Stop the service domain at the named point; the machine keeps running." },
+      { "name": "IO_ERROR", "value": 6, "doc": "The medium refuses the write at the named point. A service may not publish on a state it only assumes." },
+      { "name": "REORDER", "value": 7, "doc": "Hold the write at the named point and issue it after the next one, so an unflushed sequence is not the order the medium sees." }
     ],
     "FaultPoint": [
       { "name": "NONE", "value": 0 },
@@ -323,7 +325,7 @@
         { "name": "leg", "type": "u32" },
         { "name": "scenario", "type": "u64" },
         { "name": "seed", "type": "u64" },
-        { "name": "reserved0", "type": "u64" },
+        { "name": "stop_at_next_flush", "type": "u64", "doc": "Scaffolding: 1 makes the service end the run where it would have flushed next, so a mode that only matters before a flush can be observed after one." },
         { "name": "digest", "type": "u8[32]" }
       ]
     },

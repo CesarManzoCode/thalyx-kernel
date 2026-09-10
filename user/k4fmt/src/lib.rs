@@ -17,6 +17,7 @@
 #![no_std]
 
 pub mod generated;
+pub mod pkg;
 pub mod sha256;
 
 use core::mem::size_of;

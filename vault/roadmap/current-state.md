@@ -153,6 +153,14 @@ La directiva de fallos es andamiaje y está marcada como tal: vive en un bloque 
 
 Ese último control encontró algo que conviene decir en lugar de fingir que se probó: todos los registros pequeños caben en un sector, y un desgarro de un registro así lo deja entero o ausente, lo cual es una propiedad de la geometría y no del checksum. El vector dorado que el control usa es por eso un registro de objeto de 1024 bytes, que cruza el sector; el desgarro se aplica donde significa algo.
 
+### Contrato del paquete y driver de bloque
+
+`user/k4fmt/src/pkg.rs` fija lo que los programas del paquete K4 acuerdan y ningún programa decide por su cuenta: qué ranura de capacidad guarda qué, dónde aterriza cada mapeo, qué significa cada bit de señal, y la forma de los dos protocolos —el de bloques y el del estado—. No es autoridad: una ranura no nombra nada hasta que el supervisor instala una capacidad en ella.
+
+`user/k4disk` es el transporte virtio-blk de K3 con dos cosas añadidas —una interfaz de servicio, para que el servicio de estado llegue al medio por capacidad y no por un dispositivo propio, y un motor de fallos— y ninguna quitada. El motor es andamiaje y está marcado como tal: puede dejar una escritura sin emitir, emitir solo su primer sector, negarla como fallo del medio, retenerla y emitirla después de la siguiente, o cerrar el paso a toda escritura posterior. Cada una se cuenta, y esos recuentos son lo que la puerta contrasta contra el medio. Compila para el objetivo del kernel; todavía no se ha ejecutado.
+
+El esquema creció dos modos de fallo, `IO_ERROR` y `REORDER`, y el campo reservado de la directiva pasó a ser `stop_at_next_flush`, que hace terminar la ejecución donde habría flush para que un modo que solo importa antes de un flush pueda observarse después de uno.
+
 ## Evidencia ejecutada aquí
 
 | Comprobación | Resultado y alcance |
@@ -203,7 +211,7 @@ Lo que no existe, en orden de cuánto se parece a existir:
 - **Aislamiento de DMA.** No hay unidad de remapeo programada. El perfil débil es lo único que esta plataforma sostiene, el kernel lo dice en cada registro que lo menciona, y el perfil fuerte se rechaza con un estado propio en lugar de aproximarse. Un driver no confiable **no** está contenido aquí, y ninguna nota puede decir lo contrario. [ADR-009](../decisions/ADR-009-device-path-and-dma-profiles.md), [OQ-05](open-questions.md).
 - **Hardware físico.** Todo es QEMU con TCG. El inventario de CPU, firmware, dispositivos y grupos de aislamiento sigue sin hacerse.
 - **Más de un dispositivo, y rutas de interrupción legadas.** Una función virtio-blk moderna con MSI-X. No hay IOAPIC, INTx, hotplug, NUMA, suspensión, virtio-net ni GPU, y ninguno está a medias.
-- **Estado durable.** El formato está fijado y comprobado, y nada más. No hay servicio de estado, ni versiones publicadas, ni recuperación tras caída, ni un solo byte escrito en un medio por este código. Es el resto de K4.
+- **Estado durable.** El formato está fijado y comprobado, y el driver de bloque con inyección de fallos y el motor del almacén están escritos. Nada de eso se ha ejecutado: no hay servicio alcanzable, ni versiones publicadas, ni recuperación tras caída ejecutada, ni un solo byte escrito en un medio por este código. Es el resto de K4.
 - **Thalyx sobre este kernel, rendimiento y prueba formal general.** Nada de eso está implementado o medido.
 
 El plano de diagnóstico de K1 sigue presente, sigue sin ser el plano de recibos, y sus dos entradas de andamiaje permanecen para que la regresión de K1 se siga ejecutando. El primer supervisor no tiene supervisor: su fallo termina la ejecución. No se ha retirado ni reemplazado Linux.
@@ -218,7 +226,7 @@ El plano de diagnóstico de K1 sigue presente, sigue sin ser el plano de recibos
 
 **Qué no demostró, y está escrito así en la evidencia:** aislamiento de DMA, hardware físico, escalabilidad, más de un dispositivo, rutas de interrupción legadas y cobertura de caminos. [Detalle y límites](../evidence/k3-smp-devices.md).
 
-**Siguiente paso exacto al reanudar:** el driver de bloque de K4 con inyección de fallos (`user/k4disk`) y el servicio de estado (`user/k4store`), en ese orden. El formato ya no es una decisión pendiente. Nada de K3 queda pendiente.
+**Siguiente paso exacto al reanudar:** el bucle de servicio de `user/k4store` (`src/main.rs`), que es lo único que falta para que el motor del almacén ya escrito —formato, recuperación, replay, admisión, publicación, compactación y outbox— sea alcanzable por un protocolo. Después, el cliente y el supervisor del paquete K4, la fase `k4` de la imagen, la ejecución y la puerta. El formato ya no es una decisión pendiente. Nada de K3 queda pendiente.
 
 **Bugs encontrados por ejecución en K3, todos corregidos:** seis del kernel, dos de la evidencia y dos del paquete. Los tres fatales comparten familia —suponer que el estado de un hilo basta para decir de quién es— y ninguno era visible con un procesador. Están descritos uno a uno en [la evidencia](../evidence/k3-smp-devices.md).
 

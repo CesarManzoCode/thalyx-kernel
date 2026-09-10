@@ -232,6 +232,10 @@ pub mod fault_mode {
     pub const LOSE_RESPONSE: u32 = 4;
     /// Stop the service domain at the named point; the machine keeps running.
     pub const KILL_SERVICE: u32 = 5;
+    /// The medium refuses the write at the named point. A service may not publish on a state it only assumes.
+    pub const IO_ERROR: u32 = 6;
+    /// Hold the write at the named point and issue it after the next one, so an unflushed sequence is not the order the medium sees.
+    pub const REORDER: u32 = 7;
 }
 
 /// `FaultPoint` from the schema.
@@ -914,8 +918,8 @@ pub struct HarnessDirective {
     pub scenario: u64,
     /// Schema field `seed`, little-endian `u64`.
     pub seed: u64,
-    /// Reserved, must be zero.
-    pub reserved0: u64,
+    /// Scaffolding: 1 makes the service end the run where it would have flushed next, so a mode that only matters before a flush can be observed after one.
+    pub stop_at_next_flush: u64,
     /// Schema field `digest`, little-endian `u8[32]`.
     pub digest: [u8; 32],
 }
@@ -939,8 +943,8 @@ impl HarnessDirective {
     pub const OFFSET_SCENARIO: usize = 32;
     /// Offset of `seed`.
     pub const OFFSET_SEED: usize = 40;
-    /// Offset of `reserved0`.
-    pub const OFFSET_RESERVED0: usize = 48;
+    /// Offset of `stop_at_next_flush`.
+    pub const OFFSET_STOP_AT_NEXT_FLUSH: usize = 48;
     /// Offset of `digest`.
     pub const OFFSET_DIGEST: usize = 56;
 }
@@ -955,7 +959,7 @@ const _: () = assert!(core::mem::offset_of!(HarnessDirective, fault_mode) == 24)
 const _: () = assert!(core::mem::offset_of!(HarnessDirective, leg) == 28);
 const _: () = assert!(core::mem::offset_of!(HarnessDirective, scenario) == 32);
 const _: () = assert!(core::mem::offset_of!(HarnessDirective, seed) == 40);
-const _: () = assert!(core::mem::offset_of!(HarnessDirective, reserved0) == 48);
+const _: () = assert!(core::mem::offset_of!(HarnessDirective, stop_at_next_flush) == 48);
 const _: () = assert!(core::mem::offset_of!(HarnessDirective, digest) == 56);
 
 /// Canonical head of a TREE object; entries follow, ordered by name bytes.

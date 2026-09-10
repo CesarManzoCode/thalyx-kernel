@@ -140,6 +140,8 @@ FAULTMODE = {
     "TEAR_WRITE": 3,
     "LOSE_RESPONSE": 4,
     "KILL_SERVICE": 5,
+    "IO_ERROR": 6,
+    "REORDER": 7,
 }
 FAULTMODE_NAME = {v: k for k, v in FAULTMODE.items()}
 
@@ -287,7 +289,7 @@ STRUCTS = {
         ("leg", 28, "I", None),
         ("scenario", 32, "Q", None),
         ("seed", 40, "Q", None),
-        ("reserved0", 48, "Q", None),
+        ("stop_at_next_flush", 48, "Q", None),
         ("digest", 56, "B", 32),
     ]),
     "TreeHeader": (8, [
