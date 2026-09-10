@@ -19,5 +19,6 @@ extern int th_errno_storage;
 #define ERANGE 34
 #define ENOSYS 38
 #define EOVERFLOW 75
+#define ETIMEDOUT 110
 #define ECANCELED 125
 #endif

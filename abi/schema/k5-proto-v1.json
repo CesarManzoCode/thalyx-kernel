@@ -1,0 +1,798 @@
+{
+  "schema": "k5-proto-v1",
+  "comment": [
+    "Single source of the protocols the K5 package speaks across its two",
+    "languages. tools/gen_k5_proto.py derives from this file the Rust module",
+    "the supervisor, the work and the services use, and the C header the",
+    "language runtime, the validation tool and the inference engine use.",
+    "Neither is written by hand.",
+    "The K4 store protocol is not here: it is K4's, unchanged, and generated",
+    "from abi/schema/k4-store-v1.json. A port that grew a second persistence",
+    "protocol beside the first would have avoided the interesting half of the",
+    "problem."
+  ],
+  "version": {
+    "major": 1,
+    "minor": 0
+  },
+  "constants": {
+    "CHANNEL_REQUEST_OFFSET": 0,
+    "CHANNEL_REQUEST_MAX": 8192,
+    "CHANNEL_ANSWER_OFFSET": 8192,
+    "CHANNEL_ANSWER_MAX": 16384,
+    "CHANNEL_PROGRAM_OFFSET": 24576,
+    "CHANNEL_PROGRAM_MAX": 8192,
+    "PROMPT_MAX": 4096,
+    "ANSWER_MAX": 4096,
+    "CANDIDATE_MAX": 16384,
+    "CANDIDATE_MAGIC_LOW": 893668931,
+    "CANDIDATE_ENTRIES": 8,
+    "CANDIDATE_FLAG_FUNCTION_BODY": 1
+  },
+  "enums": {
+    "HostOp": [
+      {
+        "name": "REQUEST",
+        "value": 1,
+        "doc": "One Thalyx request: a verb and its arguments."
+      },
+      {
+        "name": "VALIDATE",
+        "value": 2,
+        "doc": "One validation, through the tool the whole verb uses."
+      },
+      {
+        "name": "CHANGED",
+        "value": 3,
+        "doc": "What the workspace really shows changed."
+      },
+      {
+        "name": "MODEL",
+        "value": 4,
+        "doc": "One inference from the resident engine."
+      },
+      {
+        "name": "LOG",
+        "value": 5,
+        "doc": "A line the program printed."
+      },
+      {
+        "name": "ASSERT_FAILED",
+        "value": 6,
+        "doc": "An assertion that did not hold. The latch is on the other side of this call."
+      },
+      {
+        "name": "FINISH",
+        "value": 7,
+        "doc": "The program has finished, and this is how."
+      },
+      {
+        "name": "NEEDS_MODEL",
+        "value": 8,
+        "doc": "The program stopped and asked for a decision it would not make."
+      }
+    ],
+    "Finish": [
+      {
+        "name": "RETURNED",
+        "value": 1,
+        "doc": "It ran to the end and returned a value."
+      },
+      {
+        "name": "NEEDS_MODEL",
+        "value": 2,
+        "doc": "It asked for a decision a machine should not make. Not a success."
+      },
+      {
+        "name": "ASSERTION",
+        "value": 3,
+        "doc": "An assertion said no. Everything after it did not run."
+      },
+      {
+        "name": "THREW",
+        "value": 4,
+        "doc": "It threw something it did not catch."
+      },
+      {
+        "name": "EXHAUSTED",
+        "value": 5,
+        "doc": "A ceiling was reached."
+      },
+      {
+        "name": "REFUSED",
+        "value": 6,
+        "doc": "It could not be read, or the engine could not be built."
+      }
+    ],
+    "Verdict": [
+      {
+        "name": "PASSED",
+        "value": 1
+      },
+      {
+        "name": "FAILED",
+        "value": 2
+      },
+      {
+        "name": "NOT_PROVEN",
+        "value": 3,
+        "doc": "The check could not run. Never a pass."
+      }
+    ],
+    "LaunchOp": [
+      {
+        "name": "RUN_TOOL",
+        "value": 1,
+        "doc": "Run a tool over the sealed candidate lent with this message and report what it did."
+      },
+      {
+        "name": "QUERY",
+        "value": 2,
+        "doc": "What this launcher is and which tools it has images for."
+      },
+      {
+        "name": "START_RUNTIME",
+        "value": 3,
+        "doc": "Build and activate the language runtime over the shared channel, and answer at once: the caller has to be free to serve the calls it will make."
+      },
+      {
+        "name": "STOP_RUNTIME",
+        "value": 4,
+        "doc": "Stop it and retire its scope, whether or not it finished."
+      }
+    ],
+    "LaunchStatus": [
+      {
+        "name": "OK",
+        "value": 0
+      },
+      {
+        "name": "NO_SUCH_TOOL",
+        "value": 1
+      },
+      {
+        "name": "NOT_SEALED",
+        "value": 2,
+        "doc": "The candidate was not a sealed object, or was not lent at all."
+      },
+      {
+        "name": "UNAVAILABLE",
+        "value": 3
+      },
+      {
+        "name": "TIMED_OUT",
+        "value": 4
+      },
+      {
+        "name": "FAULTED",
+        "value": 5
+      }
+    ],
+    "EngineOp": [
+      {
+        "name": "INFER",
+        "value": 1
+      },
+      {
+        "name": "QUERY",
+        "value": 2
+      }
+    ],
+    "EngineStatus": [
+      {
+        "name": "OK",
+        "value": 0
+      },
+      {
+        "name": "INVALID",
+        "value": 1
+      },
+      {
+        "name": "TOO_LONG",
+        "value": 2,
+        "doc": "The prompt did not fit the context, and was not silently cut."
+      },
+      {
+        "name": "NOT_READY",
+        "value": 3
+      },
+      {
+        "name": "NO_BUFFER",
+        "value": 4
+      },
+      {
+        "name": "CANCELLED",
+        "value": 5,
+        "doc": "The work that asked was closed while this was running."
+      }
+    ]
+  },
+  "structs": [
+    {
+      "name": "HostRequest",
+      "doc": "The inline half of a host call; the bytes are in the shared region.",
+      "fields": [
+        {
+          "name": "op",
+          "type": "u32",
+          "doc": "HostOp."
+        },
+        {
+          "name": "request_len",
+          "type": "u32",
+          "doc": "Bytes the runtime wrote at the request offset."
+        },
+        {
+          "name": "cookie",
+          "type": "u64",
+          "doc": "The runtime's own call counter, echoed back."
+        },
+        {
+          "name": "arg0",
+          "type": "u64"
+        },
+        {
+          "name": "arg1",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "HostReply",
+      "doc": "The inline half of a host call's answer.",
+      "fields": [
+        {
+          "name": "status",
+          "type": "u32",
+          "doc": "Zero when the call was served."
+        },
+        {
+          "name": "answer_len",
+          "type": "u32",
+          "doc": "Bytes the work wrote at the answer offset."
+        },
+        {
+          "name": "stopped",
+          "type": "u32",
+          "doc": "Set once the machine has latched and refuses everything after."
+        },
+        {
+          "name": "reserved0",
+          "type": "u32"
+        },
+        {
+          "name": "value",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "RunMetrics",
+      "doc": "What one run of the language runtime produced.",
+      "fields": [
+        {
+          "name": "requests",
+          "type": "u32"
+        },
+        {
+          "name": "validations",
+          "type": "u32"
+        },
+        {
+          "name": "observations",
+          "type": "u32"
+        },
+        {
+          "name": "assertions",
+          "type": "u32"
+        },
+        {
+          "name": "inferences",
+          "type": "u32"
+        },
+        {
+          "name": "finish",
+          "type": "u32",
+          "doc": "Finish."
+        },
+        {
+          "name": "answer_bytes",
+          "type": "u64",
+          "doc": "Bytes of answers the machine handed the program."
+        },
+        {
+          "name": "returned_bytes",
+          "type": "u64",
+          "doc": "Bytes the program returned. The compression's other side."
+        },
+        {
+          "name": "wall_ns",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "LaunchRequest",
+      "doc": "Ask the launcher to run a tool over the candidate lent with this message.",
+      "fields": [
+        {
+          "name": "op",
+          "type": "u32",
+          "doc": "LaunchOp."
+        },
+        {
+          "name": "tool_id",
+          "type": "u32",
+          "doc": "Which tool. A launcher refuses one it has no image for."
+        },
+        {
+          "name": "candidate_len",
+          "type": "u64"
+        },
+        {
+          "name": "candidate_digest",
+          "type": "u8[32]",
+          "doc": "So a verdict can be tied to the bytes it was about."
+        },
+        {
+          "name": "seed",
+          "type": "u64"
+        },
+        {
+          "name": "deadline_ns",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "LaunchReply",
+      "doc": "What the launcher saw the tool do.",
+      "fields": [
+        {
+          "name": "status",
+          "type": "u32",
+          "doc": "LaunchStatus."
+        },
+        {
+          "name": "exit_code",
+          "type": "u32",
+          "doc": "Zero is a pass and only zero is."
+        },
+        {
+          "name": "checks_run",
+          "type": "u32"
+        },
+        {
+          "name": "checks_failed",
+          "type": "u32"
+        },
+        {
+          "name": "cpu_ns",
+          "type": "u64",
+          "doc": "Nanoseconds the tool's own scope was charged."
+        },
+        {
+          "name": "pages",
+          "type": "u64",
+          "doc": "Pages its scope held at its most."
+        },
+        {
+          "name": "tool_id",
+          "type": "u64",
+          "doc": "The tool identity that actually ran."
+        },
+        {
+          "name": "tool_config_digest",
+          "type": "u8[32]"
+        },
+        {
+          "name": "bytes_read",
+          "type": "u64",
+          "doc": "Bytes of the candidate the tool actually read, as the tool reported them."
+        },
+        {
+          "name": "candidate_sum",
+          "type": "u64",
+          "doc": "A digest over those bytes, so a verdict names what it was about."
+        }
+      ]
+    },
+    {
+      "name": "CandidateHeader",
+      "doc": "The header of a sealed candidate: what a tool is given, and nothing else.",
+      "fields": [
+        {
+          "name": "magic",
+          "type": "u32",
+          "doc": "CANDIDATE_MAGIC_LOW."
+        },
+        {
+          "name": "version",
+          "type": "u32"
+        },
+        {
+          "name": "count",
+          "type": "u32",
+          "doc": "Names bound in this candidate."
+        },
+        {
+          "name": "reserved0",
+          "type": "u32"
+        },
+        {
+          "name": "seed",
+          "type": "u64",
+          "doc": "The run's seed, so a tool cannot precompute a verdict."
+        },
+        {
+          "name": "total_bytes",
+          "type": "u64"
+        },
+        {
+          "name": "root_digest",
+          "type": "u8[32]",
+          "doc": "The candidate root this was assembled from."
+        }
+      ]
+    },
+    {
+      "name": "CandidateEntry",
+      "doc": "One name of a sealed candidate.",
+      "fields": [
+        {
+          "name": "offset",
+          "type": "u64",
+          "doc": "Where its bytes start, from the beginning of the object."
+        },
+        {
+          "name": "length",
+          "type": "u64"
+        },
+        {
+          "name": "name_len",
+          "type": "u32"
+        },
+        {
+          "name": "flags",
+          "type": "u32",
+          "doc": "Bit 0: the content is a function body, not a script, and a tool has to compile it the way the runtime executes it."
+        },
+        {
+          "name": "name",
+          "type": "u8[32]"
+        }
+      ]
+    },
+    {
+      "name": "ToolReport",
+      "doc": "What a validation tool says about a candidate, in the region it shares.",
+      "fields": [
+        {
+          "name": "checks_run",
+          "type": "u32"
+        },
+        {
+          "name": "checks_failed",
+          "type": "u32"
+        },
+        {
+          "name": "parsed",
+          "type": "u32",
+          "doc": "Files the tool compiled."
+        },
+        {
+          "name": "parse_failed",
+          "type": "u32"
+        },
+        {
+          "name": "bytes_read",
+          "type": "u64",
+          "doc": "Bytes of the candidate it actually read."
+        },
+        {
+          "name": "candidate_sum",
+          "type": "u64",
+          "doc": "A digest over those bytes, so a verdict names what it was about."
+        },
+        {
+          "name": "first_failure",
+          "type": "u8[64]",
+          "doc": "The first check that did not hold, as the tool worded it."
+        }
+      ]
+    },
+    {
+      "name": "EngineRequest",
+      "doc": "Ask the engine for one inference.",
+      "fields": [
+        {
+          "name": "op",
+          "type": "u32",
+          "doc": "EngineOp."
+        },
+        {
+          "name": "predict",
+          "type": "u32",
+          "doc": "Tokens to generate at most."
+        },
+        {
+          "name": "prompt_len",
+          "type": "u32",
+          "doc": "Bytes of prompt in the lent buffer."
+        },
+        {
+          "name": "reserved0",
+          "type": "u32"
+        },
+        {
+          "name": "seed",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "EngineReply",
+      "doc": "What the engine did.",
+      "fields": [
+        {
+          "name": "status",
+          "type": "u32",
+          "doc": "EngineStatus."
+        },
+        {
+          "name": "prompt_tokens",
+          "type": "u32"
+        },
+        {
+          "name": "generated",
+          "type": "u32"
+        },
+        {
+          "name": "answer_len",
+          "type": "u32"
+        },
+        {
+          "name": "elapsed_ns",
+          "type": "u64",
+          "doc": "How long this inference took."
+        },
+        {
+          "name": "load_ns",
+          "type": "u64",
+          "doc": "How long the weights took to load. Every answer carries it, so residency is a number a caller sees."
+        },
+        {
+          "name": "served",
+          "type": "u64",
+          "doc": "Inferences served since loading."
+        },
+        {
+          "name": "first_token",
+          "type": "u32",
+          "doc": "The first token chosen, so two engines are comparable on a decision."
+        },
+        {
+          "name": "first_margin_ppm",
+          "type": "u32",
+          "doc": "The margin that decision won by. A comparison of decisions is only meaningful when the decision was not a tie."
+        },
+        {
+          "name": "token_digest",
+          "type": "u64",
+          "doc": "A digest over every token generated."
+        },
+        {
+          "name": "weight_bytes",
+          "type": "u64",
+          "doc": "Bytes of weights held resident."
+        }
+      ]
+    }
+  ],
+  "notes": {
+    "VERSION_SEEN": {
+      "value": 20992,
+      "doc": "The work read the published version. Value: the generation."
+    },
+    "CONTEXT_ANSWERED": {
+      "value": 20993,
+      "doc": "The work asked for context about a name. Value: uses found."
+    },
+    "WORKSPACE_OPEN": {
+      "value": 20994,
+      "doc": "A private workspace was opened over a version. Value: the workspace id."
+    },
+    "WORKSPACE_WROTE": {
+      "value": 20995,
+      "doc": "A name was bound in the workspace. Value: bytes of the object."
+    },
+    "CANDIDATE_FROZEN": {
+      "value": 20996,
+      "doc": "The workspace was frozen into a candidate. Value: entries."
+    },
+    "CANDIDATE_SEALED": {
+      "value": 20997,
+      "doc": "A candidate was sealed into a memory object. Value: bytes."
+    },
+    "TOOL_VERDICT": {
+      "value": 20998,
+      "doc": "A tool ran over the candidate. Value: its exit code."
+    },
+    "TOOL_COST": {
+      "value": 20999,
+      "doc": "The tool's own accounting, as the launcher measured it. Value: ns."
+    },
+    "VALIDATION_STAGED": {
+      "value": 21000,
+      "doc": "A validation record was staged. Value: its result."
+    },
+    "PUBLISHED": {
+      "value": 21001,
+      "doc": "A publication succeeded. Value: the new generation."
+    },
+    "PUBLISH_REFUSED": {
+      "value": 21002,
+      "doc": "A publication was refused. Value: the store status."
+    },
+    "ABANDONED": {
+      "value": 21003,
+      "doc": "The work abandoned on purpose. Value: the workspace it discarded."
+    },
+    "EVIDENCE_WRITTEN": {
+      "value": 21004,
+      "doc": "Evidence was written durably. Value: bytes."
+    },
+    "EVIDENCE_READ": {
+      "value": 21005,
+      "doc": "Evidence was read back from a published version. Value: bytes."
+    },
+    "WORK_DONE": {
+      "value": 21006,
+      "doc": "The work finished its script. Value: the role."
+    },
+    "STORE_REFUSED": {
+      "value": 21007,
+      "doc": "The state service refused something. Value: the store status."
+    },
+    "FINAL_GENERATION": {
+      "value": 21008,
+      "doc": "The published version after the work ended. Value: the generation."
+    },
+    "CANCELLED": {
+      "value": 21009,
+      "doc": "The work was asked to stop and did. Value: where it was."
+    },
+    "WORK_CPU": {
+      "value": 21010,
+      "doc": "The work's own scope accounting. Value: nanoseconds it was charged."
+    },
+    "WORK_UNEXPECTED": {
+      "value": 21011,
+      "doc": "A step the work did not expect. Value: what it saw."
+    },
+    "ROOT_PREFIX": {
+      "value": 21012,
+      "doc": "The digest of the root this work published or tried to. Value: prefix."
+    },
+    "PROGRAM_COMPILED": {
+      "value": 21248,
+      "doc": "The runtime compiled the program. Value: bytes of source."
+    },
+    "PROGRAM_REFUSED": {
+      "value": 21249,
+      "doc": "The runtime refused to compile the program. Value: where."
+    },
+    "HOSTCALL": {
+      "value": 21250,
+      "doc": "The program made a hostcall. Value: the verb."
+    },
+    "PROGRAM_FINISH": {
+      "value": 21251,
+      "doc": "The program finished. Value: the finish kind."
+    },
+    "PROGRAM_CEILING": {
+      "value": 21252,
+      "doc": "A ceiling the runtime enforced. Value: which one."
+    },
+    "PROGRAM_LATCHED": {
+      "value": 21253,
+      "doc": "An assertion latched. Value: the call it latched on."
+    },
+    "PROGRAM_MEMORY": {
+      "value": 21254,
+      "doc": "The runtime's own memory ceiling, as the engine reports it. Value: bytes."
+    },
+    "REFUSED_AFTER_LATCH": {
+      "value": 21255,
+      "doc": "A hostcall was refused after the latch. Value: the verb."
+    },
+    "TOOL_START": {
+      "value": 21504,
+      "doc": "The tool started over a candidate. Value: bytes it was given."
+    },
+    "TOOL_PARSED": {
+      "value": 21505,
+      "doc": "The tool parsed a file. Value: bytes."
+    },
+    "TOOL_PARSE_FAILED": {
+      "value": 21506,
+      "doc": "The tool refused a file. Value: where the syntax error was."
+    },
+    "TOOL_CHECK": {
+      "value": 21507,
+      "doc": "The tool ran a check. Value: which."
+    },
+    "TOOL_CHECK_FAILED": {
+      "value": 21508,
+      "doc": "A check did not hold. Value: which."
+    },
+    "TOOL_DONE": {
+      "value": 21509,
+      "doc": "The tool finished. Value: its exit code."
+    },
+    "ENGINE_LOADED": {
+      "value": 21760,
+      "doc": "The engine loaded its weights. Value: nanoseconds it took."
+    },
+    "ENGINE_WEIGHTS": {
+      "value": 21761,
+      "doc": "Bytes of weights the engine holds. Value: bytes."
+    },
+    "ENGINE_SERVED": {
+      "value": 21762,
+      "doc": "An inference was served. Value: which one since loading."
+    },
+    "ENGINE_TOKEN": {
+      "value": 21763,
+      "doc": "The first token of an answer. Value: the token identifier."
+    },
+    "ENGINE_MARGIN": {
+      "value": 21764,
+      "doc": "The margin the first decision won by, in parts per million."
+    },
+    "ENGINE_DIGEST": {
+      "value": 21765,
+      "doc": "A digest over every token of one answer."
+    },
+    "ENGINE_BOUND": {
+      "value": 21766,
+      "doc": "The engine bound a worker to the invocation. Value: the invocation."
+    },
+    "ENGINE_ELAPSED": {
+      "value": 21767,
+      "doc": "Nanoseconds one inference took, by the engine's own clock."
+    },
+    "ENGINE_REFUSED": {
+      "value": 21768,
+      "doc": "The engine refused a request. Value: the status."
+    },
+    "ENGINE_PROMPT": {
+      "value": 21769,
+      "doc": "The prompt the engine actually read, as a digest of its bytes."
+    },
+    "LAUNCH_BUILT": {
+      "value": 22016,
+      "doc": "A tool domain was built. Value: the tool identity."
+    },
+    "LAUNCH_RETIRED": {
+      "value": 22017,
+      "doc": "A tool domain was retired. Value: pages its scope had held."
+    },
+    "LAUNCH_REFUSED": {
+      "value": 22018,
+      "doc": "A launch was refused. Value: the launcher status."
+    },
+    "LAUNCH_NOT_SEALED": {
+      "value": 22019,
+      "doc": "The candidate a launch was given was not sealed. Value: its state."
+    },
+    "TOOL_READ": {
+      "value": 21013,
+      "doc": "Bytes of the candidate the tool read, with the checks it ran and failed."
+    },
+    "TOOL_SUM": {
+      "value": 21014,
+      "doc": "The digest the tool computed over the bytes it actually read."
+    }
+  }
+}

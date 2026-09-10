@@ -78,6 +78,7 @@ WARNINGS = ["-Wall", "-Wextra", "-Wno-unused-parameter"]
 
 RUNTIME_SOURCES = [
     "start.S",
+    "civil.c",
     "boot.c",
     "sys.c",
     "string.c",
@@ -182,27 +183,90 @@ def digest(path: Path) -> str:
 
 PROGRAMS: dict[str, dict] = {}
 
+# The language runtime is fetched rather than vendored; see tools/fetch_quickjs.py
+# and OQ-14. It is compiled here for the native target with the same flags as
+# everything else, plus the two the engine's own build defines.
+QUICKJS_DIR = ROOT / "build" / "vendor" / "quickjs"
+QUICKJS_SOURCES = ["quickjs.c", "libregexp.c", "libunicode.c", "dtoa.c"]
+QUICKJS_CFLAGS = ["-DNDEBUG", "-D_GNU_SOURCE", "-Wno-implicit-fallthrough",
+                  "-Wno-sign-compare", "-Wno-unused-but-set-variable"]
+
+
+def ensure_quickjs() -> Path:
+    """Fetches the pinned runtime if it is not already unpacked."""
+    if not (QUICKJS_DIR / "quickjs.c").exists():
+        run([sys.executable, str(ROOT / "tools/fetch_quickjs.py")])
+    return QUICKJS_DIR
+
+
+def build_quickjs() -> Path:
+    source_dir = ensure_quickjs()
+    archive = BUILD / "libquickjs.a"
+    objects = []
+    for name in QUICKJS_SOURCES:
+        obj = BUILD / "quickjs" / (name + ".o")
+        compile_one(source_dir / name, obj, QUICKJS_CFLAGS + [f"-I{source_dir}"],
+                    ["-w"])
+        objects.append(obj)
+    if archive.exists():
+        archive.unlink()
+    run(["ar", "rcs", str(archive)] + [str(o) for o in objects], quiet=True)
+    return archive
+
+
+def embed_text(source: Path, destination: Path, symbol: str) -> None:
+    """Turns a text file into a C string, so a program carries it in `.rodata`.
+
+    The prelude is JavaScript and belongs in a `.js` file that an editor and a
+    reader can treat as one; this is how it reaches the image without a
+    filesystem to read it from."""
+    text = source.read_bytes()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    lines = [f"/* Generated from {source.name}. Do not edit. */",
+             f"static const char {symbol}[] ="]
+    for line in text.split(b"\n"):
+        escaped = (
+            line.decode("utf-8")
+            .replace("\\", "\\\\")
+            .replace('"', '\\"')
+        )
+        lines.append(f'    "{escaped}\\n"')
+    lines.append(";")
+    destination.write_text("\n".join(lines) + "\n")
+
 
 def register(name: str, sources: list[str], extra_cflags: list[str] | None = None,
-             warnings: list[str] | None = None, extra_dirs: list[str] | None = None) -> None:
+             warnings: list[str] | None = None, extra_dirs: list[str] | None = None,
+             quickjs: bool = False, embed: list[tuple[str, str, str]] | None = None) -> None:
     PROGRAMS[name] = {
         "sources": sources,
         "cflags": extra_cflags or [],
         "warnings": WARNINGS if warnings is None else warnings,
         "dirs": extra_dirs or [],
+        "quickjs": quickjs,
+        "embed": embed or [],
     }
 
 
 def build_program(name: str, archive: Path) -> Path:
     spec = PROGRAMS[name]
-    objects: list[Path] = []
+    generated = BUILD / name / "generated"
+    for symbol, source, destination in spec["embed"]:
+        embed_text(ROOT / source, generated / destination, symbol)
     extra = spec["cflags"] + [f"-I{ROOT / d}" for d in spec["dirs"]]
+    if spec["embed"]:
+        extra.append(f"-I{generated}")
+    extras: list[Path] = []
+    if spec["quickjs"]:
+        extra.append(f"-I{QUICKJS_DIR}")
+        extras.append(build_quickjs())
+    objects: list[Path] = []
     for relative in spec["sources"]:
         source = ROOT / relative
         obj = BUILD / name / (Path(relative).name + ".o")
         compile_one(source, obj, extra, spec["warnings"])
         objects.append(obj)
-    return link(name, objects, archive, [])
+    return link(name, objects, archive, extras)
 
 
 def main() -> int:
@@ -236,6 +300,13 @@ def main() -> int:
 
 
 register("nsmoke", ["user/nsmoke/main.c"])
+register("ncheck", ["user/ncheck/main.c"], quickjs=True)
+register(
+    "nhacer",
+    ["user/nhacer/main.c"],
+    quickjs=True,
+    embed=[("PRELUDE", "user/nhacer/prelude.js", "prelude.inc")],
+)
 
 if __name__ == "__main__":
     raise SystemExit(main())

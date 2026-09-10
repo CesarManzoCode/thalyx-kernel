@@ -22,7 +22,12 @@
 #![no_std]
 #![no_main]
 
+mod audit;
 mod launch;
+mod launcher;
+mod services;
+mod surface;
+mod work;
 
 use thalyx_abi::{boot_handle, handle as make_handle};
 use thalyx_abi::{boot_slot, domain_state, memory_state, right, status};
@@ -32,11 +37,11 @@ use thalyx_user_rt::k2::{self, name16, report};
 use thalyx_user_rt::{self as rt, entry};
 
 /// Boot slots that may hold a sealed image object.
-const MAX_IMAGES: u32 = 16;
+pub const MAX_IMAGES: u32 = 16;
 
 /// Notes this supervisor emits. Their own range, so a K5 note can never be read
 /// as a K2, K3 or K4 one by a gate reading one log.
-mod note {
+pub mod note {
     /// The supervisor started. Value: the stage it was told to run.
     pub const STAGE: u64 = 0x5000;
     /// A native image was read and published a record. Value: its trampoline.
@@ -53,11 +58,33 @@ mod note {
     pub const SCOPE_PAGES: u64 = 0x5015;
     /// The scope of a domain, after it ran. Value: nanoseconds it spent.
     pub const SCOPE_CPU: u64 = 0x5016;
+    /// A service of the port was built. Value: which one.
+    pub const SERVICE_BUILT: u64 = 0x5017;
+    /// The state service reported it is admitting requests.
+    pub const STORE_READY: u64 = 0x5018;
+    /// A work domain was built. Value: its role.
+    pub const WORK_BUILT: u64 = 0x5019;
+    /// The run directive the host wrote on the medium. Value: packed.
+    pub const DIRECTIVE: u64 = 0x501A;
+    /// The state service asked for the run to end at a named point.
+    pub const CUT: u64 = 0x501B;
+    /// The supervisor's own view of a scope after its domain ran.
+    pub const SCOPE_AFTER: u64 = 0x501C;
+    /// An effect receipt the auditor read. Value: the object it names.
+    pub const AUDIT_EFFECT: u64 = 0x501D;
+    /// Receipts read and acknowledged over the run.
+    pub const AUDIT_DRAINED: u64 = 0x501E;
+    /// Effect receipts among them.
+    pub const AUDIT_EFFECTS: u64 = 0x501F;
+    /// The fullest the control log was observed, and any gaps in its sequence.
+    pub const AUDIT_HIGH_WATER: u64 = 0x5020;
+    /// Receipts the kernel had to drop.
+    pub const AUDIT_LOST: u64 = 0x5021;
     /// The run reached its end. Value: domains that finished cleanly.
     pub const DONE: u64 = 0x50FF;
 }
 
-fn image_named(label: &str) -> Option<u64> {
+pub fn image_named(label: &str) -> Option<u64> {
     let wanted = name16(label);
     for offset in 0..MAX_IMAGES {
         let handle = boot_handle(boot_slot::FIRST_MODULE + offset);
@@ -81,12 +108,27 @@ fn image_named(label: &str) -> Option<u64> {
 fn plan() -> Option<native::Plan> {
     let handle = image_named("k5plan")?;
     let mut bytes = [0u8; size_of::<native::Plan>()];
-    k2::memory_read(handle, 0, &mut bytes).ok()?;
+    let read = k2::memory_read(handle, 0, &mut bytes);
+    // The plan is read once and never again; the handle is a grant somebody
+    // else will need a slot for.
+    let _ = k2::cap_close(handle);
+    read.ok()?;
     let plan = native::Plan::read_from(&bytes, 0)?;
     if plan.magic != native::PLAN_MAGIC {
         return None;
     }
     Some(plan)
+}
+
+/// Binds a facet on an endpoint and says which one the kernel assigned.
+///
+/// The facet number is the kernel's to give, not the caller's to choose: the
+/// request carries zero and the grant comes back carrying the number. That is
+/// what makes a facet an identity rather than a claim.
+pub fn bind_facet(endpoint: u64, rights: u32) -> Option<(u64, u64)> {
+    let handle = k2::endpoint_bind_facet(endpoint, 0, rights | right::TRANSFER, 0).ok()?;
+    let info = k2::cap_inspect(handle).ok()?;
+    Some((handle, info.facet))
 }
 
 fn scope_report(scope: u64) {
@@ -214,15 +256,27 @@ fn run() -> ! {
         k2::note(note::BUILD_STEP_FAILED, 90);
         rt::exit(1)
     };
-    let Ok(receiver) = k2::derive(supervision, right::INSPECT | right::ENDPOINT_RECEIVE, 0, 0)
-    else {
-        k2::note(note::BUILD_STEP_FAILED, 91);
-        rt::exit(1)
-    };
-    let _ = receiver;
 
     let ok = match plan.stage {
         native::stage::SMOKE => smoke_stage(system, supervision, plan.seed),
+        native::stage::SURFACE => surface::run(
+            system,
+            supervision,
+            &plan,
+            &surface::Shape {
+                uses_runtime: false,
+                uses_engine: false,
+            },
+        ),
+        native::stage::WORK => surface::run(
+            system,
+            supervision,
+            &plan,
+            &surface::Shape {
+                uses_runtime: true,
+                uses_engine: false,
+            },
+        ),
         _ => {
             k2::note(note::BUILD_STEP_FAILED, 88);
             false

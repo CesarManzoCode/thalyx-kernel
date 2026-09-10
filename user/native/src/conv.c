@@ -65,6 +65,9 @@ unsigned long strtoul(const char *s, char **end, int base)
 }
 
 int atoi(const char *s) { return (int)strtoll(s, NULL, 10); }
+int abs(int value) { return value < 0 ? -value : value; }
+long labs(long value) { return value < 0 ? -value : value; }
+long long llabs(long long value) { return value < 0 ? -value : value; }
 
 double strtod(const char *s, char **end)
 {

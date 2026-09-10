@@ -147,6 +147,8 @@ double modf(double x, double *integral)
 double fmin(double x, double y) { if (isnan(x)) { return y; } if (isnan(y)) { return x; } return x < y ? x : y; }
 double fmax(double x, double y) { if (isnan(x)) { return y; } if (isnan(y)) { return x; } return x > y ? x : y; }
 double nan(const char *tag) { (void)tag; return NAN; }
+long lrint(double x) { return (long)rint(x); }
+long long llrint(double x) { return (long long)rint(x); }
 
 /* ------------------------------------------------------------------ log */
 

@@ -39,6 +39,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import check_k4 as k4gate  # noqa: E402
 
 # Mirrors `thalyx_kernel::diag::FORMAT`.
 FORMAT = "THLX1"
@@ -84,7 +86,68 @@ NOTE = {
     "smoke_heap_error": 0x5108,
     "smoke_heap_held": 0x5109,
     "smoke_done": 0x51FF,
+    # the supervisor's auditor
+    "service_built": 0x5017,
+    "store_ready": 0x5018,
+    "work_built": 0x5019,
+    "directive": 0x501A,
+    "cut": 0x501B,
+    "scope_after": 0x501C,
+    "audit_effect": 0x501D,
+    "audit_drained": 0x501E,
+    "audit_effects": 0x501F,
+    "audit_high_water": 0x5020,
+    "audit_lost": 0x5021,
+    # the work domain
+    "version_seen": 0x5200,
+    "context_answered": 0x5201,
+    "workspace_open": 0x5202,
+    "workspace_wrote": 0x5203,
+    "candidate_frozen": 0x5204,
+    "candidate_sealed": 0x5205,
+    "tool_verdict": 0x5206,
+    "tool_cost": 0x5207,
+    "validation_staged": 0x5208,
+    "published": 0x5209,
+    "publish_refused": 0x520A,
+    "abandoned": 0x520B,
+    "evidence_written": 0x520C,
+    "evidence_read": 0x520D,
+    "work_done": 0x520E,
+    "store_refused": 0x520F,
+    "final_generation": 0x5210,
+    "cancelled": 0x5211,
+    "work_cpu": 0x5212,
+    "work_unexpected": 0x5213,
+    "root_prefix": 0x5214,
+    "tool_read": 0x5215,
+    "tool_sum": 0x5216,
+    # the language runtime
+    "program_compiled": 0x5300,
+    "program_refused": 0x5301,
+    "hostcall": 0x5302,
+    "program_finish": 0x5303,
+    "program_ceiling": 0x5304,
+    "program_latched": 0x5305,
+    # the validation tool
+    "tool_start": 0x5400,
+    "tool_parsed": 0x5401,
+    "tool_parse_failed": 0x5402,
+    "tool_check": 0x5403,
+    "tool_check_failed": 0x5404,
+    "tool_done": 0x5405,
+    # the launcher
+    "launch_built": 0x5600,
+    "launch_retired": 0x5601,
+    "launch_refused": 0x5602,
+    "launch_not_sealed": 0x5603,
 }
+
+# `thalyx_user_k5pkg::generated::finish`.
+FINISH = {"returned": 1, "needs_model": 2, "assertion": 3, "threw": 4,
+          "exhausted": 5, "refused": 6}
+# `thalyx_user_k5pkg::generated::verdict`.
+VERDICT = {"passed": 1, "failed": 2, "not_proven": 3}
 
 STATUS = {"OK": 0, "LIMIT_EXHAUSTED": -9, "INSUFFICIENT_RIGHTS": -4}
 
@@ -444,6 +507,540 @@ def check_native_exit(runs: dict[str, Run]) -> Result:
     return result
 
 
+# --- the surface stage ------------------------------------------------------
+
+
+def stage_run(runs: dict[str, Run], stage: str) -> Run | None:
+    for run in runs.values():
+        manifest = run.spec.get("image_manifest") or {}
+        if manifest.get("stage") == stage:
+            return run
+    return None
+
+
+def seed_of(run: Run) -> int | None:
+    manifest = run.spec.get("image_manifest") or {}
+    return manifest.get("seed")
+
+
+def check_port_services(runs: dict[str, Run]) -> Result:
+    """The port stands on K4's service and K4's driver, rebuilt into this
+    package. The kernel's own records say which domains were built."""
+    result = Result(
+        "port_services",
+        "the port ran on the K4 block driver and the K4 managed-state service",
+    )
+    run = stage_run(runs, "surface")
+    if run is None:
+        result.detail = "no surface run"
+        return result
+    names = {
+        record.get("name")
+        for record in by_event(run.records, "domain.created")
+    }
+    wanted = {"k5disk", "k5store", "k5pub"}
+    built = note_values(run.records, "service_built", "supervisor")
+    ready = note_values(run.records, "store_ready", "supervisor")
+    result.passed = wanted <= names and built == [1, 2] and ready == [1]
+    result.detail = (
+        f"domains {sorted(names - {'supervisor'})}, services built {built}, service ready {ready}"
+    )
+    result.evidence = [
+        line_of(record)
+        for record in by_event(run.records, "domain.created")
+        if record.get("name") in wanted
+    ]
+    return result
+
+
+def check_vertical_shape(runs: dict[str, Run]) -> Result:
+    """The vertical, in the order the phase names it, from the work's notes."""
+    result = Result(
+        "vertical_shape",
+        "version identified, context answered, workspace opened, change made, published (program notes)",
+    )
+    run = stage_run(runs, "surface")
+    if run is None:
+        result.detail = "no surface run"
+        return result
+    seen = note_values(run.records, "version_seen", "k5pub")
+    context = note_values(run.records, "context_answered", "k5pub")
+    opened = note_values(run.records, "workspace_open", "k5pub")
+    frozen = note_values(run.records, "candidate_frozen", "k5pub")
+    published = note_values(run.records, "published", "k5pub")
+    final = note_values(run.records, "final_generation", "k5pub")
+    unexpected = note_values(run.records, "work_unexpected", "k5pub")
+    # The second sighting packs the generation the work was against in the low
+    # half and how many names that version bound in the high half.
+    against = [value & 0xFFFFFFFF for value in seen]
+    bound = [value >> 32 for value in seen]
+    result.passed = (
+        against == [0, 1]
+        and bound == [0, 4]
+        and bool(context)
+        and context[0] >= 2
+        and len(opened) == 2
+        and len(frozen) == 2
+        and published == [1, 2]
+        and final == [2]
+        and not unexpected
+    )
+    result.detail = (
+        f"versions the work was against {against} binding {bound} names, "
+        f"uses of `checksum` {context}, workspaces {len(opened)}, "
+        f"candidates {len(frozen)}, generations published {published}, final {final}, "
+        f"unexpected {unexpected}"
+    )
+    result.evidence = [line_of(r) for r in notes(run.records, NOTE["published"], "k5pub")]
+    return result
+
+
+def check_verbs_drove_the_change(runs: dict[str, Run]) -> Result:
+    """Every change went through the verb surface, and the surface said what it
+    did. The names are the ones the port answers, spelled as Thalyx spells
+    them."""
+    result = Result(
+        "verb_surface",
+        "the change was made through the Thalyx verb surface and nowhere else (program notes)",
+    )
+    run = stage_run(runs, "surface")
+    if run is None:
+        result.detail = "no surface run"
+        return result
+    calls = note_values(run.records, "hostcall", "k5pub")
+    spelled = []
+    for value in calls:
+        text = value.to_bytes(8, "big").lstrip(b"\x00").decode("utf-8", "replace")
+        spelled.append(text)
+    # The plane carries two integers, so a name longer than eight bytes arrives
+    # as its first eight. `sustituir` is nine, and the gate compares what the
+    # channel can carry rather than pretending it carried more.
+    wanted = [name[:8] for name in
+              ["estado", "contexto", "leer", "sustituir", "leer", "cambios", "buscar"]]
+    result.passed = spelled == wanted
+    result.detail = f"calls {spelled}"
+    result.evidence = [line_of(r) for r in notes(run.records, NOTE["hostcall"], "k5pub")][:4]
+    return result
+
+
+def check_published_bytes(runs: dict[str, Run]) -> Result:
+    """The decisive one, and the only one the guest does not narrate.
+
+    The medium is decoded here by the module the K4 schema generates. The seed
+    version's module carries sixteen zeroes; the published one carries the run's
+    seed in hexadecimal, which the host chose and wrote into the image. A guest
+    that had not done the work could not have put those bytes there."""
+    result = Result(
+        "published_bytes",
+        "the medium carries a published version whose module bears this run's seed",
+    )
+    run = stage_run(runs, "surface")
+    if run is None or not run.medium:
+        result.detail = "no surface medium"
+        return result
+    seed = seed_of(run)
+    if seed is None:
+        result.detail = "the run does not record a seed"
+        return result
+    expected = f"{seed:016x}".encode()
+    store = k4gate.read_store(run.medium)
+    commits = k4gate.commits(store)
+    objects = k4gate.objects(store)
+    marks = []
+    for content in (entry.get("content", b"") for entry in objects.values()):
+        at = content.find(b'var MARK = "')
+        if at >= 0:
+            marks.append(content[at + 12 : at + 28])
+    generations = [commit["new_generation"] for commit in commits]
+    final_root = commits[-1]["root_digest"] if commits else None
+    reachable = k4gate.reachable_from(store, final_root) if final_root else None
+    result.passed = (
+        generations == [1, 2]
+        and sorted(marks) == sorted([b"0" * 16, expected])
+        and reachable is not None
+        and len(reachable) >= 6
+    )
+    result.detail = (
+        f"generations {generations}, marks {[m.decode() for m in marks]}, "
+        f"expected {expected.decode()}, objects reachable from the final root "
+        f"{len(reachable) if reachable else 0}"
+    )
+    result.evidence = [
+        f"commit generation={commit['new_generation']} root={commit['root_digest'].hex()[:16]}"
+        for commit in commits
+    ]
+    return result
+
+
+def check_evidence_survives(runs: dict[str, Run]) -> Result:
+    """The work read its own published version back through the service, by the
+    path anybody else would use, and found the change it had made."""
+    result = Result(
+        "evidence_readable",
+        "the published version was read back through the service and carries the change",
+    )
+    run = stage_run(runs, "surface")
+    if run is None:
+        result.detail = "no surface run"
+        return result
+    read = note_values(run.records, "evidence_read", "k5pub")
+    names = [value & 0xFFFFFFFF for value in read]
+    marked = [(value >> 32) & 1 for value in read]
+    result.passed = names == [4] and marked == [1]
+    result.detail = f"names in the published version {names}, carries the mark {marked}"
+    result.evidence = [line_of(r) for r in notes(run.records, NOTE["evidence_read"], "k5pub")]
+    return result
+
+
+def check_control_plane(runs: dict[str, Run]) -> Result:
+    """Every publication was an effect the kernel admitted and wrote a receipt
+    for, and the auditor read them. The receipts are the account of the run
+    that is not the work's own."""
+    result = Result(
+        "control_receipts",
+        "the kernel admitted one effect per publication and the auditor read every receipt",
+    )
+    run = stage_run(runs, "surface")
+    if run is None:
+        result.detail = "no surface run"
+        return result
+    effects = note_values(run.records, "audit_effects", "supervisor")
+    drained = note_values(run.records, "audit_drained", "supervisor")
+    lost = note_values(run.records, "audit_lost", "supervisor")
+    high = note_values(run.records, "audit_high_water", "supervisor")
+    gaps = [value >> 32 for value in high]
+    kernel_effects = [
+        record
+        for record in by_event(run.records, "ctrl.receipt")
+        if record.number("kind") == 2
+    ]
+    exhausted = by_event(run.records, "k2.admission_exhausted")
+    result.passed = (
+        effects == [2]
+        and len(kernel_effects) == 2
+        and lost == [0]
+        and gaps == [0]
+        and bool(drained)
+        and drained[0] >= 2
+        and not exhausted
+    )
+    result.detail = (
+        f"effect receipts the kernel wrote {len(kernel_effects)}, the auditor counted {effects}, "
+        f"receipts drained {drained}, lost {lost}, gaps {gaps}, "
+        f"admissions refused for a full log {len(exhausted)}"
+    )
+    result.evidence = [line_of(record) for record in kernel_effects]
+    return result
+
+
+def check_work_confinement(runs: dict[str, Run]) -> Result:
+    """What the work could not do, said as a fact about its capability table.
+
+    A work domain never holds a device capability and never builds a domain, so
+    the kernel's records must show no device operation and no domain creation
+    charged to it."""
+    result = Result(
+        "work_confinement",
+        "the work domain reached the medium only through the service, and built nothing",
+    )
+    run = stage_run(runs, "surface")
+    if run is None:
+        result.detail = "no surface run"
+        return result
+    refused = [
+        record
+        for record in by_event(run.records, "k2.refused")
+        if record.get("name") == "k5pub"
+    ]
+    created_by_work = [
+        record
+        for record in by_event(run.records, "domain.created")
+        if record.get("name") not in {"supervisor", "k5disk", "k5store", "k5pub"}
+    ]
+    device_ops = [
+        record
+        for record in run.records
+        if record.event.startswith("device.") and record.get("name") == "k5pub"
+    ]
+    result.passed = not created_by_work and not device_ops and not refused
+    result.detail = (
+        f"domains it built {len(created_by_work)}, device operations {len(device_ops)}, "
+        f"operations the kernel refused it {len(refused)}"
+    )
+    return result
+
+
+# --- the work stage ---------------------------------------------------------
+
+
+def check_language_runtime(runs: dict[str, Run]) -> Result:
+    """Real QuickJS, in a domain the kernel built from a C image, executing a
+    program that came out of managed state."""
+    result = Result(
+        "language_runtime",
+        "the language runtime ran natively and compiled the program from the published version",
+    )
+    run = stage_run(runs, "work")
+    if run is None:
+        result.detail = "no work run"
+        return result
+    created = [r for r in by_event(run.records, "domain.created") if r.get("name") == "nhacer"]
+    activated = [r for r in by_event(run.records, "domain.activated") if r.get("name") == "nhacer"]
+    compiled = note_values(run.records, "program_compiled", "nhacer")
+    refused = note_values(run.records, "program_refused", "nhacer")
+    # The program is `program.js` of the published version; its length is what
+    # the medium says it is.
+    published = published_lengths(run)
+    expected = published.get(b"program.js")
+    result.passed = (
+        bool(created)
+        and bool(activated)
+        and compiled == [expected]
+        and expected is not None
+        and not refused
+    )
+    result.detail = (
+        f"built={len(created)} activated={len(activated)} compiled={compiled} bytes, "
+        f"the medium says program.js is {expected} bytes, refusals {len(refused)}"
+    )
+    result.evidence = [line_of(r) for r in created + activated][:3]
+    return result
+
+
+def published_lengths(run: Run) -> dict[bytes, int]:
+    """The names and lengths of the version the medium says was published."""
+    if not run.medium:
+        return {}
+    store = k4gate.read_store(run.medium)
+    commits = k4gate.commits(store)
+    if not commits:
+        return {}
+    objects = k4gate.objects(store)
+    root = commits[-1]["root_digest"]
+    manifest = objects.get(root)
+    if manifest is None:
+        return {}
+    body = k4gate.fmt.decode("Manifest", manifest["content"], 0)
+    tree = objects.get(bytes(body["tree_digest"]))
+    if tree is None:
+        return {}
+    header = k4gate.fmt.decode("TreeHeader", tree["content"], 0)
+    out: dict[bytes, int] = {}
+    at = k4gate.fmt.STRUCTS["TreeHeader"][0]
+    width = k4gate.fmt.STRUCTS["TreeEntry"][0]
+    for index in range(header["entry_count"]):
+        entry = k4gate.fmt.decode("TreeEntry", tree["content"], at + index * width)
+        name = bytes(entry["name"])[: entry["name_len"]]
+        out[name] = entry["length"]
+    return out
+
+
+def check_hostcalls_mediated(runs: dict[str, Run]) -> Result:
+    """Everything the program did, it did by asking. The verbs it asked for are
+    the ones the port answers, and the work counted the same number."""
+    result = Result(
+        "hostcalls",
+        "the program reached the workspace only through host calls the work served",
+    )
+    run = stage_run(runs, "work")
+    if run is None:
+        result.detail = "no work run"
+        return result
+    calls = note_values(run.records, "hostcall", "k5pub")
+    spelled = [value.to_bytes(8, "big").lstrip(b"\x00").decode("utf-8", "replace")
+               for value in calls]
+    verbs = [name for name in spelled if name in
+             {"estado", "contexto", "leer", "sustitui", "cambios", "buscar", "listar",
+              "escribir"}]
+    finish = note_values(run.records, "program_finish", "k5pub")
+    packed = finish[-1] if finish else 0
+    requests = (packed >> 8) & 0xFF
+    validations = (packed >> 16) & 0xFF
+    ended = packed & 0xFF
+    result.passed = (
+        ended == FINISH["returned"]
+        and requests == len(verbs)
+        and requests >= 5
+        and validations == 1
+    )
+    result.detail = (
+        f"verbs {verbs}, the work counted {requests} requests and {validations} validations, "
+        f"the program ended `{[k for k, v in FINISH.items() if v == ended]}`"
+    )
+    result.evidence = [line_of(r) for r in notes(run.records, NOTE["program_finish"], "k5pub")]
+    return result
+
+
+def check_real_tool(runs: dict[str, Run]) -> Result:
+    """The validation tool is a native program in a domain and a scope of its
+    own, and what it cost is the kernel's account rather than the tool's."""
+    result = Result(
+        "real_tool",
+        "a real tool ran natively in its own domain, compiled the candidate and ran its checks",
+    )
+    run = stage_run(runs, "work")
+    if run is None:
+        result.detail = "no work run"
+        return result
+    created = [r for r in by_event(run.records, "domain.created") if r.get("name") == "ncheck"]
+    parsed = note_values(run.records, "tool_parsed", "ncheck")
+    parse_failed = note_values(run.records, "tool_parse_failed", "ncheck")
+    checks = note_values(run.records, "tool_check", "ncheck")
+    failed = note_values(run.records, "tool_check_failed", "ncheck")
+    done = note_values(run.records, "tool_done", "ncheck")
+    verdicts = note_values(run.records, "tool_verdict", "k5pub")
+    costs = note_values(run.records, "tool_cost", "k5pub")
+    retired = note_values(run.records, "launch_retired", "supervisor")
+    result.passed = (
+        bool(created)
+        and len(parsed) == 3
+        and not parse_failed
+        and len(checks) >= 6
+        and not failed
+        and verdicts == [0]
+        and bool(costs)
+        and costs[0] > 0
+        and len(retired) >= 2
+    )
+    result.detail = (
+        f"files compiled {len(parsed)}, checks held {len(checks)}, checks failed {len(failed)}, "
+        f"exit code {verdicts}, the kernel charged its scope {costs[0] if costs else 0}ns, "
+        f"scopes retired {len(retired)}, tool_done {[hex(v) for v in done]}"
+    )
+    result.evidence = [line_of(r) for r in created][:2]
+    return result
+
+
+def check_tool_read_the_candidate(runs: dict[str, Run]) -> Result:
+    """The tool's verdict names the bytes it was about, and those bytes are the
+    ones the medium says were published."""
+    result = Result(
+        "tool_read_candidate",
+        "the tool read exactly the bytes the medium says the published version binds",
+    )
+    run = stage_run(runs, "work")
+    if run is None:
+        result.detail = "no work run"
+        return result
+    read = note_values(run.records, "tool_read", "k5pub")
+    sums = note_values(run.records, "tool_sum", "k5pub")
+    bytes_read = [value & 0xFFFFFFFF for value in read]
+    checks_run = [(value >> 32) & 0xFFFF for value in read]
+    checks_failed = [(value >> 48) & 0xFFFF for value in read]
+    published = published_lengths(run)
+    expected = sum(published.values()) if published else None
+    result.passed = (
+        bytes_read == [expected]
+        and expected is not None
+        and bool(sums)
+        and sums[0] != 0
+        and checks_failed == [0]
+        and bool(checks_run)
+        and checks_run[0] >= 6
+    )
+    result.detail = (
+        f"the tool read {bytes_read} bytes, the medium binds {expected}; "
+        f"digest over them {[hex(v) for v in sums]}; "
+        f"checks {checks_run} of which {checks_failed} failed"
+    )
+    return result
+
+
+def check_candidate_sealed(runs: dict[str, Run]) -> Result:
+    """The tool was given a sealed object, and the kernel says it was sealed.
+
+    A tool that validated bytes which could change under it would be validating
+    nothing in particular."""
+    result = Result(
+        "candidate_sealed",
+        "the candidate was sealed by the kernel before the tool was launched",
+    )
+    run = stage_run(runs, "work")
+    if run is None:
+        result.detail = "no work run"
+        return result
+    sealed = [r for r in by_event(run.records, "mem.sealed")
+              if (r.get("label") or "").startswith("candidate")]
+    refusals = note_values(run.records, "launch_not_sealed", "supervisor")
+    staged = note_values(run.records, "candidate_sealed", "k5pub")
+    built = [r for r in by_event(run.records, "domain.created") if r.get("name") == "ncheck"]
+    order_ok = bool(sealed) and bool(built) and sealed[0].seq < built[0].seq
+    result.passed = order_ok and not refusals and bool(staged)
+    result.detail = (
+        f"seals recorded {len(sealed)}, sealed at record {sealed[0].seq if sealed else '-'}, "
+        f"tool built at {built[0].seq if built else '-'}, "
+        f"launcher refusals for an unsealed candidate {len(refusals)}, "
+        f"candidate bytes {staged}"
+    )
+    result.evidence = [line_of(r) for r in sealed[:2]]
+    return result
+
+
+def check_publication_conditioned(runs: dict[str, Run]) -> Result:
+    """The publication happened only after the tool passed, and the durable
+    record names the tool that decided it."""
+    result = Result(
+        "publication_conditioned",
+        "the publication followed the tool's verdict and the durable record names that tool",
+    )
+    run = stage_run(runs, "work")
+    if run is None or not run.medium:
+        result.detail = "no work run"
+        return result
+    published = note_values(run.records, "published", "k5pub")
+    verdicts = note_values(run.records, "tool_verdict", "k5pub")
+    staged = note_values(run.records, "validation_staged", "k5pub")
+    store = k4gate.read_store(run.medium)
+    objects = k4gate.objects(store)
+    validations = []
+    for entry in objects.values():
+        if entry["object_type"] == 5:
+            validations.append(k4gate.fmt.decode("Validation", entry["content"], 0))
+    tools = sorted({record["tool_id"] for record in validations})
+    generations = sorted({record["base_generation"] for record in validations})
+    result.passed = (
+        published == [1, 2]
+        and verdicts == [0]
+        and tools == [0x4B352001]
+        and generations == [0, 1]
+        and 1 in staged
+    )
+    result.detail = (
+        f"generations published {published}, tool exit {verdicts}, "
+        f"validation records name tool(s) {[hex(t) for t in tools]} over base generation(s) "
+        f"{generations}, the candidate the tool saw matched the frozen tree {1 in staged}"
+    )
+    return result
+
+
+def check_work_published_bytes(runs: dict[str, Run]) -> Result:
+    """The same decisive check as the surface stage, for the run a program drove."""
+    result = Result(
+        "work_published_bytes",
+        "the medium carries a version whose module bears this run's seed, written by the program",
+    )
+    run = stage_run(runs, "work")
+    if run is None or not run.medium:
+        result.detail = "no work run"
+        return result
+    seed = seed_of(run)
+    expected = f"{seed:016x}".encode()
+    store = k4gate.read_store(run.medium)
+    objects = k4gate.objects(store)
+    marks = []
+    for content in (entry.get("content", b"") for entry in objects.values()):
+        at = content.find(b'var MARK = "')
+        if at >= 0:
+            marks.append(content[at + 12 : at + 28])
+    generations = [commit["new_generation"] for commit in k4gate.commits(store)]
+    result.passed = generations == [1, 2] and sorted(marks) == sorted([b"0" * 16, expected])
+    result.detail = (
+        f"generations {generations}, marks {[m.decode() for m in marks]}, "
+        f"expected {expected.decode()}"
+    )
+    return result
+
+
 def check_regression(gate: dict | None, name: str, expected: int) -> Result:
     result = Result(f"regression_{name.lower()}", f"the {name} gate still passes on this kernel")
     if gate is None:
@@ -465,6 +1062,20 @@ CRITERIA = [
     check_heap_from_memory_objects,
     check_scope_ceiling_refused,
     check_native_exit,
+    check_port_services,
+    check_vertical_shape,
+    check_verbs_drove_the_change,
+    check_published_bytes,
+    check_evidence_survives,
+    check_control_plane,
+    check_work_confinement,
+    check_language_runtime,
+    check_hostcalls_mediated,
+    check_real_tool,
+    check_tool_read_the_candidate,
+    check_candidate_sealed,
+    check_publication_conditioned,
+    check_work_published_bytes,
 ]
 
 
@@ -499,12 +1110,20 @@ def drop_note(runs: dict[str, Run], key: str, domain: str) -> dict[str, Run]:
 
 
 def drop_event(runs: dict[str, Run], event: str, name: str) -> dict[str, Run]:
+    """Removes every record of `event` whose `name` or `label` is `name`.
+
+    Both, because the kernel names a domain with `name` and a memory object with
+    `label`, and a damage that only knew about one would leave the other kind of
+    record in place and look like a criterion that does not notice."""
     damaged = copy.deepcopy(runs)
     for run in damaged.values():
         run.records = [
             record
             for record in run.records
-            if not (record.event == event and record.get("name") == name)
+            if not (
+                record.event == event
+                and name in (record.get("name"), record.get("label"))
+            )
         ]
     return damaged
 
@@ -590,12 +1209,178 @@ DAMAGE: list[tuple[str, str, object]] = [
         "native_runtime",
         lambda runs: drop_note(runs, "runtime_up", "nsmoke"),
     ),
+    (
+        "the state service never reported itself ready",
+        "port_services",
+        lambda runs: drop_note(runs, "store_ready", "supervisor"),
+    ),
+    (
+        "the work domain was never created",
+        "port_services",
+        lambda runs: drop_event(runs, "domain.created", "k5pub"),
+    ),
+    (
+        "the work published a different generation",
+        "vertical_shape",
+        lambda runs: damage_note(runs, "published", "k5pub", 9),
+    ),
+    (
+        "the work recorded something it did not expect",
+        "vertical_shape",
+        lambda runs: append_note(runs, "work_unexpected", "k5pub", 0x0E10, "surface"),
+    ),
+    (
+        "context found the name used only once",
+        "vertical_shape",
+        lambda runs: damage_note(runs, "context_answered", "k5pub", 1),
+    ),
+    (
+        "a verb call went by another name",
+        "verb_surface",
+        lambda runs: damage_note(runs, "hostcall", "k5pub", 0x6E6F7065),
+    ),
+    (
+        "the published module's mark is not this run's seed",
+        "published_bytes",
+        lambda runs: rewrite_medium(runs, b"000000005eed", b"0000dead0000"),
+    ),
+    (
+        "the seed version was never published",
+        "published_bytes",
+        lambda runs: rewrite_medium(runs, b'var MARK = "0000000000000000"',
+                                    b'var MARK = "0000000000000001"'),
+    ),
+    (
+        "the published version read back without the change",
+        "evidence_readable",
+        lambda runs: damage_note(runs, "evidence_read", "k5pub", 4),
+    ),
+    (
+        "the auditor counted a different number of effects",
+        "control_receipts",
+        lambda runs: damage_note(runs, "audit_effects", "supervisor", 1),
+    ),
+    (
+        "the kernel refused an admission because the log was full",
+        "control_receipts",
+        lambda runs: add_event(runs, "k2.admission_exhausted",
+                               {"resource": "receipt_cells", "used": "56", "capacity": "56"}),
+    ),
+    (
+        "a receipt was lost",
+        "control_receipts",
+        lambda runs: damage_note(runs, "audit_lost", "supervisor", 3),
+    ),
+    (
+        "the work built a domain of its own",
+        "work_confinement",
+        lambda runs: add_event(runs, "domain.created", {"domain": "9", "name": "sneaky"}),
+    ),
+    (
+        "the language runtime never activated",
+        "language_runtime",
+        lambda runs: drop_event(runs, "domain.activated", "nhacer"),
+    ),
+    (
+        "the runtime compiled a different program from the one published",
+        "language_runtime",
+        lambda runs: damage_note(runs, "program_compiled", "nhacer", 99),
+    ),
+    (
+        "the program ended some other way than by returning",
+        "hostcalls",
+        lambda runs: damage_note(runs, "program_finish", "k5pub", FINISH["threw"]),
+    ),
+    (
+        "the validation tool never ran",
+        "real_tool",
+        lambda runs: drop_event(runs, "domain.created", "ncheck"),
+    ),
+    (
+        "a check the tool ran did not hold",
+        "real_tool",
+        lambda runs: append_note(runs, "tool_check_failed", "ncheck", 3, "work"),
+    ),
+    (
+        "the tool exited non-zero and the run went on",
+        "real_tool",
+        lambda runs: damage_note(runs, "tool_verdict", "k5pub", 1),
+    ),
+    (
+        "the tool read a different number of bytes from what the medium binds",
+        "tool_read_candidate",
+        lambda runs: damage_note(runs, "tool_read", "k5pub", 8 << 32),
+    ),
+    (
+        "the candidate was never sealed",
+        "candidate_sealed",
+        lambda runs: drop_event(runs, "mem.sealed", "candidate"),
+    ),
+    (
+        "the launcher was handed an unsealed candidate",
+        "candidate_sealed",
+        lambda runs: append_note(runs, "launch_not_sealed", "supervisor", 1, "work"),
+    ),
+    (
+        "a validation record names a tool nothing ran",
+        "publication_conditioned",
+        lambda runs: rewrite_validation_tool(runs),
+    ),
+    (
+        "the published module's mark is not the seed of the run a program drove",
+        "work_published_bytes",
+        lambda runs: rewrite_medium(runs, b"000000005eed0003", b"00000000dead0003"),
+    ),
 ]
 
 
-def append_note(runs: dict[str, Run], key: str, domain: str, value: int) -> dict[str, Run]:
+def rewrite_validation_tool(runs: dict[str, Run]) -> dict[str, Run]:
+    """Changes the tool identity every durable validation record names.
+
+    The number is little-endian in the record, so this edits the bytes the
+    medium actually holds rather than a decoded field."""
+    damaged = copy.deepcopy(runs)
+    before = (0x4B352001).to_bytes(8, "little")
+    after = (0x4B352999).to_bytes(8, "little")
+    for run in damaged.values():
+        if run.medium:
+            run.medium = run.medium.replace(before, after)
+    return damaged
+
+
+def rewrite_medium(runs: dict[str, Run], before: bytes, after: bytes) -> dict[str, Run]:
+    """Edits the bytes of a medium, which is what the strongest criterion reads.
+
+    The two must be the same length: this damages what a version says, not how
+    the records that carry it are framed. A criterion that only noticed a
+    changed length would be checking the framing rather than the content."""
     damaged = copy.deepcopy(runs)
     for run in damaged.values():
+        if run.medium and before in run.medium:
+            run.medium = run.medium.replace(before, after)
+    return damaged
+
+
+def add_event(runs: dict[str, Run], event: str, fields: dict[str, str]) -> dict[str, Run]:
+    damaged = copy.deepcopy(runs)
+    for run in damaged.values():
+        manifest = run.spec.get("image_manifest") or {}
+        if manifest.get("stage") != "surface":
+            continue
+        run.records.append(Record("kernel", 99997, 1, event, dict(fields)))
+        break
+    return damaged
+
+
+def append_note(
+    runs: dict[str, Run], key: str, domain: str, value: int, stage: str | None = None
+) -> dict[str, Run]:
+    damaged = copy.deepcopy(runs)
+    for run in damaged.values():
+        if stage is not None:
+            manifest = run.spec.get("image_manifest") or {}
+            if manifest.get("stage") != stage:
+                continue
         run.records.append(
             Record(
                 "kernel",

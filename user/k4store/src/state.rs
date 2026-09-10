@@ -224,6 +224,15 @@ pub struct Store {
     pub published_policy: [u8; 32],
     pub published_receipt: [u8; 32],
 
+    /// Whether the last closure walk stopped because the medium could not be
+    /// read, rather than because an object is genuinely unreachable.
+    ///
+    /// The two are not the same answer and K5 found out the hard way: with the
+    /// control log full the kernel refused the service's own read of the
+    /// medium, the walk stopped, and a caller asking for an object that was
+    /// perfectly well published was told `NOT_FOUND`. A store that cannot
+    /// determine reachability has to say that, not assert the stronger claim.
+    pub closure_incomplete: bool,
     pub objects: [ObjectEntry; MAX_OBJECTS],
     pub stage_used: [bool; MAX_STAGED],
     pub stage_len: [u32; MAX_STAGED],
@@ -283,6 +292,7 @@ impl Store {
             published_root: [0u8; 32],
             published_policy: [0u8; 32],
             published_receipt: [0u8; 32],
+            closure_incomplete: false,
             objects: [ObjectEntry::default(); MAX_OBJECTS],
             stage_used: [false; MAX_STAGED],
             stage_len: [0u32; MAX_STAGED],
@@ -697,6 +707,7 @@ impl Store {
     /// otherwise be an unbounded walk inside the service.
     pub fn closure(&mut self, root: &[u8; 32], out: &mut [usize], count: &mut usize) -> bool {
         *count = 0;
+        self.closure_incomplete = false;
         let mut queue = [0usize; MAX_OBJECTS];
         let mut head = 0usize;
         let mut tail = 0usize;
@@ -728,6 +739,7 @@ impl Store {
             match entry.object_type {
                 object_type::MANIFEST => {
                     let Some(length) = self.load(index) else {
+                        self.closure_incomplete = true;
                         return false;
                     };
                     let Some(manifest) = Manifest::read_from(&content()[..length], 0) else {
@@ -740,6 +752,7 @@ impl Store {
                 }
                 object_type::TREE => {
                     let Some(length) = self.load(index) else {
+                        self.closure_incomplete = true;
                         return false;
                     };
                     let mut bindings = [Binding::default(); MAX_BINDINGS];

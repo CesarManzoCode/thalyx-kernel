@@ -125,8 +125,24 @@ K4_INSTANCES = [
 # what puts them in one image; nothing about building them is evidence that any
 # of them ran.
 K5_PROGRAMS = ["k5super"]
+# The Rust programs each stage needs beside the supervisor. The block driver and
+# the state service are K4's, rebuilt from the same sources: K5's obligation is
+# to put Thalyx's semantics on the durable service that exists.
+K5_STAGE_PROGRAMS: dict[str, list[str]] = {
+    "smoke": [],
+    "surface": ["k4disk", "k4store", "k5work"],
+    "work": ["k4disk", "k4store", "k5work"],
+    "engine": ["k4disk", "k4store", "k5work"],
+}
+# What each stage's modules are called in the package, which is what the
+# supervisor matches on. A K4 program keeps its own image and gets the name the
+# K5 supervisor looks for.
+K5_MODULE_NAMES = {"k4disk": "k5disk", "k4store": "k5store", "k5work": "k5work"}
 K5_NATIVE: dict[str, list[str]] = {
     "smoke": ["nsmoke"],
+    "surface": [],
+    "work": ["nhacer", "ncheck"],
+    "engine": ["nhacer", "ncheck"],
 }
 K5_STAGES = {"smoke": 1, "surface": 2, "work": 3, "engine": 4}
 
@@ -329,7 +345,7 @@ def main() -> int:
         "k2": K2_PROGRAMS,
         "k3": K3_PROGRAMS,
         "k4": K4_PROGRAMS,
-        "k5": K5_PROGRAMS,
+        "k5": K5_PROGRAMS + K5_STAGE_PROGRAMS[arguments.stage],
     }[phase]
 
     # Read by rust-lld for the loader's PE timestamp and by mtools for the FAT
@@ -378,6 +394,10 @@ def main() -> int:
         entries.append(("malformed", malformed, MODULE_KIND_USER_ELF, MODULE_FLAG_EXPECT_REJECT))
     elif phase == "k5":
         entries = [("k5super", stage / "k5super.elf", MODULE_KIND_SUPERVISOR, 0)]
+        entries += [
+            (K5_MODULE_NAMES[name], stage / f"{name}.elf", MODULE_KIND_USER_ELF, 0)
+            for name in K5_STAGE_PROGRAMS[arguments.stage]
+        ]
         entries += [
             (name, stage / f"{name}.elf", MODULE_KIND_USER_ELF, 0) for name in native_images
         ]

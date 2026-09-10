@@ -35,7 +35,15 @@ const ROOT_CLOSURE_RESERVE_NS: u64 = 2_000_000;
 /// Kernel objects the root scope may hold. Every table in the kernel is smaller
 /// than this, so the limit that actually binds is the table, which is what makes
 /// exhaustion a refusal rather than a surprise.
-const ROOT_METADATA: u64 = 512;
+/// Metadata objects the root scope may hold.
+///
+/// Raised from 512 in K5. Metadata is grants, mappings, invocations and
+/// messages, and the port has more domains talking to each other than any
+/// phase before it: a work domain, the language runtime it drives, the tool it
+/// launches per validation, the resident engine and the state service under
+/// all of them. The number is a capacity of this kernel's tables and not an
+/// interface limit; what bounds a run is still each scope's own ceiling.
+const ROOT_METADATA: u64 = 2048;
 /// Queue bytes the root scope may hold pending.
 const ROOT_QUEUE_BYTES: u64 = 64 * 1024;
 

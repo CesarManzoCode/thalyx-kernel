@@ -22,6 +22,7 @@ members = [
     "user/k4super",
     "user/k5pkg",
     "user/k5super",
+    "user/k5work",
 ]
 
 [workspace.package]

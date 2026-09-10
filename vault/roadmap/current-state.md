@@ -243,31 +243,43 @@ El plano de diagnóstico de K1 sigue presente, sigue sin ser el plano de recibos
 
 El port de Thalyx. Lo que sigue describe lo que ya se ejecuta; lo que todavía no existe está en [qué no existe](#qué-no-existe-todavía) y, con detalle, en [la evidencia](../evidence/k5-thalyx-port.md).
 
-### Etapa `smoke`: el target nativo existe y ejecuta
+### El target nativo y su runtime
 
-Hay un segundo target de usuario, `x86_64-thalyx`, definido en [`tools/build_native.py`](../../tools/build_native.py) y no en un triple: ELF64 estático a 0x400000 con tres segmentos separados R-X / R-- / RW-, SSE y SSE2 en hardware con `-mfpmath=sse` y **sin AVX** —el kernel guarda el área `FXSAVE` heredada de forma ansiosa y no habilita `XSAVE`—, sin protector de pila, sin tablas de desenrollado y con `-nostdinc`, de modo que la única libc en la ruta de búsqueda es `user/native`.
+Hay un segundo target de usuario, `x86_64-thalyx`, definido en [`tools/build_native.py`](../../tools/build_native.py) y no como un triple: ELF64 estático a 0x400000 con tres segmentos separados R-X / R-- / RW-, SSE y SSE2 en hardware con `-mfpmath=sse` y **sin AVX** —el kernel guarda el área `FXSAVE` heredada de forma ansiosa y no habilita `XSAVE`—, sin protector de pila, sin tablas de desenrollado y con `-nostdinc`, de modo que la única libc en la ruta de búsqueda es `user/native`.
 
-`user/native` es el runtime que un programa C pisa: asignación sobre objetos de memoria que el programa crea contra su propio ámbito y mapea en su propio dominio, hilos que el supervisor construye antes de activar y que bloquean en una señal real, tiempo desde el único reloj que hay, transporte acotado con el origen que estampa el kernel, y una biblioteca matemática escrita aquí que **no** redondea correctamente y lo dice donde importa.
+`user/native` es lo que un programa C pisa: asignación sobre objetos de memoria que el programa crea contra su propio ámbito y mapea en su propio dominio, hilos que el supervisor construye antes de activar y que bloquean en una señal real, tiempo desde el único reloj que hay, transporte acotado con el origen que estampa el kernel, tiempo civil en UTC porque no hay zona horaria que fingir, y una biblioteca matemática escrita aquí que **no** redondea correctamente y lo dice donde importa.
 
-La quinta imagen —mismo kernel, otro paquete— construye un dominio desde una imagen C, lo activa y lo planifica. El programa mide `.bss` a cero, lee límites y reloj, ejecuta un bucle de coma flotante sembrado por el plan que el anfitrión puso en la imagen y reporta un resultado que el anfitrión recalcula y exige idéntico, hace crecer un heap de 192 páginas en tres arenas leyendo de vuelta lo que escribió por los mapeos nuevos, y se detiene contra el techo de páginas de su ámbito con `LIMIT_EXHAUSTED` del kernel y no con un límite propio.
+### Tres etapas ejecutadas
 
-`tools/check_k5.py` decide **13** criterios por separado, cuatro de ellos las regresiones K1–K4. `--self-test` daña la ejecución de **14** formas distintas y un criterio nombrado nota cada una.
+**`smoke`** establece el target: el kernel construye un dominio desde una imagen C, la activa y la planifica; el programa mide `.bss` a cero, lee límites y reloj, ejecuta un bucle de coma flotante sembrado por el plan que el anfitrión puso en la imagen y reporta un resultado que el anfitrión recalcula y exige idéntico, hace crecer un heap de 192 páginas en tres arenas leyendo de vuelta lo que escribió por los mapeos nuevos, y se detiene contra el techo de páginas de su ámbito con `LIMIT_EXHAUSTED` del kernel.
 
-### Lo que la etapa corrigió
+**`surface`** ejecuta la semántica de Thalyx sobre el estado administrado de K4 —el mismo servicio, el mismo driver, el mismo medio, sin cambios—: versión identificada, `contexto` respondido desde esa versión y declarando su propia cobertura, workspace privado por `FORK`, cambio real, publicación condicionada con CAS y evidencia releída por el mismo camino que usaría cualquiera. Todo pasa por **una sola superficie de verbos**. La validación de esta etapa es una afirmación que el trabajo hace sobre sí mismo, y eso es lo que su etiqueta de integración parcial significa.
 
-Dos defectos que compilar no encuentra: un supervisor construido sin el script de enlace, rechazado por el kernel con `segment_unaligned` antes de ejecutar una instrucción; y un heap que creaba sus arenas sin `MEMORY_MAP` en los derechos máximos del objeto, de modo que el mapeo se rechazaba por derechos insuficientes y `malloc` no podía devolver un byte. [Detalle](../evidence/k5-thalyx-port.md).
+**`work`** sustituye las dos cosas que faltaban. El programa lo ejecuta **QuickJS de verdad** —quickjs-ng 0.15.1, el que empaqueta `rquickjs 0.12`, que es el que ejecuta la revisión de Thalyx de referencia—, traído fijado y comprobado por digest en vez de vendorizado, porque [OQ-14](open-questions.md) sigue abierta. Y la validación la decide una **herramienta nativa real**: `user/ncheck`, lanzada en un dominio propio con un ámbito propio, a la que se le da exactamente un objeto de memoria **sellado** con el candidato, que compila cada nombre JavaScript con el parser de QuickJS y ejecuta las aserciones del propio candidato. Su código de salida decide la publicación. Lanzar es un servicio que el trabajo pide, no un poder que tenga: un dominio de trabajo no posee ninguna capacidad que construya un dominio.
+
+### Puerta K5
+
+`tools/check_k5.py` decide **27** criterios por separado, cuatro de ellos las regresiones K1–K4. El decisivo no lo narra el invitado: el medio lleva una versión publicada cuyo módulo lleva la semilla que el anfitrión eligió y escribió en la imagen, decodificada por el módulo que genera el esquema de K4. Dos más se apoyan en lo mismo: la herramienta leyó exactamente los bytes que el medio dice que la versión enlaza, y el registro de validación durable nombra la identidad de herramienta que realmente corrió. `--self-test` daña la evidencia de **38** formas y un criterio nombrado nota cada una.
+
+Los protocolos entre los dos lenguajes salen de `abi/schema/k5-proto-v1.json`: `tools/gen_k5_proto.py` deriva el módulo Rust y la cabecera C con aserciones estáticas sobre cada desplazamiento, y `tools/check_k5_proto.py` regenera y compara.
+
+### Lo que la ejecución corrigió
+
+Nueve defectos que compilar no encuentra, descritos uno a uno en [la evidencia](../evidence/k5-thalyx-port.md). Dos de la etapa `smoke` —una imagen sin script de enlace y un objeto de memoria sin `MEMORY_MAP` en sus derechos máximos—. Cinco de la etapa `work`: un candidato sin `MEMORY_SEAL` en sus derechos máximos, un ámbito sin `SCOPE_CREATE` para fabricarlo, y tres de la misma familia —`JS_ParseJSON` y `JS_Eval` exigen terminador nulo y la región compartida no lo tiene, y un cuerpo de función compilado como script—. Y dos que no son de este código: un supervisor que no drenaba el plano de control hasta llenarlo, y el servicio de estado de K4 contestando `NOT_FOUND` cuando lo que le pasaba era que no podía leer el medio. Lo segundo era un defecto de K4 y está corregido.
 
 ## Reanudar aquí
 
-**Último hito terminado y pusheado:** **K5 etapa `smoke`**, en la rama `feat/k5-thalyx-port-tools`. K4 quedó completo en `feat/k4-durable-managed-state`.
+**Último hito terminado y pusheado:** **K5 etapas `smoke`, `surface` y `work`**, en la rama `feat/k5-thalyx-port-tools`. K4 quedó completo en `feat/k4-durable-managed-state`.
 
-**Qué está verde, medido en este árbol y con el mismo binario de kernel en las cinco fases:** puerta K1 13/13, puerta K2 21/21 con autocomprobación 28/28, puerta K3 28/28 en los dos perfiles de plataforma con autocomprobación 57/57, puerta K4 31/31 con autocomprobación 48/48, formato K4 12/12, puerta K5 13/13 con autocomprobación 14/14, ABI 4/4, vault 45 notas PASS, modelos PASS, `fmt` limpio.
+**Qué está verde, medido en este árbol y con el mismo binario de kernel en las cinco fases:** puerta K1 13/13, puerta K2 21/21 con autocomprobación 28/28, puerta K3 28/28 con autocomprobación 57/57, puerta K4 31/31 con autocomprobación 48/48, formato K4 12/12, puerta K5 27/27 con autocomprobación 38/38, protocolos K5 PASS, ABI 4/4, vault 45 notas PASS, modelos PASS, `fmt` limpio.
 
-**Qué demostró exactamente la etapa `smoke` de K5:** un programa C compilado por una toolchain cruzada del anfitrión para un target propio, cargado por el kernel desde un objeto de imagen, activado, planificado y preemptado seis veces; `.bss` a cero; la consulta de límites contestando el mismo número de procesadores que el kernel arrancó; un bucle de coma flotante en hardware cuyo resultado el anfitrión recalcula y exige idéntico; un heap crecido con objetos de memoria que el programa crea contra su propio ámbito y mapea en su propio dominio; y el techo del ámbito rechazando la siguiente arena con el estado del kernel.
+**Una advertencia sobre cómo medir:** el criterio de K3 «el sello se publicó contra un escritor vivo» depende de una carrera real —el escritor tiene que fallar *después* del sello— y falla cuando el anfitrión está cargado con otra ejecución en paralelo. Ocho de ocho ejecuciones seriadas pasan; tres fallos observados ocurrieron todos con la matriz de K4 corriendo al lado. Las puertas se ejecutan en serie.
 
-**Qué no demostró:** nada de Thalyx todavía. No hay QuickJS, herramienta de validación, motor de inferencia ni estado administrado en esta etapa. Los límites de K3 y K4 se heredan enteros.
+**Qué demostró exactamente K5 hasta aquí:** un programa C compilado por una toolchain cruzada del anfitrión para un target propio, cargado por el kernel, activado, planificado, con coma flotante en hardware que el anfitrión recalcula y exige idéntica, y un heap que crece por objetos de memoria hasta que el ámbito lo rechaza; la vertical semántica de Thalyx entera sobre el estado administrado de K4; QuickJS real ejecutando un programa que sale de la versión publicada, alcanzando el workspace solo por llamadas mediadas; y una herramienta nativa real que compila el candidato sellado en un dominio propio, ejecuta sus aserciones y decide la publicación, con lo que costó leído de la contabilidad del kernel.
 
-**Siguiente paso exacto al reanudar:** la etapa `surface` de K5 —primera superficie nativa de Thalyx con fixtures y agente externo—, después `work` y después `engine`. [La ruta](phases.md).
+**Qué no demostró todavía:** no hay motor de inferencia —`thalyx.model` responde `no_engine`, que es un hecho sobre la tabla de capacidades de ese rol—; no hay dos trabajos rivales, ni cancelación durante un servicio residente, ni un corte en publicación dentro de esta vertical; no hay comprobación de tipos ni `cargo` dentro del kernel. Los límites de K3 y K4 se heredan enteros.
+
+**Siguiente paso exacto al reanudar:** la etapa `engine` de K5 —motor CPU residente real y la toolchain que la carga de referencia necesita—, y después la matriz de casos adversarios que EXP-10 pide. [La ruta](phases.md).
 
 ## Siguiente trabajo: terminar K5
 

@@ -74,6 +74,8 @@ double fmin(double x, double y);
 double fmax(double x, double y);
 double nan(const char *tag);
 double scalbn(double x, int exponent);
+long   lrint(double x);
+long long llrint(double x);
 
 float fabsf(float x);
 float sqrtf(float x);

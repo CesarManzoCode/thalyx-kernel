@@ -14,8 +14,8 @@ Esta nota se escribe mientras K5 se ejecuta, etapa por etapa, y dice en cada mom
 | Etapa | Qué establece | Estado |
 |---|---|---|
 | `smoke` | El target nativo `x86_64-thalyx`: una imagen C real entra, se sostiene sobre la pila que el supervisor mapeó, habla con el kernel, hace coma flotante en hardware y hace crecer un heap con objetos de memoria que crea contra su propio ámbito. | **Ejecutado** |
-| `surface` | Primera superficie nativa de Thalyx con fixtures y agente externo. Integración parcial, etiquetada como tal. | Pendiente |
-| `work` | Programa acotado real y herramienta nativa real dentro del kernel. | Pendiente |
+| `surface` | Primera superficie nativa de Thalyx: versión identificada, contexto, workspace privado, cambio real, publicación condicionada y evidencia durable, sobre el estado administrado de K4. La validación es una afirmación que el propio trabajo hace sobre sí mismo, y eso es lo que la etiqueta de integración parcial significa. | **Ejecutado** |
+| `work` | Programa acotado real —QuickJS de verdad— y herramienta nativa real, ejecutada en su propio dominio sobre un candidato sellado, decidiendo la publicación. | **Ejecutado** |
 | `engine` | Motor CPU residente real y la toolchain que la carga de referencia necesita. | Pendiente |
 
 ## El target nativo
@@ -50,8 +50,9 @@ Una quinta imagen UEFI construida desde las mismas fuentes con el mismo script y
 | Runtime nativo | `python3 tools/build_native.py` | `build/native/libthalyx-native.a` y las imágenes de la etapa |
 | Imagen | `python3 tools/build_image.py --phase k5 --stage smoke` | `build/thalyx-k5.img`, manifiesto con digest de cada artefacto y herramienta |
 | Ejecución | `python3 tools/run_k5_stages.py` | `exit_status=33` (`k1.terminal status=complete`) |
-| Veredicto | `python3 tools/check_k5.py` | `K5 GATE PASSED: 13 of 13 criteria met` |
-| Autocomprobación | `python3 tools/check_k5.py --self-test` | `14 damages, each noticed by the criterion named` |
+| Veredicto | `python3 tools/check_k5.py` | `K5 GATE PASSED: 27 of 27 criteria met` |
+| Autocomprobación | `python3 tools/check_k5.py --self-test` | `38 damages, each noticed by the criterion named` |
+| Protocolos K5 | `python3 tools/check_k5_proto.py` | El Rust y el C generados coinciden con `abi/schema/k5-proto-v1.json` |
 
 Plataforma: QEMU `q35` con acelerador `tcg`, cuatro procesadores, CPU `qemu64,+smep,+smap,+pdpe1gb,+x2apic`, 1024 MiB y OVMF.
 
@@ -65,6 +66,63 @@ Qué decidió cada criterio, y desde dónde:
 
 Las regresiones K1, K2, K3 y K4 son cuatro criterios más de esta puerta, y las cuatro pasan sobre el mismo kernel: 13, 21, 28 y 31.
 
+## Etapa `surface`: la semántica de Thalyx sobre el estado administrado de K4
+
+La vertical que [la ruta](../roadmap/phases.md) pide —obtener el contexto de una versión, ejecutar cambios privados, publicar o abandonar, consultar evidencia— corre aquí sobre los mecanismos que ya existían: el servicio de estado de K4 sin cambios, sobre el driver de bloque de K4 sin cambios, sobre el mismo medio. **K5 no hace crecer un segundo mecanismo de persistencia al lado del primero**; esa era la mitad interesante del problema y evitarla habría sido evitar el port.
+
+Lo que la etapa ejecuta, en orden, y de dónde se decide cada cosa:
+
+1. **Versión identificada.** El trabajo consulta el servicio y recibe la generación publicada y su raíz. Cuando la generación es cero publica primero la versión semilla —el estado sobre el que después se trabaja— con una validación que el propio trabajo afirma, y la evidencia lo dice así.
+2. **Contexto.** `contexto` responde qué es un nombre desde **la versión**, no desde un árbol mutable: cuántos usos tiene, en qué nombre está definido y con qué firma. La respuesta declara su propia cobertura, `textual`, y `resolved: false`. Thalyx responde esto desde un índice que construye un frontend de compilador; aquí no hay tal frontend y no se finge uno.
+3. **Trabajo privado.** `FORK` sobre la versión publicada abre un workspace que nada publicado ve.
+4. **Cambio real.** El trabajo sustituye la marca de dieciséis ceros del módulo por la semilla del run en hexadecimal. `sustituir` reemplaza **una** ocurrencia a propósito.
+5. **Publicación condicionada.** `FREEZE` produce un candidato, y `PUBLISH` transiciona la raíz con CAS sobre la generación esperada.
+6. **Evidencia.** El trabajo vuelve a leer la versión publicada por el mismo camino que usaría cualquiera y comprueba que la marca está donde debe.
+
+Todo eso pasa por **una sola superficie de verbos** —`user/k5work/src/verbs.rs`— y por ningún otro camino. En esta etapa la conduce un guion escrito en el propio programa; en la siguiente la conduce un programa que ejecuta el runtime de lenguaje. Si fueran dos implementaciones distintas, «un programa alcanza exactamente lo que sus llamadas podrían haber alcanzado una a una» sería una esperanza.
+
+Lo que la etapa **no** establece, y la puerta lo nombra en el título de sus criterios: nadie ha ejecutado una herramienta sobre el candidato. El registro de validación que se publica es una afirmación del trabajo sobre sí mismo, exactamente como la de K4. Una afirmación no es una comprobación.
+
+## Etapa `work`: un programa real y una herramienta real
+
+### El runtime de lenguaje es QuickJS de verdad
+
+Es el mismo motor, en la misma versión, que ejecuta la revisión de Thalyx contra la que se hace este port: `thalyx-program` depende de `rquickjs 0.12`, que empaqueta quickjs-ng 0.15.1. `tools/fetch_quickjs.py` lo trae **fijado y comprobado por digest**, y `tools/build_native.py` lo compila para el target nativo con las mismas banderas que todo lo demás. Nada del lenguaje está reimplementado.
+
+Se **trae en vez de vendorizarse**, a propósito: [OQ-14](../roadmap/open-questions.md) dice que la licencia de distribución y la política de contribuciones se fijan *antes* de incorporar código de terceros a este repositorio, y esa pregunta sigue abierta. Traerlo mantiene el código fuera del árbol y deja la construcción exactamente reproducible: una versión, un digest, comprobado antes de compilar nada.
+
+El dominio del runtime tiene: una faceta de un endpoint, una página de configuración, la región que comparte con el trabajo que lo conduce, y su propio ámbito para crecer un heap. Eso es toda su tabla de capacidades, y es lo que hace que «el programa no puede leer un archivo» sea un hecho sobre el kernel y no una afirmación sobre el código: no hay archivo que leer ni capacidad que llegue a uno.
+
+Dos techos, y solo uno es del motor: `JS_SetMemoryLimit` es la contabilidad del propio QuickJS y está **por debajo** de lo que el ámbito puede cobrar. El del ámbito lo impone el kernel. Un run que llega a cualquiera de los dos dice a cuál, en las unidades en que se cuenta.
+
+Parar está impuesto dos veces. Una aserción que solo lanzara podría ser capturada por el programa que la falló; aquí **engancha**: se registra del lado del trabajo, lanza, y desde ese momento toda llamada se rechaza. Un programa no puede capturarse el paso más allá de lo que lo detuvo, porque lo que lo detiene no está en el lenguaje. Esto se observó funcionando antes de estar previsto: la primera versión del módulo tenía la marca de ceros escrita dos veces, `sustituir` reemplazó una, y el programa falló su propia aserción «la marca vieja ya no está», enganchó, y nada se publicó.
+
+### La herramienta de validación es real y corre dentro del kernel
+
+`user/ncheck` es un programa del target nativo lanzado en **un dominio propio, con un ámbito propio**, al que se le da exactamente una cosa: un objeto de memoria **sellado** con el candidato. Sin servicio de estado, sin motor, sin dispositivo, sin autoridad para construir nada.
+
+Lo que hace es real y puede fallar de verdad: compila cada nombre JavaScript del candidato con el parser y el compilador de bytecode de QuickJS, y después ejecuta las aserciones del propio candidato en un contexto cuyo único enlace es `check`. Su código de salida es cero solo si todo compiló y toda comprobación se sostuvo.
+
+El candidato se **sella antes de prestarse**: el kernel retira todo mapeo con escritura, así que lo que la herramienta lee es aquello sobre lo que trata el veredicto. La puerta comprueba el orden —el sello está registrado antes de que el dominio de la herramienta exista— y el lanzador rechaza un candidato que no esté sellado con un estado propio.
+
+Lo que la herramienta **no** hace, y lo dice en su respuesta: no es una comprobación de tipos. `Check::Rust` de Thalyx compila un grafo de crates con `cargo`; nada en este sistema hace eso y nada aquí lo finge. La cobertura que declara es `parses_and_asserts` y `type_checked: false`.
+
+### Lanzar es un servicio, no un poder ambiental
+
+Un dominio de trabajo no tiene ninguna capacidad que construya un dominio. Pide. El lanzador —el supervisor— decide qué puede ser una herramienta: ámbito propio con techos propios, candidato sellado, una página donde escribir su informe, y nada más; cuando termina, su ámbito se retira y **lo que costó se lee de la contabilidad del kernel**, no de lo que la herramienta dice de sí misma. En la ejecución registrada la herramienta gastó 65 ms de CPU cobrados a su propio ámbito.
+
+### Lo que la etapa `work` corrigió
+
+Cinco defectos que compilar no encuentra:
+
+1. **Un objeto que nadie podía sellar.** El candidato se creaba con derechos máximos de lectura, escritura y mapeo, sin `MEMORY_SEAL`, así que sellarlo se rechazaba. Sellar tiene que estar en los derechos máximos del objeto, no solo en la petición.
+2. **Un ámbito sin autoridad para fabricar el candidato.** El trabajo recibía su propio ámbito con `INSPECT` y nada más, con el argumento de que leer un presupuesto no es gastarlo —cierto, pero ensamblar un candidato sí necesita crear un objeto—. `SCOPE_CREATE` se concede a propósito y queda acotado por el techo de páginas del propio ámbito.
+3. **`JS_ParseJSON` exige terminador nulo.** Su documentación lo dice y su escáner se apoya en él. La primera versión parseaba en la región compartida, donde a continuación estaban los bytes de la respuesta anterior, y la tercera llamada del primer programa real volvió con «unexpected data at the end» y ciento cuarenta y dos bytes de JSON perfectamente bueno delante. Ahora se copia a memoria privada y se termina en nulo —que además es lo correcto por otra razón: la región la puede escribir el otro dominio mientras se lee—.
+4. **`JS_Eval` exige lo mismo.** La herramienta evaluaba en el objeto sellado, donde los nombres están pegados unos a otros, y reportó tres errores de sintaxis en tres archivos perfectamente válidos.
+5. **Un cuerpo de función compilado como script.** `program.js` termina en `return`, que es un error de sintaxis en el nivel superior de un script y es exactamente correcto dentro del envoltorio en que el runtime lo ejecuta. La entrada del candidato lleva ahora un bit que lo dice, y la herramienta lo compila como lo que es en vez de adivinarlo por el nombre.
+
+Y dos que no son de este código: el supervisor de la primera etapa `surface` no drenaba el plano de control, el log se llenó a los cincuenta y seis recibos, y el kernel empezó a rechazar admisiones —que es su comportamiento diseñado, no un defecto—; y el servicio de estado de K4, con su propia lectura del medio rechazada por esa misma causa, contestó `NOT_FOUND` a la lectura de un objeto perfectamente publicado. Lo segundo **sí** era un defecto y está corregido: un almacén que no puede determinar alcanzabilidad tiene que decir eso, no la afirmación más fuerte. Ahora distingue «he mirado y esto no está» de «no he podido mirar».
+
 ## Lo que la etapa `smoke` corrigió
 
 Dos defectos que compilar no encuentra:
@@ -72,10 +130,23 @@ Dos defectos que compilar no encuentra:
 1. **Una imagen sin script de enlace.** El primer supervisor K5 se construyó sin el script que separa los segmentos, y el kernel lo rechazó con `segment_unaligned` antes de ejecutar una instrucción. El rechazo es el comportamiento correcto; el defecto era del paquete.
 2. **Un objeto de memoria que nadie podía mapear.** El heap creaba sus arenas con derechos máximos de lectura y escritura y sin `MEMORY_MAP`, y el kernel rechazaba el mapeo por derechos insuficientes. `MEMORY_MAP` es el derecho a hacer un mapeo, no un permiso de página, y tiene que estar en los derechos máximos del objeto además de en la petición. Antes de la corrección el programa no podía asignar un solo byte y la primera señal era `malloc` devolviendo nulo.
 
-## Lo que esta etapa **no** demuestra
+## Qué decide la puerta, y desde dónde
 
-- No hay todavía nada de Thalyx ejecutándose. `smoke` establece el target y el runtime, no la semántica.
-- No hay QuickJS, ni herramienta de validación, ni motor de inferencia, ni estado administrado en esta etapa.
+`tools/check_k5.py` decide **27** criterios por separado; cuatro son las regresiones K1–K4 sobre el mismo binario de kernel. La disciplina es la misma en todos:
+
+- **Construir no es ejecutar.** Todo criterio sobre el lado nativo se decide desde los registros del kernel de un dominio que el kernel construyó, activó, planificó y cobró.
+- **Un invitado que imprime `PASS` no demuestra nada.** Donde un criterio lee una nota del propio programa, lo dice en su título, y el valor que lee es un número que el programa solo pudo producir haciendo el trabajo.
+
+El criterio decisivo no lo narra el invitado en absoluto: **el medio lleva una versión publicada cuyo módulo lleva la semilla de este run**, decodificada aquí por el módulo que genera el esquema de K4. El anfitrión eligió la semilla y la escribió en la imagen; un invitado que no hubiera hecho el trabajo no habría podido poner esos bytes ahí. Dos más se apoyan en la misma clase de evidencia: la herramienta leyó **exactamente** los bytes que el medio dice que la versión publicada enlaza (2913 de 2913), y el registro de validación durable nombra la identidad de herramienta que realmente corrió.
+
+`--self-test` daña la evidencia de **38** formas distintas —notas cambiadas y quitadas, sucesos del kernel quitados y añadidos, bytes del medio reescritos— y un criterio nombrado tiene que notar cada una.
+
+## Lo que estas etapas **no** demuestran
+
+- **No hay motor de inferencia todavía.** `thalyx.model` existe en la superficie y responde `no_engine` en estos roles, que es un hecho sobre su tabla de capacidades. La etapa `engine` es la que tiene que cambiarlo.
+- **No hay comprobación de tipos.** La herramienta compila y ejecuta aserciones; `Check::Rust` de Thalyx compila un grafo de crates y nada aquí lo hace.
+- **No hay `cargo`, ni compilador de Rust, dentro del kernel.** La toolchain que produce estas imágenes es del anfitrión y el manifiesto lo dice; lo que se ejecuta nativamente es la imagen.
+- **Un solo trabajo.** Todavía no hay dos trabajos rivales, ni cancelación durante un servicio residente, ni un corte en publicación dentro de esta vertical.
 - Sigue sin haber aislamiento de DMA, hardware físico ni durabilidad frente a corte de energía: los límites de K3 y K4 se heredan enteros.
 
 ## Digests de la ejecución registrada

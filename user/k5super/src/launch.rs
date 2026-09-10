@@ -73,6 +73,20 @@ fn read_image_at(image: u64, offset: u64, into: &mut [u8]) -> bool {
     true
 }
 
+fn which_mappings(
+    mappings: &mut impl FnMut(u64) -> Result<(), i64>,
+    domain: u64,
+    report: &mut impl FnMut(u64, i64),
+) -> Option<()> {
+    match mappings(domain) {
+        Ok(()) => Some(()),
+        Err(code) => {
+            report(13, code);
+            None
+        }
+    }
+}
+
 /// Reads what the image publishes about itself.
 pub fn inspect(image: u64) -> Option<plan::Image> {
     let mut head = [0u8; 256];
@@ -102,6 +116,19 @@ fn config_object(scope: u64, label: &str, config: &Config) -> Option<u64> {
 pub fn build(
     recipe: &Recipe<'_>,
     installs: &[Install],
+    report: impl FnMut(u64, i64),
+) -> Option<Built> {
+    build_with(recipe, installs, |_| Ok(()), report)
+}
+
+/// The same, with a step that maps whatever else the role is given.
+///
+/// The mappings are the launcher's, not the program's: a domain reaches what
+/// was mapped into it, and nothing it can say changes that.
+pub fn build_with(
+    recipe: &Recipe<'_>,
+    installs: &[Install],
+    mut mappings: impl FnMut(u64) -> Result<(), i64>,
     mut report: impl FnMut(u64, i64),
 ) -> Option<Built> {
     let mut step;
@@ -234,6 +261,8 @@ pub fn build(
         step,
         &mut report,
     )?;
+
+    which_mappings(&mut mappings, domain, &mut report)?;
 
     let mut which = 20u64;
     for install in installs {

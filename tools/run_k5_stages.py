@@ -21,9 +21,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "build"
 
-STAGES = ["smoke"]
-SEEDS = {"smoke": 0x5EED0001}
-NEEDS_MEDIUM = {"smoke": False}
+STAGES = ["smoke", "surface", "work"]
+SEEDS = {"smoke": 0x5EED0001, "surface": 0x5EED0002, "work": 0x5EED0003}
+NEEDS_MEDIUM = {"smoke": False, "surface": True, "work": True}
 
 
 def run(argv: list[str]) -> None:

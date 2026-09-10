@@ -22,6 +22,16 @@ struct tm {
 struct timespec { time_t tv_sec; long tv_nsec; };
 
 time_t time(time_t *out);
+
+/* Civil time, in UTC and only UTC. There is no timezone database on this
+ * system and no configured offset, so `localtime_r` is `gmtime_r`: a runtime
+ * asking what the local offset is gets zero, which is true here, rather than a
+ * number somebody guessed. */
+struct tm *gmtime_r(const time_t *when, struct tm *into);
+struct tm *localtime_r(const time_t *when, struct tm *into);
+time_t     mktime(struct tm *broken);
+time_t     timegm(struct tm *broken);
+double     difftime(time_t later, time_t earlier);
 int    clock_gettime(int which, struct timespec *out);
 #define CLOCK_REALTIME 0
 #define CLOCK_MONOTONIC 1

@@ -27,10 +27,17 @@ unsigned long strtoul(const char *s, char **end, int base);
 long long strtoll(const char *s, char **end, int base);
 unsigned long long strtoull(const char *s, char **end, int base);
 int     atoi(const char *s);
+int     abs(int value);
+long    labs(long value);
+long long llabs(long long value);
 void    qsort(void *base, size_t count, size_t size, int (*compare)(const void *, const void *));
 void   *bsearch(const void *key, const void *base, size_t count, size_t size,
                 int (*compare)(const void *, const void *));
 char   *getenv(const char *name);
+
+/* The compiler's, because there is nothing else it could be: an allocation on
+ * the caller's own frame is a property of the frame, not of a library. */
+#define alloca(n) __builtin_alloca(n)
 
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE 1
