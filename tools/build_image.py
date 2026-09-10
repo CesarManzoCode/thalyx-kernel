@@ -104,6 +104,20 @@ K3_INSTANCES = [
 ]
 
 
+# Programs built for the K4 package. One client image serves four roles, as in
+# K3: the supervisor writes each client's role into a page and maps it
+# read-only. The service and the driver are separate images because they are
+# separate authorities -- the service has no device capability at all, and that
+# is the whole reason a run can be cut at a named write.
+K4_PROGRAMS = ["k4super", "k4disk", "k4store", "k4client"]
+K4_INSTANCES = [
+    ("k4super", "k4super", MODULE_KIND_SUPERVISOR),
+    ("k4disk", "k4disk", MODULE_KIND_USER_ELF),
+    ("k4store", "k4store", MODULE_KIND_USER_ELF),
+    ("k4client", "k4client", MODULE_KIND_USER_ELF),
+]
+
+
 def run(argv: list[str], **kwargs) -> subprocess.CompletedProcess:
     print("+", " ".join(argv), file=sys.stderr)
     result = subprocess.run(argv, **kwargs)
@@ -270,7 +284,7 @@ def digest(path: Path) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", default="release", choices=["debug", "release"])
-    parser.add_argument("--phase", default="k1", choices=["k1", "k2", "k3"])
+    parser.add_argument("--phase", default="k1", choices=["k1", "k2", "k3", "k4"])
     parser.add_argument("--size-mib", type=int, default=64)
     arguments = parser.parse_args()
 
@@ -283,7 +297,7 @@ def main() -> int:
     phase = arguments.phase
     stage = BUILD / f"thalyx-{phase}"
     image = BUILD / f"thalyx-{phase}.img"
-    programs = {"k1": K1_PROGRAMS, "k2": K2_PROGRAMS, "k3": K3_PROGRAMS}[phase]
+    programs = {"k1": K1_PROGRAMS, "k2": K2_PROGRAMS, "k3": K3_PROGRAMS, "k4": K4_PROGRAMS}[phase]
 
     # Read by rust-lld for the loader's PE timestamp and by mtools for the FAT
     # directory entries. Set before the first build so both see it.
@@ -314,7 +328,7 @@ def main() -> int:
         patch_malformed(stage / "worker.elf", malformed)
         entries.append(("malformed", malformed, MODULE_KIND_USER_ELF, MODULE_FLAG_EXPECT_REJECT))
     else:
-        instances = K2_INSTANCES if phase == "k2" else K3_INSTANCES
+        instances = {"k2": K2_INSTANCES, "k3": K3_INSTANCES, "k4": K4_INSTANCES}[phase]
         entries = [(name, stage / f"{program}.elf", kind, 0) for name, program, kind in instances]
 
     package = stage / "boot.tbp"

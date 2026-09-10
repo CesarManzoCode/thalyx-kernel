@@ -5,17 +5,17 @@ status: observed
 ---
 # Estado actual
 
-**2026-09-09 · Fundación 0.1.0 · K0, K1, K2 y K3 completos. K4–K6 pendientes.**
+**2026-09-10 · Fundación 0.1.0 · K0, K1, K2, K3 y K4 completos. K5–K6 pendientes.**
 
 > **Punto de reanudación.** Este documento es el checkpoint. La sección [Reanudar aquí](#reanudar-aquí) dice exactamente dónde empieza el trabajo siguiente; no hace falta reauditar K0, K1, K2 ni K3.
 
 ## Qué existe
 
-Un vault de 43 notas con constitución, 13 contratos de arquitectura, glosario, reconstrucción de Thalyx, 32 fuentes primarias anotadas, nueve decisiones, 23 invariantes, alternativas, integración Linux/nativa, experimentos y ruta de implementación. Se incluyen herramientas documentales y dos modelos finitos de investigación con controles negativos y resultado versionado.
+Un vault de 44 notas con constitución, 13 contratos de arquitectura, glosario, reconstrucción de Thalyx, 32 fuentes primarias anotadas, nueve decisiones, 23 invariantes, alternativas, integración Linux/nativa, experimentos y ruta de implementación. Se incluyen herramientas documentales y dos modelos finitos de investigación con controles negativos y resultado versionado.
 
-Existe además un kernel que arranca, un sistema de capacidades que se ejecuta sobre él, y una ejecución en cuatro procesadores con un dispositivo de bloque real conducido desde usuario. El workspace tiene loader UEFI, protocolo de arranque, kernel con `arch/x86_64`, interfaz V0 generada desde un esquema y diez programas de usuario, con toolchain fijada y construcción reproducible desde un solo script para las tres fases.
+Existe además un kernel que arranca, un sistema de capacidades que se ejecuta sobre él, una ejecución en cuatro procesadores con un dispositivo de bloque real conducido desde usuario, y un almacén de versiones que sobrevive a la ejecución que lo escribió. El workspace tiene loader UEFI, protocolo de arranque, kernel con `arch/x86_64`, interfaz V0 generada desde un esquema, trece programas de usuario y dos bibliotecas que comparten —el runtime y el formato durable—, con toolchain fijada y construcción reproducible desde un solo script para las cuatro fases.
 
-La imagen K1 arranca en QEMU, ejecuta dominios en ring 3, los preempta con timer, contiene sus fallos ilegales y sobrevive. [Qué se ejecutó exactamente](../evidence/k1-protected-boot.md). La imagen K2, con el mismo kernel y otro paquete, construye un supervisor con un manifiesto explícito de capacidades y deja que ese supervisor cree todo lo demás por la interfaz. [Qué se ejecutó exactamente](../evidence/k2-objects-authority-work.md). La imagen K3, otra vez con el mismo kernel, arranca cuatro procesadores, reparte trabajo entre ellos con presupuesto agregado, retira traducciones con acuse de todos, y le entrega a un dominio de usuario una función virtio-blk moderna con la que lee, escribe y hace flush. [Qué se ejecutó exactamente](../evidence/k3-smp-devices.md).
+La imagen K1 arranca en QEMU, ejecuta dominios en ring 3, los preempta con timer, contiene sus fallos ilegales y sobrevive. [Qué se ejecutó exactamente](../evidence/k1-protected-boot.md). La imagen K2, con el mismo kernel y otro paquete, construye un supervisor con un manifiesto explícito de capacidades y deja que ese supervisor cree todo lo demás por la interfaz. [Qué se ejecutó exactamente](../evidence/k2-objects-authority-work.md). La imagen K3, otra vez con el mismo kernel, arranca cuatro procesadores, reparte trabajo entre ellos con presupuesto agregado, retira traducciones con acuse de todos, y le entrega a un dominio de usuario una función virtio-blk moderna con la que lee, escribe y hace flush. [Qué se ejecutó exactamente](../evidence/k3-smp-devices.md). La imagen K4, con el mismo kernel una cuarta vez, publica versiones inmutables sobre un medio de bloques que persiste entre arranques, y la matriz corta la ejecución en cada punto donde una publicación puede cortarse para arrancar de nuevo sobre lo que el corte dejó. [Qué se ejecutó exactamente](../evidence/k4-durable-state.md).
 
 La base de evidencia de Thalyx está fijada al commit `0492f72e487e2463b0d7b938365a8b3383364cb9`: inventario de 407 commits alcanzables, 96 archivos del vault, 38 rutas de código/configuración de evidencia y 15 revisiones históricas seleccionadas. Inventariar no significa haber ejecutado ni auditado exhaustivamente cada archivo.
 
@@ -129,6 +129,54 @@ El perfil de DMA es `WEAK_TRUSTED_DRIVER` y el kernel lo declara con las palabra
 
 Seis defectos que compilar no encuentra, más dos de la evidencia y dos del propio paquete. Los tres primeros son fatales y comparten familia —suponer que el estado de un hilo basta para decir de quién es, que en un procesador es cierto—: dos procesadores tomando el mismo hilo `Ready` y ejecutándolo sobre una pila de kernel; la reclamación liberando la pila o el espacio de direcciones que otro procesador todavía usaba; y un hilo que se bloquea, es despertado por un receptor en otro procesador y despachado por un tercero antes de que el procesador en el que sigue ejecutando haya guardado dónde continuar. Los otros tres son de contabilidad: una reserva que acotaba la admisión y no la ejecución; un dominio de dos hilos que solo devolvía uno a su ámbito, dejándolo permanentemente no quiescente; y un registro de mapeo que nombraba por índice una concesión sobre la que no retenía referencia. [Detalle](../evidence/k3-smp-devices.md).
 
+## K4
+
+Completo dentro de su alcance, que es un medio de bloques real conducido por el driver del invitado y **no** un corte de energía. Lo que sigue describe lo construido y ejecutado; lo que K4 no demuestra está en [qué no existe](#qué-no-existe-todavía) y, con detalle, en [la evidencia](../evidence/k4-durable-state.md).
+
+### Formato del almacén, fijado antes de escribir nada
+
+`abi/schema/k4-store-v1.json` es la única fuente del formato durable y del protocolo del servicio: geometría del medio, prefijos de dominio de digest, magias, nueve enumeraciones, 20 estructuras y 22 vectores dorados. `tools/gen_k4_format.py` deriva de él el módulo Rust que el invitado codifica (`user/k4fmt/src/generated.rs`), el módulo Python con el que la puerta decodifica un medio real (`tools/k4_format.py`) y los bytes dorados en `abi/fixtures/k4-store-v1/`. Ninguno de los tres se escribe a mano.
+
+Generar los dos lados no los hace estar de acuerdo por argumento: comparten desplazamientos, así que por supuesto coinciden en eso. Lo que compra el arreglo es que ni el servicio ni la puerta definen el formato. Los digests los calcula un SHA-256 escrito en este repositorio dentro del invitado y `hashlib` en el anfitrión, y los vectores dorados son a lo que se somete a los dos.
+
+El contrato pedía fijar el formato **antes** de escribir datos que se pretendan conservar. Eso es lo que este paso hace, y por eso es el primero.
+
+### Qué decide el formato
+
+Un registro ocupa bloques enteros y su digest cubre la cabecera hasta el propio campo de digest y después la carga, de modo que una escritura rota daña su propio registro y nunca uno ya durable. Cada registro enlaza con el anterior por digest y su secuencia crece exactamente en uno dentro de una arena. Dos superblocks alternos con generación y digest seleccionan la arena; el válido de generación más alta gana. El digest de contenido lleva prefijo de dominio, tipo y longitud dentro de la preimagen, así que un objeto de cero bytes y un árbol vacío no comparten identidad. La identidad de una petición cubre todos los inputs que deciden su significado, que es de donde sale `CONFLICT`.
+
+La directiva de fallos es andamiaje y está marcada como tal: vive en un bloque **fuera** del almacén, lleva su propia magia, y ninguna estructura del formato la nombra.
+
+### Comprobador del formato
+
+`tools/check_k4_format.py` decide **12** criterios por separado. Cuatro son controles negativos ejecutados, no afirmaciones: seis daños distintos a un registro —un byte de carga, la secuencia, la magia, una longitud mayor que sus bloques, un recuento de bloques cero, y una cola rota tras el primer sector— y tres a un superblock, con la exigencia añadida de que los originales intactos se sigan aceptando.
+
+Ese último control encontró algo que conviene decir en lugar de fingir que se probó: todos los registros pequeños caben en un sector, y un desgarro de un registro así lo deja entero o ausente, lo cual es una propiedad de la geometría y no del checksum. El vector dorado que el control usa es por eso un registro de objeto de 1024 bytes, que cruza el sector; el desgarro se aplica donde significa algo.
+
+### Contrato del paquete y driver de bloque
+
+`user/k4fmt/src/pkg.rs` fija lo que los programas del paquete K4 acuerdan y ningún programa decide por su cuenta: qué ranura de capacidad guarda qué, dónde aterriza cada mapeo, qué significa cada bit de señal, y la forma de los dos protocolos —el de bloques y el del estado—. No es autoridad: una ranura no nombra nada hasta que el supervisor instala una capacidad en ella.
+
+`user/k4disk` es el transporte virtio-blk de K3 con dos cosas añadidas —una interfaz de servicio, para que el servicio de estado llegue al medio por capacidad y no por un dispositivo propio, y un motor de fallos— y ninguna quitada. El motor es andamiaje y está marcado como tal: puede dejar una escritura sin emitir, emitir solo su primer sector, negarla como fallo del medio, retenerla y emitirla después de la siguiente, o cerrar el paso a toda escritura posterior. Cada una se cuenta, y esos recuentos son lo que la puerta contrasta contra el medio. Cada una se ejecutó al menos una vez en la matriz de casos.
+
+El esquema creció dos modos de fallo, `IO_ERROR` y `REORDER`, y el campo reservado de la directiva pasó a ser `stop_at_next_flush`, que hace terminar la ejecución donde habría flush para que un modo que solo importa antes de un flush pueda observarse después de uno.
+
+### Servicio, cliente y supervisor
+
+`user/k4store` es el motor del almacén con un bucle de protocolo delante: catorce operaciones, el principal tomado de la faceta que el kernel autenticó y nunca de un campo de la petición, y la capacidad prestada tomada del mensaje y no de un número. `user/k4client` es una imagen y cuatro papeles —publicador, rival, lector y broker— escritos en una página que el supervisor mapea de solo lectura. `user/k4super` construye la ejecución: driver, servicio y clientes, cada uno con lo que le corresponde y nada más.
+
+### La imagen K4, la matriz de casos y la puerta
+
+`tools/build_image.py` tiene fase `k4`. `tools/run_k4.py` ejecuta un **caso**: un escenario, una directiva de fallos y un número de tramos sobre un medio creado una vez y arrastrado de un tramo al siguiente. Un tramo se corta —el que el caso nombre— y los demás son la recuperación, con una directiva que no nombra ningún punto. La recuperación nunca consulta la directiva. El anfitrión solo escribe la directiva, en un bloque fuera del almacén: lo que un medio contiene es lo que el invitado puso ahí.
+
+`tools/run_k4_cases.py` ejecuta **quince** casos: un baseline, un corte en cada punto donde una publicación puede cortarse, los cuatro modos de escritura que no ocurre o que ocurre mal, un servicio reemplazado dentro de una ejecución, dos publicadores compitiendo, un broker que no puede decir, un tramo de recuperación cortado para poder leer el abort que escribió, y uno donde el plano de control se pierde.
+
+`tools/check_k4.py` decide **31** criterios por separado, desde dos fuentes que el invitado no narra: los registros del kernel y los bytes del medio, decodificados por el módulo que genera el esquema. `--self-test` daña la evidencia de 48 formas —reescrituras del registro de un tramo, ediciones de bytes de un medio, y daños aplicados a todos los tramos de la matriz para los criterios cuya afirmación es sobre ella entera— y un criterio nombrado tiene que notar cada una.
+
+### Lo que la ejecución corrigió
+
+Nueve defectos que compilar los cinco programas no encontró, descritos uno a uno en [la evidencia](../evidence/k4-durable-state.md). Tres son de la misma familia —dar por hecho que una cosa que se guarda no cuesta nada— y agotaban la tabla de invocaciones, la tabla global de concesiones y el área de preparación. Tres son sobre decir la verdad en la respuesta: una publicación con éxito que no contestaba nada, una escritura que no se pudo pedir informada como almacén dañado, y dos controles negativos que no llegaban a lo que apuntaban. Tres solo aparecen bajo un corte: un servicio cortado que no dejaba terminar la máquina, uno que se comía su propia petición de ser reemplazado, y una cadena de descriptores que decía que una transferencia había ocurrido sin mover un byte.
+
 ## Evidencia ejecutada aquí
 
 | Comprobación | Resultado y alcance |
@@ -150,6 +198,11 @@ Seis defectos que compilar no encuentra, más dos de la evidencia y dos del prop
 | Puerta K3, perfil de control | PASS en los mismos 28 con `-device intel-iommu`: unidad descrita, `remapping_programmed=0`, perfil fuerte igualmente rechazado. |
 | Cobertura de la interfaz en K3 | 37 de 59 alcanzadas, las 26 que las afirmaciones K3 necesitan entre ellas y las 22 restantes nombradas una a una. Es criterio de la puerta K3. |
 | Autocomprobación de la puerta K3 | 57 ejecuciones dañadas de una forma cada una, las 57 detectadas por el criterio que les corresponde. |
+| Formato del almacén K4 | PASS en 12 criterios, nueve de ellos daños aplicados y rechazados. [Comprobador](../../tools/check_k4_format.py). |
+| Puerta K4 | PASS en 31 criterios decididos por separado, desde los registros del kernel y desde los bytes del medio. [Detalle y límites](../evidence/k4-durable-state.md). |
+| Autocomprobación de la puerta K4 | 48 ejecuciones dañadas de una forma cada una —registro, medio y matriz entera—, las 48 detectadas por el criterio que les corresponde. |
+| Regresiones K1, K2 y K3 sobre el sustrato K4 | PASS en 13, 21 y 28 criterios con el estado durable compilado dentro del mismo kernel. |
+| Cobertura de la interfaz en K4 | 33 de 59 alcanzadas, las 23 que las afirmaciones K4 necesitan entre ellas y las 26 restantes nombradas una a una. Es criterio de la puerta K4. |
 
 Todas ejecutadas en el estado actual del árbol, con **el mismo binario de kernel** en las tres fases: `fmt` limpio, ninguna advertencia de compilación, ABI 4/4, vault 43 notas PASS, modelos PASS, puerta K1 13/13, puerta K2 21/21 con autocomprobación 28/28, puerta K3 28/28 con autocomprobación 57/57 y en los dos perfiles de plataforma, y cero resultados inesperados en las ejecuciones K2 y K3 —ni una nota de resultado no esperado, ni una operación que debiera haber sido rechazada y no lo fuera—. Los dos fallos de usuario de K3 son los dos que la ejecución provoca a propósito. Las imágenes y el kernel se reconstruyen byte a byte desde un árbol limpio.
 
@@ -162,6 +215,8 @@ El kernel cuenta cuáles de las **59** operaciones asignadas alcanza el despacho
 El paquete K2 alcanza **51 de 51** de las operaciones que existían cuando se escribió, y la puerta K2 lo exige nombrando explícitamente las ocho de dispositivo como las únicas que puede no tocar: cualquier otra sin tocar la hace fallar.
 
 El paquete K3 alcanza **37 de 59**, y la puerta K3 exige las **26** sobre las que descansan sus afirmaciones —las ocho de dispositivo enteras, más mapear, desmapear, añadir hilo, activar, sellar, leer, escribir, cercar, drenar, retirar, consultar, llamar, recibir, responder, esperar y levantar señales, armar timer y cerrar capacidad—. Las 22 restantes pertenecen a caminos que este paquete no recorre y están nombradas una a una en el propio registro. K3 no es K2 con más procesadores y no pretende volver a recorrer la interfaz entera.
+
+El paquete K4 alcanza **33 de 59**, y la puerta K4 exige las **23** sobre las que descansan sus afirmaciones: llamar, recibir, responder, admitir un efecto, leer, acusar, añadir y consultar el log de control, cinco de dispositivo, consultar memoria, mapear, instalar capacidad, activar dominio, levantar y esperar señales, derivar, cerrar e inspeccionar capacidades, y enlazar una faceta. `INVOCATION_RESOLVE` no está entre ellas y sí se exige: solo ocurre cuando una publicación **no** se compromete, así que la puerta la busca en los tramos cortados y no en el baseline, donde exigirla obligaría a fallar una publicación a propósito.
 
 Tres cosas que estos números **no** dicen:
 
@@ -178,29 +233,28 @@ Lo que no existe, en orden de cuánto se parece a existir:
 - **Aislamiento de DMA.** No hay unidad de remapeo programada. El perfil débil es lo único que esta plataforma sostiene, el kernel lo dice en cada registro que lo menciona, y el perfil fuerte se rechaza con un estado propio en lugar de aproximarse. Un driver no confiable **no** está contenido aquí, y ninguna nota puede decir lo contrario. [ADR-009](../decisions/ADR-009-device-path-and-dma-profiles.md), [OQ-05](open-questions.md).
 - **Hardware físico.** Todo es QEMU con TCG. El inventario de CPU, firmware, dispositivos y grupos de aislamiento sigue sin hacerse.
 - **Más de un dispositivo, y rutas de interrupción legadas.** Una función virtio-blk moderna con MSI-X. No hay IOAPIC, INTx, hotplug, NUMA, suspensión, virtio-net ni GPU, y ninguno está a medias.
-- **Estado durable.** No hay servicio de estado, ni versiones publicadas, ni recuperación tras caída. Es K4.
+- **Durabilidad frente a un corte de energía.** K4 demuestra que el almacén sobrevive a que **el escritor** desaparezca en cualquier punto: la supresión la hace el driver del invitado y QEMU ve solo las escrituras emitidas. Qué habría sobrevivido a que se fuera la luz, y qué hace el flush de una controladora real con su caché de escritura, no se ha medido y por tanto no se declara.
+- **Un almacén grande, o de trabajo.** Dos arenas de 256 bloques, 40 entradas de objeto, 24 ranuras de preparación, cinco workspaces. Los límites se ejercen y se rechazan con estados propios; nada de esto se parece a un almacén real en tamaño.
 - **Thalyx sobre este kernel, rendimiento y prueba formal general.** Nada de eso está implementado o medido.
 
 El plano de diagnóstico de K1 sigue presente, sigue sin ser el plano de recibos, y sus dos entradas de andamiaje permanecen para que la regresión de K1 se siga ejecutando. El primer supervisor no tiene supervisor: su fallo termina la ejecución. No se ha retirado ni reemplazado Linux.
 
 ## Reanudar aquí
 
-**Último hito terminado y pusheado:** **K3 completo**. Rama `feat/k3-smp-devices`, sin fusionar.
+**Último hito terminado y pusheado:** **K4 completo**. Rama `feat/k4-durable-managed-state`, sin fusionar. K3 quedó completo en `feat/k3-smp-devices`.
 
-**Qué está verde, medido en este árbol y con el mismo binario de kernel en las tres fases:** puerta K1 13/13, puerta K2 21/21, autocomprobación K2 28/28, puerta K3 28/28 en los dos perfiles de plataforma, autocomprobación K3 57/57, cobertura K2 51/51 y K3 37/59 con las 26 requeridas dentro, ABI 4/4, vault 43 notas PASS, modelos PASS, `fmt` limpio.
+**Qué está verde, medido en este árbol y con el mismo binario de kernel en las cuatro fases:** puerta K1 13/13, puerta K2 21/21 con autocomprobación 28/28, puerta K3 28/28 en los dos perfiles de plataforma con autocomprobación 57/57, puerta K4 31/31 con autocomprobación 48/48, formato K4 12/12, cobertura K2 51/51, K3 37/59 con las 26 requeridas dentro y K4 33/59 con las 23 requeridas dentro, ABI 4/4, vault 44 notas PASS, modelos PASS, `fmt` limpio, y los cinco paquetes K4 limpios de clippy.
 
-**Qué demostró exactamente la ejecución K3:** cuatro procesadores en línea de cuatro descritos con x2APIC, un procesador ausente que no contesta y no deja recursos reutilizados, cuatro hilos despachados en el mismo instante, 346 migraciones con estado FP, un solo reloj sin regresiones, admisión que nunca prometió más que el presupuesto con 45 220 rechazos por saldo, deuda arrastrada y nunca perdonada, una traducción retirada de un espacio vivo con acuse de los cuatro y el fallo de lectura posterior, un sello publicado contra un escritor vivo con el fallo de escritura posterior y los mismos bytes leídos dos veces, cuarentena de marcos condicionada a que todos hayan invalidado, y el camino de dispositivo entero: enumeración PCI, cuatro ventanas mapeadas sin caché fuera de la página de la tabla MSI-X, interrupciones escritas por el kernel y entregadas a la señal enlazada, lectura, escritura y flush de bloques reales, validador de anillo probado contra daño que el driver fabrica, perfil débil declarado como tal, perfil fuerte rechazado, y el dispositivo parado bajo su driver con el transporte releído y las tres operaciones que el driver recordaba rechazadas por sesión obsoleta.
+**Qué demostró exactamente la ejecución K4:** un medio en blanco formateado por el servicio y decodificado desde el anfitrión por el módulo que genera el esquema; tres publicaciones con CAS y una cuarta petición repetida byte a byte contestada con la misma generación; las cuatro negativas que un CAS debe hacer, cada una provocada a propósito y distinguida de las otras; un lector que prepara contenido y no puede publicarlo; dos publicadores compitiendo por una transición con una sola ganadora; el efecto admitido por el kernel antes de cada publicación y contado desde el log de control por un auditor que no es el servicio auditado; compactación de nueve objetos a la otra arena con la raíz intacta; un outbox durable, `UNKNOWN` incluido; once cortes, uno por punto de escritura, cada uno seguido de un arranque sobre lo que dejó —prepare sin resolver recuperado como abort, commit durable adoptado sin su checkpoint, registro desgarrado que corta el prefijo, respuesta perdida contestada desde el resultado durable, servicio reemplazado dentro de una ejecución—; y el plano de control perdido, donde el log lleno rechaza las admisiones que sus recibos cubrirían en vez de perderlos.
 
-**Qué no demostró, y está escrito así en la evidencia:** aislamiento de DMA, hardware físico, escalabilidad, más de un dispositivo, rutas de interrupción legadas y cobertura de caminos. [Detalle y límites](../evidence/k3-smp-devices.md).
+**Qué no demostró, y está escrito así en la evidencia:** durabilidad frente a un corte de energía, comportamiento de flush de una controladora real, aislamiento de DMA, hardware físico, un almacén de tamaño real y cobertura de caminos. [Detalle y límites](../evidence/k4-durable-state.md).
 
-**Siguiente paso exacto al reanudar:** K4, estado durable, según [la ruta](phases.md). Nada de K3 queda pendiente; lo que queda abierto son las preguntas que K3 no podía cerrar, y están registradas donde corresponde en lugar de en una lista de tareas.
+**Siguiente paso exacto al reanudar:** K5, según [la ruta](phases.md). Nada de K4 queda pendiente y nada de K3 tampoco.
 
-**Bugs encontrados por ejecución en K3, todos corregidos:** seis del kernel, dos de la evidencia y dos del paquete. Los tres fatales comparten familia —suponer que el estado de un hilo basta para decir de quién es— y ninguno era visible con un procesador. Están descritos uno a uno en [la evidencia](../evidence/k3-smp-devices.md).
+**Bugs encontrados por ejecución en K4, todos corregidos:** nueve. Tres comparten familia —dar por hecho que una cosa que se guarda no cuesta nada— y agotaban la tabla de invocaciones, la tabla global de concesiones y el área de preparación. Tres son sobre decir la verdad en la respuesta. Tres solo aparecen bajo un corte. Están descritos uno a uno en [la evidencia](../evidence/k4-durable-state.md).
 
-## Siguiente trabajo: K4
+## Siguiente trabajo: K5
 
-Estado durable, según [la ruta](phases.md): versiones inmutables, publicación con CAS, recuperación tras caída en cada punto de escritura, y el recibo que hace auditable lo publicado. El perfil de durabilidad tendrá que declarar sus dependencias con la misma honestidad con la que el perfil de DMA declara las suyas: sin conocer el comportamiento de flush del dispositivo no se declara durabilidad, igual que sin IOMMU programada no se declara aislamiento.
-
-Lo primero que K4 debe romper es la suposición que K3 tiene derecho a hacer: que todo lo que importa cabe en memoria y desaparece con la ejecución.
+Port de Thalyx y herramientas, según [la ruta](phases.md). Antes de eso, lo que K4 deja abierto y K5 hereda: el perfil de durabilidad declara que la supresión la hace el driver del invitado, y cualquier afirmación más fuerte necesita conocer el comportamiento de flush de un dispositivo real —el mismo tipo de dependencia que el perfil de DMA declara sobre la unidad de remapeo—.
 
 No hay una elección técnica pendiente que deba devolver el diseño al usuario. [Las preguntas abiertas](open-questions.md) especifican qué dato falta y con qué decisión conservadora avanzar.

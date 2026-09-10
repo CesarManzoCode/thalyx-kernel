@@ -1,0 +1,803 @@
+{
+  "schema": "thalyx-k4-store/v1",
+  "comment": [
+    "Single source of the K4 durable store format and of the managed-state",
+    "service protocol. tools/gen_k4_format.py derives from this file the Rust",
+    "module the service encodes with, the Python module the gate decodes with,",
+    "and the byte fixtures both are checked against; tools/check_k4_format.py",
+    "regenerates and compares. Nothing in user/k4fmt/src/generated.rs or in",
+    "tools/k4_format.py is written by hand.",
+    "Generating both sides does not make them agree by argument: they share",
+    "offsets, so of course they agree about those. What the arrangement buys is",
+    "that neither the service nor the gate defines the format. The bytes on the",
+    "medium are the ones this file specifies; the digests are computed by a",
+    "hand-written SHA-256 inside the guest and by hashlib on the host, and the",
+    "golden vectors this file fixes are what both are held to.",
+    "Every structure is little-endian with explicit padding; a field that would",
+    "need implicit padding is a schema error rather than something the",
+    "generator quietly inserts.",
+    "A digest prefix is the listed ASCII bytes followed by one zero byte, so a",
+    "raw byte object and a tree can never occupy the same unlabelled space."
+  ],
+  "version": {
+    "major": 1,
+    "minor": 0
+  },
+  "geometry": {
+    "block_size": 4096,
+    "sector_size": 512,
+    "store_base_block": 64,
+    "superblock_a_block": 0,
+    "superblock_b_block": 1,
+    "arena0_start_block": 2,
+    "arena_block_count": 256,
+    "arena1_start_block": 258,
+    "store_block_count": 514,
+    "harness_directive_block": 0,
+    "object_max_bytes": 3072,
+    "record_max_blocks": 1,
+    "max_tree_entries": 12,
+    "max_principals": 4,
+    "max_results": 8,
+    "max_retained": 4,
+    "closure_reserve_blocks": 4,
+    "compaction_reserve_blocks": 8
+  },
+  "prefixes": {
+    "object": "thalyx-k4/object/v1",
+    "request": "thalyx-k4/request/v1",
+    "store_uuid": "thalyx-k4/store/v1"
+  },
+  "magics": {
+    "superblock": "THLXSB01",
+    "record": "THLXRC01",
+    "harness": "THLXFLT1"
+  },
+  "enums": {
+    "RecordKind": [
+      { "name": "CHECKPOINT", "value": 1, "doc": "Opens an arena: published root, high-water marks, retained roots." },
+      { "name": "OBJECT", "value": 2, "doc": "One immutable content-addressed object." },
+      { "name": "PREPARE", "value": 3, "doc": "A publication request that has been admitted and may not be forgotten." },
+      { "name": "COMMIT", "value": 4, "doc": "The transition that makes a new generation the published one." },
+      { "name": "ABORT", "value": 5, "doc": "A prepared request that will not commit." },
+      { "name": "OUTBOX", "value": 6, "doc": "What a broker reported about an intent committed with a publication." }
+    ],
+    "ObjectType": [
+      { "name": "BYTES", "value": 1, "doc": "Opaque content." },
+      { "name": "TREE", "value": 2, "doc": "Ordered name to object bindings." },
+      { "name": "MANIFEST", "value": 3, "doc": "A candidate or published root." },
+      { "name": "POLICY", "value": 4, "doc": "Who may publish and what evidence a publication requires." },
+      { "name": "VALIDATION", "value": 5, "doc": "A limited claim about named inputs and a named version." },
+      { "name": "RECEIPT", "value": 6, "doc": "What a publication was: request, inputs, generation." }
+    ],
+    "StoreOp": [
+      { "name": "QUERY", "value": 1, "doc": "Published generation, root, durable extent and free capacity." },
+      { "name": "READ", "value": 2, "doc": "Bytes of one object of one version, with a bounded retention." },
+      { "name": "FORK", "value": 3, "doc": "A private workspace over a version." },
+      { "name": "WRITE", "value": 4, "doc": "Bind a name to an object inside a private workspace." },
+      { "name": "FREEZE", "value": 5, "doc": "Turn a workspace into an immutable candidate root." },
+      { "name": "PUBLISH", "value": 6, "doc": "Ask for a conditioned transition of the published root." },
+      { "name": "RESULT", "value": 7, "doc": "The durable answer for a request identity, or explicit uncertainty." },
+      { "name": "DISCARD", "value": 8, "doc": "Release a workspace once its readers and operations are done." },
+      { "name": "PUT_OBJECT", "value": 9, "doc": "Stage an immutable object; returns its content digest." },
+      { "name": "RETAIN", "value": 10, "doc": "Hold a version against reuse for a bounded time." },
+      { "name": "RELEASE", "value": 11, "doc": "Drop a retention." },
+      { "name": "COMPACT", "value": 12, "doc": "Maintenance: copy the reachable set to the other arena." },
+      { "name": "HARNESS", "value": 13, "doc": "Report the fault directive this run was started with. Scaffolding." },
+      { "name": "STATS", "value": 14, "doc": "Counters the service recovered or accumulated." }
+    ],
+    "StoreStatus": [
+      { "name": "OK", "value": 0 },
+      { "name": "INVALID_REQUEST", "value": 1 },
+      { "name": "FORBIDDEN", "value": 2, "doc": "The authenticated facet does not carry this authority." },
+      { "name": "NOT_FOUND", "value": 3 },
+      { "name": "GENERATION_STALE", "value": 4, "doc": "The expected generation is not the published one." },
+      { "name": "VALIDATION_MISMATCH", "value": 5, "doc": "The evidence does not name these inputs or this version." },
+      { "name": "POLICY_REFUSED", "value": 6 },
+      { "name": "CONFLICT", "value": 7, "doc": "That request identity was already used for different inputs." },
+      { "name": "SEQUENCE_GAP", "value": 8, "doc": "The previous request of this principal is unresolved." },
+      { "name": "RESULT_EXPIRED", "value": 9, "doc": "Resolved and evicted: neither commit nor abort is asserted." },
+      { "name": "EXHAUSTED", "value": 10, "doc": "Admitting would eat the reserve recovery and closure need." },
+      { "name": "UNAVAILABLE", "value": 11, "doc": "Recovery has not finished." },
+      { "name": "EFFECT_REFUSED", "value": 12, "doc": "The kernel refused to admit the effect: a barrier won the race." },
+      { "name": "INTEGRITY_FAILED", "value": 13, "doc": "A prefix that was supposed to be durable did not verify." },
+      { "name": "RETAINED", "value": 14, "doc": "Readers or retentions still name it." },
+      { "name": "TOO_LARGE", "value": 15 }
+    ],
+    "ResultOutcome": [
+      { "name": "NEVER_SEEN", "value": 0, "doc": "No durable trace of that request identity." },
+      { "name": "COMMITTED", "value": 1 },
+      { "name": "ABORTED", "value": 2 },
+      { "name": "UNKNOWN", "value": 3, "doc": "Durably prepared and not resolved: neither outcome may be asserted." },
+      { "name": "RESULT_EXPIRED", "value": 4 },
+      { "name": "PENDING", "value": 5 }
+    ],
+    "OutboxStatus": [
+      { "name": "NONE", "value": 0 },
+      { "name": "PENDING", "value": 1 },
+      { "name": "DELIVERED", "value": 2, "doc": "The broker acknowledged this idempotency key." },
+      { "name": "UNKNOWN", "value": 3, "doc": "The attempt neither succeeded nor is known to have failed." },
+      { "name": "REFUSED", "value": 4, "doc": "The broker answered that it will not accept it." }
+    ],
+    "AbortReason": [
+      { "name": "NONE", "value": 0 },
+      { "name": "RECOVERED_UNRESOLVED", "value": 1, "doc": "Prepared, never committed, resolved by recovery." },
+      { "name": "DEPENDENCY_MISSING", "value": 2, "doc": "A commit existed but an object it names does not." },
+      { "name": "SERVICE_REFUSED", "value": 3 },
+      { "name": "EXHAUSTED", "value": 4 }
+    ],
+    "FaultMode": [
+      { "name": "NONE", "value": 0 },
+      { "name": "STOP", "value": 1, "doc": "Issue nothing further and end the machine at the named point." },
+      { "name": "DROP_WRITE", "value": 2, "doc": "Never issue the write at the named point; carry on as if it had been." },
+      { "name": "TEAR_WRITE", "value": 3, "doc": "Issue only the first sector of that record, then stop." },
+      { "name": "LOSE_RESPONSE", "value": 4, "doc": "Complete durably and end the machine before the caller is answered." },
+      { "name": "KILL_SERVICE", "value": 5, "doc": "Stop the service domain at the named point; the machine keeps running." },
+      { "name": "IO_ERROR", "value": 6, "doc": "The medium refuses the write at the named point. A service may not publish on a state it only assumes." },
+      { "name": "REORDER", "value": 7, "doc": "Hold the write at the named point and issue it after the next one, so an unflushed sequence is not the order the medium sees." }
+    ],
+    "FaultPoint": [
+      { "name": "NONE", "value": 0 },
+      { "name": "BEFORE_PREPARE", "value": 1 },
+      { "name": "AFTER_PREPARE", "value": 2 },
+      { "name": "BEFORE_OBJECT", "value": 3, "doc": "At the object whose ordinal is the fault argument." },
+      { "name": "AFTER_OBJECTS", "value": 4 },
+      { "name": "BEFORE_COMMIT", "value": 5 },
+      { "name": "AFTER_COMMIT", "value": 6, "doc": "The commit is durable; nothing after it is." },
+      { "name": "BEFORE_ABORT", "value": 7 },
+      { "name": "AFTER_CHECKPOINT", "value": 8, "doc": "The new arena is written; the superblock has not switched." },
+      { "name": "AFTER_SUPERBLOCK", "value": 9, "doc": "The switch is durable; the old arena has not been reused." },
+      { "name": "AFTER_OUTBOX_SEND", "value": 10 }
+    ]
+  },
+  "structs": [
+    {
+      "name": "StoreSuperblock",
+      "doc": "One of two alternating superblocks. The valid one with the highest generation selects the arena.",
+      "fields": [
+        { "name": "magic", "type": "u8[8]" },
+        { "name": "format_major", "type": "u16" },
+        { "name": "format_minor", "type": "u16" },
+        { "name": "flags", "type": "u32" },
+        { "name": "store_uuid", "type": "u8[16]", "doc": "Identity of this store, so a restored copy is not mistaken for continuity." },
+        { "name": "store_epoch", "type": "u64", "doc": "Format and administrative recovery epoch." },
+        { "name": "superblock_generation", "type": "u64", "doc": "Strictly increasing; the newest complete one wins." },
+        { "name": "active_arena", "type": "u64" },
+        { "name": "arena0_start_block", "type": "u64" },
+        { "name": "arena0_block_count", "type": "u64" },
+        { "name": "arena1_start_block", "type": "u64" },
+        { "name": "arena1_block_count", "type": "u64" },
+        { "name": "block_size", "type": "u64" },
+        { "name": "checkpoint_sequence", "type": "u64", "doc": "Sequence of the checkpoint that opens the active arena." },
+        { "name": "durable_through_sequence", "type": "u64", "doc": "Lower bound on what was durable when this was written. A shorter valid prefix is an integrity failure, not a torn tail." },
+        { "name": "published_generation", "type": "u64" },
+        { "name": "published_root", "type": "u8[32]" },
+        { "name": "reserved0", "type": "u64" },
+        { "name": "digest", "type": "u8[32]", "doc": "SHA-256 of the preceding bytes of this superblock." }
+      ]
+    },
+    {
+      "name": "RecordHeader",
+      "doc": "Header of every framed record. A record occupies whole blocks, so a torn write damages its own record and never one already durable.",
+      "fields": [
+        { "name": "magic", "type": "u8[8]" },
+        { "name": "format_major", "type": "u16" },
+        { "name": "format_minor", "type": "u16" },
+        { "name": "kind", "type": "u32", "doc": "RecordKind." },
+        { "name": "sequence", "type": "u64", "doc": "Increases by exactly one within an arena." },
+        { "name": "store_epoch", "type": "u64" },
+        { "name": "payload_len", "type": "u64" },
+        { "name": "block_count", "type": "u64" },
+        { "name": "arena", "type": "u32" },
+        { "name": "reserved0", "type": "u32" },
+        { "name": "reserved1", "type": "u64" },
+        { "name": "prev_digest", "type": "u8[32]", "doc": "Digest of the preceding record; zero for the first of an arena." },
+        { "name": "digest", "type": "u8[32]", "doc": "SHA-256 of the header up to this field, then of payload_len payload bytes." }
+      ]
+    },
+    {
+      "name": "ObjectRecordHeader",
+      "doc": "Payload head of an OBJECT record; the canonical bytes follow it.",
+      "fields": [
+        { "name": "object_type", "type": "u32" },
+        { "name": "reserved0", "type": "u32" },
+        { "name": "length", "type": "u64" },
+        { "name": "content_digest", "type": "u8[32]", "doc": "The canonical object digest, recomputed on recovery rather than believed." }
+      ]
+    },
+    {
+      "name": "PrepareRecord",
+      "doc": "Payload of PREPARE: everything that decides what this publication means.",
+      "fields": [
+        { "name": "principal", "type": "u64" },
+        { "name": "request_sequence", "type": "u64" },
+        { "name": "request_digest", "type": "u8[32]", "doc": "Digest of every input that affects the meaning of the request." },
+        { "name": "expected_generation", "type": "u64" },
+        { "name": "candidate_root", "type": "u8[32]" },
+        { "name": "policy_digest", "type": "u8[32]" },
+        { "name": "validation_digest", "type": "u8[32]" },
+        { "name": "flags", "type": "u64", "doc": "Bit 0: an outbox intent is committed with this publication." },
+        { "name": "outbox_target", "type": "u64" },
+        { "name": "outbox_payload_digest", "type": "u8[32]" },
+        { "name": "admitted_ns", "type": "u64" },
+        { "name": "invocation_id", "type": "u64", "doc": "The invocation whose effect admission authorised beginning this." }
+      ]
+    },
+    {
+      "name": "CommitRecord",
+      "doc": "Payload of COMMIT. Adopted only when its prepare and every object it depends on are in the same valid prefix.",
+      "fields": [
+        { "name": "prepare_sequence", "type": "u64" },
+        { "name": "prepare_digest", "type": "u8[32]" },
+        { "name": "new_generation", "type": "u64" },
+        { "name": "root_digest", "type": "u8[32]" },
+        { "name": "policy_digest", "type": "u8[32]" },
+        { "name": "receipt_digest", "type": "u8[32]" },
+        { "name": "principal", "type": "u64" },
+        { "name": "request_sequence", "type": "u64" },
+        { "name": "committed_ns", "type": "u64" },
+        { "name": "object_count", "type": "u64", "doc": "Objects written between the prepare and this commit." }
+      ]
+    },
+    {
+      "name": "AbortRecord",
+      "doc": "Payload of ABORT: a prepared identity that will never commit.",
+      "fields": [
+        { "name": "prepare_sequence", "type": "u64" },
+        { "name": "prepare_digest", "type": "u8[32]" },
+        { "name": "reason", "type": "u32", "doc": "AbortReason." },
+        { "name": "reserved0", "type": "u32" },
+        { "name": "principal", "type": "u64" },
+        { "name": "request_sequence", "type": "u64" },
+        { "name": "aborted_ns", "type": "u64" }
+      ]
+    },
+    {
+      "name": "CheckpointRecord",
+      "doc": "Payload head of CHECKPOINT; principal, result and retained entries follow in that order.",
+      "fields": [
+        { "name": "published_generation", "type": "u64" },
+        { "name": "published_root", "type": "u8[32]" },
+        { "name": "published_policy", "type": "u8[32]" },
+        { "name": "published_receipt", "type": "u8[32]" },
+        { "name": "principal_count", "type": "u64" },
+        { "name": "result_count", "type": "u64" },
+        { "name": "retained_count", "type": "u64" },
+        { "name": "object_count", "type": "u64", "doc": "Objects copied into this arena after the checkpoint." },
+        { "name": "created_ns", "type": "u64" },
+        { "name": "source_arena", "type": "u64" },
+        { "name": "compaction_generation", "type": "u64" }
+      ]
+    },
+    {
+      "name": "PrincipalEntry",
+      "doc": "A principal's durable high-water mark and its at most one pending request.",
+      "fields": [
+        { "name": "principal", "type": "u64" },
+        { "name": "high_water", "type": "u64", "doc": "Highest resolved request sequence." },
+        { "name": "pending_sequence", "type": "u64", "doc": "Prepared and unresolved, or zero." }
+      ]
+    },
+    {
+      "name": "ResultEntry",
+      "doc": "A recent durable result. Evicting one turns a later query into RESULT_EXPIRED, which asserts neither commit nor abort.",
+      "fields": [
+        { "name": "principal", "type": "u64" },
+        { "name": "request_sequence", "type": "u64" },
+        { "name": "outcome", "type": "u32" },
+        { "name": "outbox_status", "type": "u32" },
+        { "name": "generation", "type": "u64" },
+        { "name": "root_digest", "type": "u8[32]" },
+        { "name": "request_digest", "type": "u8[32]" }
+      ]
+    },
+    {
+      "name": "RetainedEntry",
+      "doc": "A root held against reuse until its expiry.",
+      "fields": [
+        { "name": "root_digest", "type": "u8[32]" },
+        { "name": "expiry_ns", "type": "u64" }
+      ]
+    },
+    {
+      "name": "OutboxRecord",
+      "doc": "Payload of OUTBOX: what a broker reported about an intent. UNKNOWN is a result, not a failure to record one.",
+      "fields": [
+        { "name": "commit_sequence", "type": "u64" },
+        { "name": "request_digest", "type": "u8[32]", "doc": "The idempotency key the broker was given." },
+        { "name": "principal", "type": "u64" },
+        { "name": "request_sequence", "type": "u64" },
+        { "name": "status", "type": "u32", "doc": "OutboxStatus." },
+        { "name": "attempts", "type": "u32" },
+        { "name": "target", "type": "u64" },
+        { "name": "recorded_ns", "type": "u64" }
+      ]
+    },
+    {
+      "name": "HarnessDirective",
+      "doc": "Scaffolding. Written by the host into a block outside the store and read once at startup; recovery never consults it and no format rule depends on it.",
+      "fields": [
+        { "name": "magic", "type": "u8[8]" },
+        { "name": "version", "type": "u32" },
+        { "name": "fault_point", "type": "u32" },
+        { "name": "fault_arg", "type": "u64" },
+        { "name": "fault_mode", "type": "u32" },
+        { "name": "leg", "type": "u32" },
+        { "name": "scenario", "type": "u64" },
+        { "name": "seed", "type": "u64" },
+        { "name": "stop_at_next_flush", "type": "u64", "doc": "Scaffolding: 1 makes the service end the run where it would have flushed next, so a mode that only matters before a flush can be observed after one." },
+        { "name": "digest", "type": "u8[32]" }
+      ]
+    },
+    {
+      "name": "TreeHeader",
+      "doc": "Canonical head of a TREE object; entries follow, ordered by name bytes.",
+      "fields": [
+        { "name": "entry_count", "type": "u32" },
+        { "name": "reserved0", "type": "u32" }
+      ]
+    },
+    {
+      "name": "TreeEntry",
+      "doc": "One binding. Names are unique, non-empty, carry no NUL and no separator, and are never normalised.",
+      "fields": [
+        { "name": "child_type", "type": "u32" },
+        { "name": "flags", "type": "u32", "doc": "Bit 0: executable. Part of the version, not metadata beside it." },
+        { "name": "length", "type": "u64" },
+        { "name": "digest", "type": "u8[32]" },
+        { "name": "name_len", "type": "u32" },
+        { "name": "reserved0", "type": "u32" },
+        { "name": "name", "type": "u8[32]", "doc": "Bytes past name_len must be zero." }
+      ]
+    },
+    {
+      "name": "Manifest",
+      "doc": "Canonical bytes of a root: the content, the policy it was published under, and the evidence offered for it.",
+      "fields": [
+        { "name": "format", "type": "u32" },
+        { "name": "reserved0", "type": "u32" },
+        { "name": "tree_digest", "type": "u8[32]" },
+        { "name": "policy_digest", "type": "u8[32]" },
+        { "name": "validation_digest", "type": "u8[32]" },
+        { "name": "entry_count", "type": "u64" },
+        { "name": "total_bytes", "type": "u64" }
+      ]
+    },
+    {
+      "name": "Policy",
+      "doc": "Canonical bytes of a policy: who may publish, and what evidence a publication must carry.",
+      "fields": [
+        { "name": "format", "type": "u32" },
+        { "name": "requires_validation", "type": "u32" },
+        { "name": "publish_principals", "type": "u64", "doc": "Bit per principal. Authority comes from the facet; this only narrows it further." },
+        { "name": "validation_tool_id", "type": "u64" },
+        { "name": "min_coverage_ppm", "type": "u64" },
+        { "name": "tool_config_digest", "type": "u8[32]" }
+      ]
+    },
+    {
+      "name": "Validation",
+      "doc": "Canonical bytes of a limited claim: this tool, this configuration, these inputs, that version.",
+      "fields": [
+        { "name": "format", "type": "u32" },
+        { "name": "result", "type": "u32", "doc": "1 pass, 2 fail." },
+        { "name": "input_tree_digest", "type": "u8[32]", "doc": "The exact inputs the claim is about." },
+        { "name": "base_generation", "type": "u64", "doc": "The version it was computed against." },
+        { "name": "tool_id", "type": "u64" },
+        { "name": "tool_config_digest", "type": "u8[32]" },
+        { "name": "coverage_ppm", "type": "u64" },
+        { "name": "produced_ns", "type": "u64" }
+      ]
+    },
+    {
+      "name": "Receipt",
+      "doc": "Canonical bytes of what a publication was. Written before the commit that names it.",
+      "fields": [
+        { "name": "format", "type": "u32" },
+        { "name": "reserved0", "type": "u32" },
+        { "name": "principal", "type": "u64" },
+        { "name": "request_sequence", "type": "u64" },
+        { "name": "request_digest", "type": "u8[32]" },
+        { "name": "expected_generation", "type": "u64" },
+        { "name": "new_generation", "type": "u64" },
+        { "name": "root_digest", "type": "u8[32]" },
+        { "name": "policy_digest", "type": "u8[32]" },
+        { "name": "validation_digest", "type": "u8[32]" },
+        { "name": "committed_ns", "type": "u64" },
+        { "name": "outbox_target", "type": "u64" }
+      ]
+    },
+    {
+      "name": "StoreRequest",
+      "doc": "The service protocol request, carried in the inline payload of one call.",
+      "fields": [
+        { "name": "op", "type": "u32", "doc": "StoreOp." },
+        { "name": "flags", "type": "u32" },
+        { "name": "request_sequence", "type": "u64" },
+        { "name": "arg0", "type": "u64" },
+        { "name": "arg1", "type": "u64" },
+        { "name": "arg2", "type": "u64" },
+        { "name": "digest0", "type": "u8[32]" },
+        { "name": "digest1", "type": "u8[32]" },
+        { "name": "digest2", "type": "u8[32]" },
+        { "name": "name", "type": "u8[32]" },
+        { "name": "reserved0", "type": "u64" }
+      ]
+    },
+    {
+      "name": "StoreReply",
+      "doc": "The service protocol reply. The principal is never in it: it comes from the facet the kernel authenticated.",
+      "fields": [
+        { "name": "status", "type": "u32", "doc": "StoreStatus." },
+        { "name": "detail", "type": "u32" },
+        { "name": "generation", "type": "u64" },
+        { "name": "value", "type": "u64" },
+        { "name": "digest0", "type": "u8[32]" },
+        { "name": "digest1", "type": "u8[32]" },
+        { "name": "outcome", "type": "u32", "doc": "ResultOutcome." },
+        { "name": "outbox_status", "type": "u32" },
+        { "name": "sequence", "type": "u64" },
+        { "name": "durable_through", "type": "u64" },
+        { "name": "free_blocks", "type": "u64" },
+        { "name": "reserved0", "type": "u64" }
+      ]
+    }
+  ],
+  "golden": [
+    {
+      "name": "object_empty",
+      "form": "object_bytes",
+      "doc": "An object of no bytes. Its digest is not the digest of an empty tree, because the type is inside the prefixed preimage.",
+      "content": "ascii:"
+    },
+    {
+      "name": "object_alpha",
+      "form": "object_bytes",
+      "doc": "Ordinary content.",
+      "content": "ascii:alpha bytes for the k4 golden vectors\n"
+    },
+    {
+      "name": "object_beta",
+      "form": "object_bytes",
+      "doc": "Short content, used where a digest is needed for something that is not a root.",
+      "content": "ascii:beta"
+    },
+    {
+      "name": "object_wide",
+      "form": "object_bytes",
+      "doc": "Content wide enough that a record framing it spans more than one sector, which is what makes a torn write detectable rather than invisible.",
+      "content": { "repeat": "ascii:thalyx-k4 durable ", "length": 1024 }
+    },
+    {
+      "name": "tree_leaf",
+      "form": "tree",
+      "doc": "A tree of three bytes objects in canonical name order.",
+      "entries": [
+        { "name": "alpha", "child": "object_alpha" },
+        { "name": "beta", "child": "object_beta" },
+        { "name": "empty", "child": "object_empty" }
+      ]
+    },
+    {
+      "name": "tree_root",
+      "form": "tree",
+      "doc": "A tree naming a subtree and a file whose executable bit is part of the version.",
+      "entries": [
+        { "name": "data", "child": "tree_leaf" },
+        { "name": "notes", "child": "object_alpha", "flags": 1 }
+      ]
+    },
+    {
+      "name": "policy_signed",
+      "form": "struct_object",
+      "object_type": "POLICY",
+      "struct": "Policy",
+      "doc": "A policy that requires validation and admits two of the four principals.",
+      "fields": {
+        "format": 1,
+        "requires_validation": 1,
+        "publish_principals": 6,
+        "validation_tool_id": 5426678735330934785,
+        "min_coverage_ppm": 750000,
+        "tool_config_digest": "digest:object_beta"
+      }
+    },
+    {
+      "name": "validation_pass",
+      "form": "struct_object",
+      "object_type": "VALIDATION",
+      "struct": "Validation",
+      "doc": "A passing claim about exactly the inputs of `tree_root`, computed against generation seven.",
+      "fields": {
+        "format": 1,
+        "result": 1,
+        "input_tree_digest": "digest:tree_root",
+        "base_generation": 7,
+        "tool_id": 5426678735330934785,
+        "tool_config_digest": "digest:object_beta",
+        "coverage_ppm": 812345,
+        "produced_ns": 1234567890
+      }
+    },
+    {
+      "name": "manifest_v8",
+      "form": "struct_object",
+      "object_type": "MANIFEST",
+      "struct": "Manifest",
+      "doc": "The candidate root of the eighth generation: content, policy and evidence in one object.",
+      "fields": {
+        "format": 1,
+        "tree_digest": "digest:tree_root",
+        "policy_digest": "digest:policy_signed",
+        "validation_digest": "digest:validation_pass",
+        "entry_count": 2,
+        "total_bytes": 42
+      }
+    },
+    {
+      "name": "request_v8",
+      "form": "request_digest",
+      "doc": "The identity of the publication that produced generation eight, outbox intent included.",
+      "principal": 2,
+      "request_sequence": 5,
+      "op": 6,
+      "expected_generation": 7,
+      "candidate_root": "digest:manifest_v8",
+      "policy_digest": "digest:policy_signed",
+      "validation_digest": "digest:validation_pass",
+      "outbox_target": 39185,
+      "outbox_payload_digest": "digest:object_beta"
+    },
+    {
+      "name": "receipt_v8",
+      "form": "struct_object",
+      "object_type": "RECEIPT",
+      "struct": "Receipt",
+      "doc": "What that publication was, written before the commit that names it.",
+      "fields": {
+        "format": 1,
+        "principal": 2,
+        "request_sequence": 5,
+        "request_digest": "digest:request_v8",
+        "expected_generation": 7,
+        "new_generation": 8,
+        "root_digest": "digest:manifest_v8",
+        "policy_digest": "digest:policy_signed",
+        "validation_digest": "digest:validation_pass",
+        "committed_ns": 1234599999,
+        "outbox_target": 39185
+      }
+    },
+    {
+      "name": "store_uuid_a",
+      "form": "store_uuid",
+      "doc": "The identity of the store this vector set describes.",
+      "seed": 6072076158938251265,
+      "store_epoch": 1
+    },
+    {
+      "name": "record_checkpoint",
+      "form": "record",
+      "kind": "CHECKPOINT",
+      "doc": "The checkpoint that opens arena zero, carrying two principals, one result and one retention.",
+      "sequence": 1,
+      "store_epoch": 1,
+      "arena": 0,
+      "struct": "CheckpointRecord",
+      "fields": {
+        "published_generation": 7,
+        "published_root": "digest:tree_root",
+        "published_policy": "digest:policy_signed",
+        "published_receipt": "digest:object_beta",
+        "principal_count": 2,
+        "result_count": 1,
+        "retained_count": 1,
+        "object_count": 0,
+        "created_ns": 1234500000,
+        "source_arena": 1,
+        "compaction_generation": 2
+      },
+      "entries": [
+        {
+          "struct": "PrincipalEntry",
+          "fields": { "principal": 1, "high_water": 3, "pending_sequence": 0 }
+        },
+        {
+          "struct": "PrincipalEntry",
+          "fields": { "principal": 2, "high_water": 4, "pending_sequence": 0 }
+        },
+        {
+          "struct": "ResultEntry",
+          "fields": {
+            "principal": 2,
+            "request_sequence": 4,
+            "outcome": 1,
+            "outbox_status": 2,
+            "generation": 7,
+            "root_digest": "digest:tree_root",
+            "request_digest": "digest:object_beta"
+          }
+        },
+        {
+          "struct": "RetainedEntry",
+          "fields": { "root_digest": "digest:tree_root", "expiry_ns": 9000000000 }
+        }
+      ]
+    },
+    {
+      "name": "record_object",
+      "form": "record",
+      "kind": "OBJECT",
+      "doc": "An OBJECT record framing the manifest: head, then the canonical bytes the digest is taken over.",
+      "sequence": 2,
+      "store_epoch": 1,
+      "arena": 0,
+      "prev": "record_checkpoint",
+      "struct": "ObjectRecordHeader",
+      "fields": {
+        "object_type": 3,
+        "length": 120,
+        "content_digest": "digest:manifest_v8"
+      },
+      "body": "manifest_v8"
+    },
+    {
+      "name": "record_prepare",
+      "form": "record",
+      "kind": "PREPARE",
+      "doc": "The prepare of the eighth generation. After this record is durable the identity may not be forgotten.",
+      "sequence": 3,
+      "store_epoch": 1,
+      "arena": 0,
+      "prev": "record_object",
+      "struct": "PrepareRecord",
+      "fields": {
+        "principal": 2,
+        "request_sequence": 5,
+        "request_digest": "digest:request_v8",
+        "expected_generation": 7,
+        "candidate_root": "digest:manifest_v8",
+        "policy_digest": "digest:policy_signed",
+        "validation_digest": "digest:validation_pass",
+        "flags": 1,
+        "outbox_target": 39185,
+        "outbox_payload_digest": "digest:object_beta",
+        "admitted_ns": 1234550000,
+        "invocation_id": 77
+      }
+    },
+    {
+      "name": "record_commit",
+      "form": "record",
+      "kind": "COMMIT",
+      "doc": "The commit that makes generation eight the published one.",
+      "sequence": 4,
+      "store_epoch": 1,
+      "arena": 0,
+      "prev": "record_prepare",
+      "struct": "CommitRecord",
+      "fields": {
+        "prepare_sequence": 3,
+        "prepare_digest": "digest:record_prepare",
+        "new_generation": 8,
+        "root_digest": "digest:manifest_v8",
+        "policy_digest": "digest:policy_signed",
+        "receipt_digest": "digest:receipt_v8",
+        "principal": 2,
+        "request_sequence": 5,
+        "committed_ns": 1234599999,
+        "object_count": 6
+      }
+    },
+    {
+      "name": "record_abort",
+      "form": "record",
+      "kind": "ABORT",
+      "doc": "A prepare that recovery resolved because no commit followed it.",
+      "sequence": 5,
+      "store_epoch": 1,
+      "arena": 0,
+      "prev": "record_commit",
+      "struct": "AbortRecord",
+      "fields": {
+        "prepare_sequence": 3,
+        "prepare_digest": "digest:record_prepare",
+        "reason": 1,
+        "principal": 1,
+        "request_sequence": 4,
+        "aborted_ns": 1234700000
+      }
+    },
+    {
+      "name": "record_outbox",
+      "form": "record",
+      "kind": "OUTBOX",
+      "doc": "What the broker reported about the intent committed with generation eight: neither delivered nor known to have failed.",
+      "sequence": 6,
+      "store_epoch": 1,
+      "arena": 0,
+      "prev": "record_abort",
+      "struct": "OutboxRecord",
+      "fields": {
+        "commit_sequence": 4,
+        "request_digest": "digest:request_v8",
+        "principal": 2,
+        "request_sequence": 5,
+        "status": 3,
+        "attempts": 2,
+        "target": 39185,
+        "recorded_ns": 1234800000
+      }
+    },
+    {
+      "name": "record_object_wide",
+      "form": "record",
+      "kind": "OBJECT",
+      "doc": "An OBJECT record whose payload crosses a sector boundary. A tear after the first sector leaves a header that no longer describes what follows it.",
+      "sequence": 7,
+      "store_epoch": 1,
+      "arena": 0,
+      "prev": "record_outbox",
+      "struct": "ObjectRecordHeader",
+      "fields": {
+        "object_type": 1,
+        "length": 1024,
+        "content_digest": "digest:object_wide"
+      },
+      "body": "object_wide"
+    },
+    {
+      "name": "superblock_live",
+      "form": "superblock",
+      "doc": "The newer of the two superblocks: generation four, arena zero, generation eight published.",
+      "fields": {
+        "flags": 0,
+        "store_uuid": "bytes:store_uuid_a",
+        "store_epoch": 1,
+        "superblock_generation": 4,
+        "active_arena": 0,
+        "arena0_start_block": 2,
+        "arena0_block_count": 256,
+        "arena1_start_block": 258,
+        "arena1_block_count": 256,
+        "checkpoint_sequence": 1,
+        "durable_through_sequence": 6,
+        "published_generation": 8,
+        "published_root": "digest:manifest_v8"
+      }
+    },
+    {
+      "name": "superblock_stale",
+      "form": "superblock",
+      "doc": "The older superblock. Both are valid; the higher generation is the one recovery adopts.",
+      "fields": {
+        "flags": 0,
+        "store_uuid": "bytes:store_uuid_a",
+        "store_epoch": 1,
+        "superblock_generation": 3,
+        "active_arena": 1,
+        "arena0_start_block": 2,
+        "arena0_block_count": 256,
+        "arena1_start_block": 258,
+        "arena1_block_count": 256,
+        "checkpoint_sequence": 1,
+        "durable_through_sequence": 4,
+        "published_generation": 7,
+        "published_root": "digest:tree_root"
+      }
+    },
+    {
+      "name": "harness_stop_after_commit",
+      "form": "harness",
+      "doc": "Scaffolding: the directive that ends the machine once a commit is durable and nothing after it is.",
+      "fields": {
+        "fault_point": 6,
+        "fault_arg": 0,
+        "fault_mode": 1,
+        "leg": 1,
+        "scenario": 8,
+        "seed": 20260909
+      }
+    }
+  ]
+}

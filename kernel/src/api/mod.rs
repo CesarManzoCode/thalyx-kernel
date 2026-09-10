@@ -239,7 +239,31 @@ fn release_entry(machine: &mut Machine, domain: usize, entry: crate::obj::CapEnt
         node.refs = node.refs.saturating_sub(1);
     }
     adjust_object_refs(machine, entry.object, -1);
+    if entry.object.kind == ObjKind::Invocation {
+        collect_invocation(machine, entry.object.index as usize);
+    }
     collect_grant(machine, entry.grant);
+}
+
+/// Frees an invocation record once it is discharged and nothing names it.
+///
+/// Discharge and the last reference happen in either order. A caller that
+/// collects its reply discharges an invocation the receiver is still holding a
+/// ticket for; a receiver that closes its ticket may be the last to let go. The
+/// record can only be reused when both have happened, so both paths end here
+/// and whichever is second is the one that reclaims it. Reclaiming only at
+/// discharge is what made a service that keeps its tickets exhaust the table
+/// with requests it had already answered.
+pub fn collect_invocation(machine: &mut Machine, index: usize) {
+    let Some(invocation) = machine.invocations.get(index) else {
+        return;
+    };
+    if invocation.state != crate::ipc::State::Resolved || invocation.refs != 0 {
+        return;
+    }
+    let generation = invocation.generation;
+    machine.invocations[index] = crate::ipc::Invocation::empty();
+    machine.invocations[index].generation = generation;
 }
 
 /// Frees a grant node once nothing refers to it and it has no children.
@@ -294,7 +318,18 @@ pub fn grant_alloc(
     if u64::from(depth) > thalyx_abi::limit::MAX_DERIVE_DEPTH {
         return None;
     }
-    let index = machine.grants.iter().position(|node| !node.used)?;
+    let Some(index) = machine.grants.iter().position(|node| !node.used) else {
+        // A refusal that says which resource ran out. Without this the caller
+        // sees only "exhausted" and has to guess between a scope ceiling it
+        // set and a machine-wide table it did not.
+        event!(
+            "k2.grants_exhausted",
+            "used={} capacity={} sponsor={sponsor}",
+            machine.grants.iter().filter(|node| node.used).count(),
+            machine.grants.len()
+        );
+        return None;
+    };
     if !scope::reserve(&mut machine.scopes, sponsor, scope::Resource::Metadata, 1) {
         return None;
     }
