@@ -5,7 +5,7 @@ status: observed
 ---
 # Estado actual
 
-**2026-09-09 · Fundación 0.1.0 · K0, K1, K2 y K3 completos. K4–K6 pendientes.**
+**2026-09-09 · Fundación 0.1.0 · K0, K1, K2 y K3 completos. K4 en curso; K5–K6 pendientes.**
 
 > **Punto de reanudación.** Este documento es el checkpoint. La sección [Reanudar aquí](#reanudar-aquí) dice exactamente dónde empieza el trabajo siguiente; no hace falta reauditar K0, K1, K2 ni K3.
 
@@ -129,6 +129,30 @@ El perfil de DMA es `WEAK_TRUSTED_DRIVER` y el kernel lo declara con las palabra
 
 Seis defectos que compilar no encuentra, más dos de la evidencia y dos del propio paquete. Los tres primeros son fatales y comparten familia —suponer que el estado de un hilo basta para decir de quién es, que en un procesador es cierto—: dos procesadores tomando el mismo hilo `Ready` y ejecutándolo sobre una pila de kernel; la reclamación liberando la pila o el espacio de direcciones que otro procesador todavía usaba; y un hilo que se bloquea, es despertado por un receptor en otro procesador y despachado por un tercero antes de que el procesador en el que sigue ejecutando haya guardado dónde continuar. Los otros tres son de contabilidad: una reserva que acotaba la admisión y no la ejecución; un dominio de dos hilos que solo devolvía uno a su ámbito, dejándolo permanentemente no quiescente; y un registro de mapeo que nombraba por índice una concesión sobre la que no retenía referencia. [Detalle](../evidence/k3-smp-devices.md).
 
+## K4
+
+En curso. Lo que sigue describe únicamente lo que ya está construido y comprobado; el resto de K4 no existe todavía y está en [qué no existe](#qué-no-existe-todavía).
+
+### Formato del almacén, fijado antes de escribir nada
+
+`abi/schema/k4-store-v1.json` es la única fuente del formato durable y del protocolo del servicio: geometría del medio, prefijos de dominio de digest, magias, nueve enumeraciones, 20 estructuras y 22 vectores dorados. `tools/gen_k4_format.py` deriva de él el módulo Rust que el invitado codifica (`user/k4fmt/src/generated.rs`), el módulo Python con el que la puerta decodifica un medio real (`tools/k4_format.py`) y los bytes dorados en `abi/fixtures/k4-store-v1/`. Ninguno de los tres se escribe a mano.
+
+Generar los dos lados no los hace estar de acuerdo por argumento: comparten desplazamientos, así que por supuesto coinciden en eso. Lo que compra el arreglo es que ni el servicio ni la puerta definen el formato. Los digests los calcula un SHA-256 escrito en este repositorio dentro del invitado y `hashlib` en el anfitrión, y los vectores dorados son a lo que se somete a los dos.
+
+El contrato pedía fijar el formato **antes** de escribir datos que se pretendan conservar. Eso es lo que este paso hace, y por eso es el primero.
+
+### Qué decide el formato
+
+Un registro ocupa bloques enteros y su digest cubre la cabecera hasta el propio campo de digest y después la carga, de modo que una escritura rota daña su propio registro y nunca uno ya durable. Cada registro enlaza con el anterior por digest y su secuencia crece exactamente en uno dentro de una arena. Dos superblocks alternos con generación y digest seleccionan la arena; el válido de generación más alta gana. El digest de contenido lleva prefijo de dominio, tipo y longitud dentro de la preimagen, así que un objeto de cero bytes y un árbol vacío no comparten identidad. La identidad de una petición cubre todos los inputs que deciden su significado, que es de donde sale `CONFLICT`.
+
+La directiva de fallos es andamiaje y está marcada como tal: vive en un bloque **fuera** del almacén, lleva su propia magia, y ninguna estructura del formato la nombra.
+
+### Comprobador del formato
+
+`tools/check_k4_format.py` decide **12** criterios por separado. Cuatro son controles negativos ejecutados, no afirmaciones: seis daños distintos a un registro —un byte de carga, la secuencia, la magia, una longitud mayor que sus bloques, un recuento de bloques cero, y una cola rota tras el primer sector— y tres a un superblock, con la exigencia añadida de que los originales intactos se sigan aceptando.
+
+Ese último control encontró algo que conviene decir en lugar de fingir que se probó: todos los registros pequeños caben en un sector, y un desgarro de un registro así lo deja entero o ausente, lo cual es una propiedad de la geometría y no del checksum. El vector dorado que el control usa es por eso un registro de objeto de 1024 bytes, que cruza el sector; el desgarro se aplica donde significa algo.
+
 ## Evidencia ejecutada aquí
 
 | Comprobación | Resultado y alcance |
@@ -150,6 +174,7 @@ Seis defectos que compilar no encuentra, más dos de la evidencia y dos del prop
 | Puerta K3, perfil de control | PASS en los mismos 28 con `-device intel-iommu`: unidad descrita, `remapping_programmed=0`, perfil fuerte igualmente rechazado. |
 | Cobertura de la interfaz en K3 | 37 de 59 alcanzadas, las 26 que las afirmaciones K3 necesitan entre ellas y las 22 restantes nombradas una a una. Es criterio de la puerta K3. |
 | Autocomprobación de la puerta K3 | 57 ejecuciones dañadas de una forma cada una, las 57 detectadas por el criterio que les corresponde. |
+| Formato del almacén K4 | PASS en 12 criterios, nueve de ellos daños aplicados y rechazados. [Comprobador](../../tools/check_k4_format.py). Comprueba bytes y digests en el anfitrión; el lado del invitado todavía no se ha ejecutado. |
 
 Todas ejecutadas en el estado actual del árbol, con **el mismo binario de kernel** en las tres fases: `fmt` limpio, ninguna advertencia de compilación, ABI 4/4, vault 43 notas PASS, modelos PASS, puerta K1 13/13, puerta K2 21/21 con autocomprobación 28/28, puerta K3 28/28 con autocomprobación 57/57 y en los dos perfiles de plataforma, y cero resultados inesperados en las ejecuciones K2 y K3 —ni una nota de resultado no esperado, ni una operación que debiera haber sido rechazada y no lo fuera—. Los dos fallos de usuario de K3 son los dos que la ejecución provoca a propósito. Las imágenes y el kernel se reconstruyen byte a byte desde un árbol limpio.
 
@@ -178,14 +203,14 @@ Lo que no existe, en orden de cuánto se parece a existir:
 - **Aislamiento de DMA.** No hay unidad de remapeo programada. El perfil débil es lo único que esta plataforma sostiene, el kernel lo dice en cada registro que lo menciona, y el perfil fuerte se rechaza con un estado propio en lugar de aproximarse. Un driver no confiable **no** está contenido aquí, y ninguna nota puede decir lo contrario. [ADR-009](../decisions/ADR-009-device-path-and-dma-profiles.md), [OQ-05](open-questions.md).
 - **Hardware físico.** Todo es QEMU con TCG. El inventario de CPU, firmware, dispositivos y grupos de aislamiento sigue sin hacerse.
 - **Más de un dispositivo, y rutas de interrupción legadas.** Una función virtio-blk moderna con MSI-X. No hay IOAPIC, INTx, hotplug, NUMA, suspensión, virtio-net ni GPU, y ninguno está a medias.
-- **Estado durable.** No hay servicio de estado, ni versiones publicadas, ni recuperación tras caída. Es K4.
+- **Estado durable.** El formato está fijado y comprobado, y nada más. No hay servicio de estado, ni versiones publicadas, ni recuperación tras caída, ni un solo byte escrito en un medio por este código. Es el resto de K4.
 - **Thalyx sobre este kernel, rendimiento y prueba formal general.** Nada de eso está implementado o medido.
 
 El plano de diagnóstico de K1 sigue presente, sigue sin ser el plano de recibos, y sus dos entradas de andamiaje permanecen para que la regresión de K1 se siga ejecutando. El primer supervisor no tiene supervisor: su fallo termina la ejecución. No se ha retirado ni reemplazado Linux.
 
 ## Reanudar aquí
 
-**Último hito terminado y pusheado:** **K3 completo**. Rama `feat/k3-smp-devices`, sin fusionar.
+**Último hito terminado y pusheado:** **K4, formato del almacén fijado**. Rama `feat/k4-durable-managed-state`, sin fusionar. K3 quedó completo en `feat/k3-smp-devices`.
 
 **Qué está verde, medido en este árbol y con el mismo binario de kernel en las tres fases:** puerta K1 13/13, puerta K2 21/21, autocomprobación K2 28/28, puerta K3 28/28 en los dos perfiles de plataforma, autocomprobación K3 57/57, cobertura K2 51/51 y K3 37/59 con las 26 requeridas dentro, ABI 4/4, vault 43 notas PASS, modelos PASS, `fmt` limpio.
 
@@ -193,7 +218,7 @@ El plano de diagnóstico de K1 sigue presente, sigue sin ser el plano de recibos
 
 **Qué no demostró, y está escrito así en la evidencia:** aislamiento de DMA, hardware físico, escalabilidad, más de un dispositivo, rutas de interrupción legadas y cobertura de caminos. [Detalle y límites](../evidence/k3-smp-devices.md).
 
-**Siguiente paso exacto al reanudar:** K4, estado durable, según [la ruta](phases.md). Nada de K3 queda pendiente; lo que queda abierto son las preguntas que K3 no podía cerrar, y están registradas donde corresponde en lugar de en una lista de tareas.
+**Siguiente paso exacto al reanudar:** el driver de bloque de K4 con inyección de fallos (`user/k4disk`) y el servicio de estado (`user/k4store`), en ese orden. El formato ya no es una decisión pendiente. Nada de K3 queda pendiente.
 
 **Bugs encontrados por ejecución en K3, todos corregidos:** seis del kernel, dos de la evidencia y dos del paquete. Los tres fatales comparten familia —suponer que el estado de un hilo basta para decir de quién es— y ninguno era visible con un procesador. Están descritos uno a uno en [la evidencia](../evidence/k3-smp-devices.md).
 

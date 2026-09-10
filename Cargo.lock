@@ -159,6 +159,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "thalyx-user-k4fmt"
+version = "0.3.1"
+
+[[package]]
 name = "thalyx-user-rt"
 version = "0.3.1"
 dependencies = [
