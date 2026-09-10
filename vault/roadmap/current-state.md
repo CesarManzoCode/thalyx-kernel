@@ -153,7 +153,7 @@ Seis defectos que compilar no encuentra, más dos de la evidencia y dos del prop
 
 Todas ejecutadas en el estado actual del árbol, con **el mismo binario de kernel** en las tres fases: `fmt` limpio, ninguna advertencia de compilación, ABI 4/4, vault 43 notas PASS, modelos PASS, puerta K1 13/13, puerta K2 21/21 con autocomprobación 28/28, puerta K3 28/28 con autocomprobación 57/57 y en los dos perfiles de plataforma, y cero resultados inesperados en las ejecuciones K2 y K3 —ni una nota de resultado no esperado, ni una operación que debiera haber sido rechazada y no lo fuera—. Los dos fallos de usuario de K3 son los dos que la ejecución provoca a propósito. Las imágenes y el kernel se reconstruyen byte a byte desde un árbol limpio.
 
-Clippy deja **18 advertencias de estilo preexistentes**, el mismo número en `HEAD` que con este trabajo aplicado: están en `arch/x86_64`, `diag.rs`, `mm/`, `scope.rs` e `ipcops.rs`. Las dos últimas son archivos K2, de modo que la afirmación anterior de «ninguna advertencia de clippy en ningún archivo K2» era falsa y queda corregida aquí. Ninguna la introdujo este trabajo y ninguna está arreglada.
+Clippy deja **27 advertencias de estilo**, todas de tres familias —implementar a mano `is_multiple_of`, `Range::contains` y la división comprobada, e indexar un array con la variable de un bucle—. Diecisiete venían de antes de K3; las diez restantes están en archivos que K3 escribió o reescribió (`tlb.rs`, `acpi.rs`, `api/devops.rs`, `arch/x86_64/lapic.rs`, `pci.rs`, `device.rs`). Ninguna está arreglada, y ninguna fase ha afirmado que sus archivos estén limpios de clippy.
 
 ## Cobertura real de la interfaz
 

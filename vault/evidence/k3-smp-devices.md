@@ -191,7 +191,7 @@ Esta ejecución **no** demuestra:
 - **El exceso de presupuesto es real.** La admisión está acotada exactamente; la ejecución no, y en esta plataforma se pasa por milisegundos. La puerta lo acota contra una latencia medida, no contra cero. En hardware con preempción puntual el número sería otro, y no se ha medido.
 - **Un solo control de procesador ausente.** Se prueba un APIC id que no existe. No se prueba un procesador que arranca y falla a mitad del trampolín, ni uno que contesta tarde: el segundo caso es justamente por el que la pila no se libera, y esa decisión está tomada sin haberla observado ocurrir.
 - **El validador del anillo se prueba contra daño sintético.** Ningún dispositivo real produjo esas entradas. Lo que se demuestra es que las ramas de rechazo funcionan y por el motivo correcto, no que un dispositivo hostil las active.
-- **18 advertencias de clippy preexistentes** siguen en el árbol, ninguna introducida por este trabajo, ninguna arreglada. Los archivos K3 nuevos —`acpi.rs`, `pci.rs`, `device.rs`, `tlb.rs`— añaden advertencias de estilo del mismo tipo, y el conteo de esta nota no las separa por archivo.
+- **27 advertencias de clippy**, todas de estilo y ninguna arreglada. Diecisiete venían de antes; las diez restantes están en archivos que K3 escribió o reescribió —`tlb.rs` 3, `acpi.rs` 2, `api/devops.rs` 2, `arch/x86_64/lapic.rs` 2, `pci.rs` 1, `device.rs` 1—. Son de tres familias: implementar a mano `is_multiple_of`, `Range::contains` y la división comprobada, e indexar un array con la variable de un bucle. La afirmación de K2 de que ningún archivo de la fase tenía advertencias ya se corrigió allí; esta nota no la repite.
 
 ## Qué corrigió ejecutar los mecanismos
 
