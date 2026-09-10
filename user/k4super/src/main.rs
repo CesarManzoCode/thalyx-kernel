@@ -66,6 +66,11 @@ const READY_DEADLINE_NS: u64 = 20_000_000_000;
 /// One poll of the run's signals.
 const POLL_NS: u64 = 100_000_000;
 
+/// Rounds the auditor stays away in the scenario that loses the control plane.
+/// Long enough for the log to fill at the rate a publication writes receipts,
+/// short enough that the run finishes afterwards.
+const STALL_ROUNDS: u64 = 6;
+
 /// The whole run, however it ends.
 const RUN_DEADLINE_NS: u64 = 60_000_000_000;
 
@@ -924,7 +929,8 @@ fn run() -> ! {
         }
     }
     drop_handle(broker_endpoint);
-    drop_handle(store_endpoint);
+    // Not the store's endpoint: a replacement service has to be given the same
+    // one, or the clients holding facets of it would be talking to nobody.
     drop_handle(client_image);
     drop_handle(disk_image);
     drop_handle(disk_endpoint);
@@ -937,13 +943,25 @@ fn run() -> ! {
 
     let deadline = k2::now_ns() + RUN_DEADLINE_NS;
     let mut restarts = 0u64;
+    let mut rounds = 0u64;
     loop {
+        rounds += 1;
+        // Scenario 5 is the one where the control plane is lost. The auditor
+        // stops reading for a while and the log fills, and a full log does not
+        // lose the receipts that matter -- it stops the kernel admitting the
+        // work they would cover. What the run then has to show is a refusal
+        // that names the reason, not a publication nobody can account for.
+        let auditing = scenario != 5 || rounds > STALL_ROUNDS;
         // Before anything else, because everything else in this loop waits and
         // the log fills while it does.
         observe_log(log, &mut audit);
-        drain_receipts(log, &mut audit);
+        if auditing {
+            drain_receipts(log, &mut audit);
+        }
         let _ = k2::signal_wait(done, bit::CLIENT_DONE, k2::now_ns() + POLL_NS);
-        drain_receipts(log, &mut audit);
+        if auditing {
+            drain_receipts(log, &mut audit);
+        }
         // Consuming rather than querying, for the reason `await_ready` gives.
         if let Ok(info) = k2::signal_wait(signal, bit::CRASH | bit::RESTART, k2::now_ns() + POLL_NS)
         {
@@ -961,6 +979,21 @@ fn run() -> ! {
             if info.bits & bit::RESTART != 0 && restarts == 0 {
                 restarts += 1;
                 let _ = k2::domain_terminate(run.store_domain);
+                // A replacement gets a new endpoint, because the old one does
+                // not come back: an endpoint whose receiver died stops
+                // admitting, and the kernel refuses to hand it to anyone else.
+                // That is the rule, not an obstacle to work around -- a client
+                // holding a facet of the dead endpoint is holding a facet of a
+                // service that is gone, and reconnecting is its business. What
+                // the replacement inherits is the medium, which is the only
+                // thing that was supposed to survive.
+                match k2::scope_create_endpoint(own_scope, 8, name16("store2")) {
+                    Ok(handle) => {
+                        drop_handle(run.store_endpoint);
+                        run.store_endpoint = handle;
+                    }
+                    Err(code) => fail(41, code),
+                }
                 match build_store(
                     &mut run,
                     StoreConfig {

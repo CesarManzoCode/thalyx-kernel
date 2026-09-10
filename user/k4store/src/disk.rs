@@ -13,7 +13,7 @@
 //! own pointers into something the device reads.
 
 use thalyx_user_k4fmt::pkg::{
-    DiskReply, DiskRequest, IOBUF_PAGES, IOBUF_VADDR, disk_op, disk_status,
+    DiskReply, DiskRequest, IOBUF_PAGES, IOBUF_VADDR, disk_op, disk_status, note,
 };
 use thalyx_user_k4fmt::{BLOCK, Pod, fault_mode};
 use thalyx_user_rt::k2;
@@ -29,6 +29,13 @@ pub struct Disk {
     pub failed: bool,
     /// Set once the driver said nothing further reaches the medium.
     pub latched: bool,
+    /// Set when the call itself could not be made -- the kernel refused it, or
+    /// the driver never answered. That is not a medium failure and must not be
+    /// reported as one: nothing is known about the block either way, and the
+    /// difference between "the medium said no" and "I could not ask" is the
+    /// difference between a store that is damaged and a service that is not
+    /// available.
+    pub unreachable: bool,
     pub writes_issued: u64,
     pub writes_suppressed: u64,
     pub flushes: u64,
@@ -41,6 +48,7 @@ impl Disk {
             endpoint,
             failed: false,
             latched: false,
+            unreachable: false,
             writes_issued: 0,
             writes_suppressed: 0,
             flushes: 0,
@@ -49,16 +57,25 @@ impl Disk {
     }
 
     fn call(&mut self, request: &DiskRequest) -> Option<DiskReply> {
-        let result = k2::endpoint_call(
+        let result = match k2::endpoint_call(
             self.endpoint,
             0,
             request.as_bytes(),
             &[],
             k2::now_ns() + CALL_DEADLINE_NS,
             false,
-        )
-        .ok()?;
-        let reply = DiskReply::read_from(&result.payload, 0)?;
+        ) {
+            Ok(result) => result,
+            Err(code) => {
+                self.unreachable = true;
+                k2::note(note::DISK_UNREACHABLE, (-code) as u64);
+                return None;
+            }
+        };
+        let Some(reply) = DiskReply::read_from(&result.payload, 0) else {
+            self.unreachable = true;
+            return None;
+        };
         self.writes_issued = reply.writes_issued;
         self.writes_suppressed = reply.writes_suppressed;
         self.flushes = reply.flushes;

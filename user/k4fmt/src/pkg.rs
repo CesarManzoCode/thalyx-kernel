@@ -109,6 +109,11 @@ pub mod bit {
     pub const RESTART: u64 = 1 << 3;
     /// The service finished recovery and is admitting requests.
     pub const READY: u64 = 1 << 4;
+    /// Nothing ever raises this. A service that has asked to be replaced waits
+    /// on it, because waiting on the bit it just raised would consume its own
+    /// request before the supervisor could see it -- and there is nothing else
+    /// it should wake up for. What ends that wait is being terminated.
+    pub const NEVER: u64 = 1 << 5;
 }
 
 /// What a client was built to do in this run.
@@ -296,6 +301,10 @@ pub mod note {
     pub const DISK_REORDERED: u64 = 0x4007;
     /// A read reached the device. Value: block, with the count above bit 48.
     pub const DISK_READ: u64 = 0x4008;
+    /// The driver could not be asked at all: the call was refused or went
+    /// unanswered. Value: the status, as a positive number. Not a medium
+    /// failure -- nothing is known about the block either way.
+    pub const DISK_UNREACHABLE: u64 = 0x4009;
 
     /// The service found no store and wrote one. Value: the epoch.
     pub const STORE_FORMATTED: u64 = 0x4010;
@@ -377,6 +386,13 @@ pub mod note {
     pub const VALIDATION_REFUSED: u64 = 0x4037;
     /// A client that may prepare content tried to publish. Value: the status.
     pub const PUBLISH_FORBIDDEN: u64 = 0x4038;
+    /// The service did not answer, because the run was cut. Value: the status
+    /// the kernel gave, as a positive number.
+    pub const SERVICE_GONE: u64 = 0x403A;
+    /// A client asked what became of its own requests before making another,
+    /// and starts again after the last one that is spent. Value: that
+    /// sequence, with the outcome that ended the walk above bit 8.
+    pub const CLIENT_RESUMED: u64 = 0x4039;
 
     /// The supervisor finished a build step. Value: the step.
     pub const SUPER_BUILT: u64 = 0x4040;

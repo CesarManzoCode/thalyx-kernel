@@ -6,11 +6,14 @@ K4 run rather than a K3 run with a disk is that the medium is created once and
 carried from one leg to the next: the first leg is cut at a named point, and the
 second boots on whatever the first actually left behind.
 
-The directive is written into a block outside the store, and only for the first
-leg. Later legs get a directive that names no point, so the run they perform is
-the recovery rather than another cut. Recovery never consults the directive, and
-no rule of the format names it; it exists so that "the write after this one
-never happened" is a decision rather than a hope.
+The directive is written into a block outside the store, and for one named leg
+only -- the first, unless the case says otherwise. Every other leg gets a
+directive that names no point, so the run it performs is the recovery rather
+than another cut. Cutting a later leg is how a case gets a look at what
+recovery itself wrote before a compaction rewrites the arena over it; what it
+never does is let recovery consult the directive, and no rule of the format
+names it. It exists so that "the write after this one never happened" is a
+decision rather than a hope.
 
 The suppression is done by the guest's own driver, not by the emulator. QEMU
 sees the writes that were issued and no others, so what the medium holds after a
@@ -206,6 +209,14 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=0x4B34)
     parser.add_argument("--stop-at-next-flush", type=int, default=0, choices=[0, 1])
     parser.add_argument(
+        "--cut",
+        action="append",
+        default=[],
+        metavar="LEG:POINT:MODE[:ARG[:FLUSH]]",
+        help="cut this leg at this point; repeat for more than one. Without it the "
+        "shorthand options above cut the first leg and no other.",
+    )
+    parser.add_argument(
         "--keep-medium",
         action="store_true",
         help="continue on the medium already in the output directory",
@@ -226,8 +237,25 @@ def main() -> int:
         )
         return 1
 
+    # One directive per leg, keyed by leg number. The shorthand names the first
+    # leg; `--cut` names any of them, and a leg nobody names gets a directive
+    # that names no point, which is what makes it a recovery.
+    cuts: dict[int, tuple[int, int, int, int]] = {}
     point = named(fmt.FAULTPOINT, arguments.point)
     mode = named(fmt.FAULTMODE, arguments.mode)
+    if point != fmt.FAULTPOINT["NONE"] or mode != fmt.FAULTMODE["NONE"]:
+        cuts[1] = (point, mode, arguments.arg, arguments.stop_at_next_flush)
+    for spec in arguments.cut:
+        parts = spec.split(":")
+        if len(parts) < 3:
+            raise SystemExit(f"--cut wants LEG:POINT:MODE[:ARG[:FLUSH]], got {spec!r}")
+        leg = int(parts[0])
+        cuts[leg] = (
+            named(fmt.FAULTPOINT, parts[1]),
+            named(fmt.FAULTMODE, parts[2]),
+            int(parts[3]) if len(parts) > 3 else 0,
+            int(parts[4]) if len(parts) > 4 else 0,
+        )
 
     arguments.out.mkdir(parents=True, exist_ok=True)
     medium = arguments.out / "k4-medium.img"
@@ -237,17 +265,17 @@ def main() -> int:
     legs: list[dict] = []
     directives: list[dict] = []
     for leg in range(1, arguments.legs + 1):
-        # Only the first leg is cut. The rest are the recovery.
+        cut = cuts.get(leg, (fmt.FAULTPOINT["NONE"], fmt.FAULTMODE["NONE"], 0, 0))
         directives.append(
             write_directive(
                 medium,
-                point if leg == 1 else fmt.FAULTPOINT["NONE"],
-                mode if leg == 1 else fmt.FAULTMODE["NONE"],
-                arguments.arg if leg == 1 else 0,
+                cut[0],
+                cut[1],
+                cut[2],
                 leg,
                 arguments.scenario,
                 arguments.seed,
-                arguments.stop_at_next_flush if leg == 1 else 0,
+                cut[3],
             )
         )
         legs.append(
@@ -272,6 +300,15 @@ def main() -> int:
             "seed": arguments.seed,
             "stop_at_next_flush": arguments.stop_at_next_flush,
             "legs": arguments.legs,
+            "cuts": {
+                str(leg): {
+                    "point": fmt.FAULTPOINT_NAME.get(spec[0], spec[0]),
+                    "mode": fmt.FAULTMODE_NAME.get(spec[1], spec[1]),
+                    "arg": spec[2],
+                    "stop_at_next_flush": spec[3],
+                }
+                for leg, spec in sorted(cuts.items())
+            },
         },
         "cpu": CPU_MODEL,
         "processors": arguments.smp,

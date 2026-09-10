@@ -72,6 +72,11 @@ const FP_BASE: u64 = 0xD91E_4444_5555_5001;
 /// its own open.
 const MAX_WORKSPACES: usize = 5;
 
+/// Objects one principal may have staged and not yet named. A candidate needs
+/// three -- its policy, its content and its evidence -- and one spare covers a
+/// client that stages a second piece of content before it freezes.
+const OFFERED: usize = 4;
+
 /// What a publication reserves for its own closure.
 const CLOSURE_RESERVE_NS: u64 = 400_000;
 
@@ -108,6 +113,11 @@ fn store_configuration() -> StoreConfig {
 }
 
 /// The transfer buffer.
+///
+/// `&raw mut` then dereference, as in `state.rs`: taking a reference to a
+/// `static mut` is what the 2024 edition refuses, and clippy reads the pair as
+/// a redundant dereference, which it is not.
+#[allow(clippy::deref_addrof)]
 fn transfer() -> &'static mut [u8; OBJECT_MAX] {
     // SAFETY: this domain is single-threaded and every caller drops the borrow
     // before the next takes it; no two are alive at once.
@@ -237,6 +247,14 @@ struct Service {
     /// freeze and the publication that names it are two calls, and between
     /// them the only thing keeping the candidate's objects staged is this.
     candidates: [[u8; 32]; state::MAX_PRINCIPALS],
+    /// The last few objects each principal staged and has not yet named in a
+    /// candidate. A policy and a piece of evidence are staged in one call and
+    /// named in another, and between the two nothing else refers to them: a
+    /// sweep in the middle would leave the candidate naming objects that are
+    /// gone, which the service would then have to refuse as `NOT_FOUND` for a
+    /// publication that was never wrong.
+    offered: [[[u8; 32]; OFFERED]; state::MAX_PRINCIPALS],
+    offered_next: [usize; state::MAX_PRINCIPALS],
     /// Set when serving a request already discharged the invocation, so the
     /// loop does not answer twice. An invocation resolved without a reply is
     /// answered; replying afterwards is refused, and the refusal would be the
@@ -256,7 +274,20 @@ impl Service {
     /// staged and not yet inside any tree, and the candidate a principal
     /// froze and has not published. Everything else staged is the residue of
     /// something nobody is going to finish.
+    fn remember(&mut self, principal: u64, digest: [u8; 32]) {
+        let Some(slot) = usize::try_from(principal)
+            .ok()
+            .filter(|index| *index < state::MAX_PRINCIPALS)
+        else {
+            return;
+        };
+        let at = self.offered_next[slot];
+        self.offered[slot][at] = digest;
+        self.offered_next[slot] = (at + 1) % OFFERED;
+    }
+
     fn protect(&mut self) {
+        self.store.unpin();
         let mut count = 0usize;
         let mut push = |digest: [u8; 32], store: &mut Store| {
             if digest == [0u8; 32] || count == state::MAX_PROTECTED {
@@ -270,6 +301,9 @@ impl Service {
         };
         for index in 0..state::MAX_PRINCIPALS {
             push(self.candidates[index], &mut self.store);
+            for offered in self.offered[index] {
+                push(offered, &mut self.store);
+            }
         }
         for space in &self.workspaces {
             if !space.live {
@@ -433,7 +467,7 @@ impl Service {
                 free_blocks: self.store.free_blocks(),
                 ..StoreReply::zeroed()
             },
-            store_op::PUT_OBJECT => self.put_object(request, lent),
+            store_op::PUT_OBJECT => self.put_object(principal, request, lent),
             store_op::READ => self.read(request, lent),
             store_op::FORK => self.fork(principal, request),
             store_op::WRITE => self.write(principal, request),
@@ -505,7 +539,7 @@ impl Service {
         }
     }
 
-    fn put_object(&mut self, request: &StoreRequest, lent: u64) -> StoreReply {
+    fn put_object(&mut self, principal: u64, request: &StoreRequest, lent: u64) -> StoreReply {
         let length = request.arg1 as usize;
         if length > OBJECT_MAX
             || request.arg0 == 0
@@ -521,13 +555,18 @@ impl Service {
             return refused(store_status::INVALID_REQUEST);
         }
         match self.store.stage(request.arg0 as u32, &bytes[..length]) {
-            Ok(digest) => StoreReply {
-                status: store_status::OK,
-                value: length as u64,
-                digest0: digest,
-                free_blocks: self.store.free_blocks(),
-                ..StoreReply::zeroed()
-            },
+            Ok(digest) => {
+                // Remembered as this principal's, so a sweep between staging it
+                // and naming it in a candidate cannot take it away.
+                self.remember(principal, digest);
+                StoreReply {
+                    status: store_status::OK,
+                    value: length as u64,
+                    digest0: digest,
+                    free_blocks: self.store.free_blocks(),
+                    ..StoreReply::zeroed()
+                }
+            }
             Err(status) => refused(status as u32),
         }
     }
@@ -972,12 +1011,17 @@ impl Service {
 
     /// Waits to be replaced, without touching the medium again.
     ///
-    /// Bounded, because the only thing that ends this wait is the supervisor
-    /// terminating the domain, and a service that waits forever for a
-    /// supervisor that never comes is the hang this bound exists to refuse.
+    /// The wait is on a bit nothing raises. Waiting on `RESTART` would consume
+    /// the request this service just made of its supervisor, before the
+    /// supervisor could see it, and a service that asks to be replaced and
+    /// then eats its own request is never replaced.
+    ///
+    /// Bounded, because the only thing that ends this wait properly is the
+    /// supervisor terminating the domain, and a service that waits forever for
+    /// a supervisor that never comes is the hang this bound exists to refuse.
     fn park(&mut self) -> ! {
         for _ in 0..PARK_ROUNDS {
-            let _ = k2::signal_wait(self.crash, bit::RESTART, k2::now_ns() + PARK_SLICE_NS);
+            let _ = k2::signal_wait(self.crash, bit::NEVER, k2::now_ns() + PARK_SLICE_NS);
         }
         self.stop()
     }
@@ -1001,11 +1045,11 @@ fn run() -> ! {
     // nothing else can have.
     let iobuf = boot_handle(store_slot::IOBUF);
     match k2::memory_query(iobuf) {
-        Ok(info) if u64::from(info.pages) >= IOBUF_PAGES => {
-            k2::note(report::MAPPED, u64::from(info.pages));
+        Ok(info) if info.pages >= IOBUF_PAGES => {
+            k2::note(report::MAPPED, info.pages);
         }
         Ok(info) => {
-            k2::note(report::UNEXPECTED, u64::from(info.pages));
+            k2::note(report::UNEXPECTED, info.pages);
             rt::exit(1)
         }
         Err(code) => {
@@ -1034,6 +1078,8 @@ fn run() -> ! {
         store: Store::new(Disk::new(disk_endpoint)),
         workspaces: [Workspace::default(); MAX_WORKSPACES],
         candidates: [[0u8; 32]; state::MAX_PRINCIPALS],
+        offered: [[[0u8; 32]; OFFERED]; state::MAX_PRINCIPALS],
+        offered_next: [0usize; state::MAX_PRINCIPALS],
         discharged: false,
         log,
         broker,
@@ -1118,12 +1164,11 @@ fn run() -> ! {
         // every request it had already answered, and the machine's table, not
         // the medium, is what would run out first.
         let answered = service_state.honour_demand(invocation, &reply) && !service_state.discharged;
-        if answered {
-            if let Err(code) =
+        if answered
+            && let Err(code) =
                 k2::invocation_reply(invocation, u64::from(reply.status), reply.as_bytes())
-            {
-                k2::note(report::UNEXPECTED, code as u64);
-            }
+        {
+            k2::note(report::UNEXPECTED, code as u64);
         }
         let _ = k2::cap_close(invocation);
     }

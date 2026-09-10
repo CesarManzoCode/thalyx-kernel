@@ -67,6 +67,12 @@ const EVIDENCE_EPOCH_NS: u64 = 1_700_000_000_000_000_000;
 /// Bytes of the staging buffer.
 const STAGE_BYTES: usize = (STAGE_PAGES as usize) * 4096;
 
+/// Bytes of content each version binds. Chosen so the object record that
+/// carries it spans several sectors: a record inside one sector cannot be
+/// observed being torn, and one of the faults this package exists to exercise
+/// is a write that reached the medium only in part.
+const CONTENT_BYTES: usize = 1024;
+
 /// Intents a broker remembers, so a repeated key is answered as one.
 const BROKER_KEYS: usize = 8;
 
@@ -156,6 +162,18 @@ impl Client {
             // a surprise and is not recorded as one -- it is what a caller is
             // told when the effect it asked for did not commit, or when
             // whether it committed is exactly what nobody can say.
+            // The service did not answer at all. After a cut that is what a
+            // caller sees, and it is the point of the cut rather than a
+            // surprise; the gate checks that it only happens where a directive
+            // asked for it.
+            Err(status::PEER_DEAD) => {
+                k2::note(note::SERVICE_GONE, (-status::PEER_DEAD) as u64);
+                None
+            }
+            Err(status::TIMED_OUT) => {
+                k2::note(note::SERVICE_GONE, (-status::TIMED_OUT) as u64);
+                None
+            }
             Err(status::CANCELLED) => {
                 k2::note(note::CLIENT_RESULT, u64::from(result_outcome::ABORTED));
                 None
@@ -486,7 +504,7 @@ fn candidate(
 }
 
 /// Bytes of one version's content, derived from the round.
-fn content_for(round: u64, buffer: &mut [u8; 64]) -> usize {
+fn content_for(round: u64, buffer: &mut [u8; CONTENT_BYTES]) -> usize {
     let text = b"thalyx-k4 version ";
     buffer[..text.len()].copy_from_slice(text);
     let mut at = text.len();
@@ -507,7 +525,43 @@ fn content_for(round: u64, buffer: &mut [u8; 64]) -> usize {
         at += 1;
     }
     buffer[at] = b'\n';
-    at + 1
+    at += 1;
+    // Padding, so that an object record crosses a sector rather than fitting
+    // inside one. A record that fits in a sector is left whole or absent by a
+    // torn write, which is a property of the geometry and not of the digest:
+    // to see a tear refused, the record has to be big enough to be torn.
+    while at < buffer.len() {
+        buffer[at] = b'a' + ((at as u64 + round) % 26) as u8;
+        at += 1;
+    }
+    at
+}
+
+/// Finds the first request identity this principal has not spent.
+///
+/// A client that was cut has to find out what became of what it may already
+/// have asked for before it asks for anything else. Guessing is not available:
+/// a request identity that has a durable result is answered with that result
+/// forever, and reusing one for different inputs is a conflict rather than a
+/// retry. So the client walks its own sequences forward, asking what the store
+/// says about each, and starts again after the last one that is spent --
+/// whether it committed, was aborted by recovery, or is one the store cannot
+/// say about. All three are spent; only `NEVER_SEEN` is free.
+fn resume_after(client: &mut Client, limit: u64) -> u64 {
+    let mut spent = 0u64;
+    let mut outcome = result_outcome::NEVER_SEEN;
+    while spent < limit {
+        let Some(reply) = client.result(spent + 1) else {
+            break;
+        };
+        if reply.outcome == result_outcome::NEVER_SEEN {
+            break;
+        }
+        spent += 1;
+        outcome = reply.outcome;
+    }
+    k2::note(note::CLIENT_RESUMED, spent | (u64::from(outcome) << 8));
+    spent
 }
 
 fn run_publisher(client: &mut Client, config: &ClientConfig) {
@@ -515,7 +569,12 @@ fn run_publisher(client: &mut Client, config: &ClientConfig) {
         return;
     };
     let mut generation = state.generation;
-    let mut sequence = 0u64;
+    // On the first leg nothing has been asked yet, so nothing is asked about.
+    let mut sequence = if config.leg > 1 {
+        resume_after(client, config.rounds + 4)
+    } else {
+        0
+    };
     let mut first_root = [0u8; 32];
     let mut first_content = [0u8; 32];
     // The last round's request, kept so it can be asked again exactly as it
@@ -526,7 +585,7 @@ fn run_publisher(client: &mut Client, config: &ClientConfig) {
     let mut last_base = 0u64;
 
     for round in 1..=config.rounds {
-        let mut buffer = [0u8; 64];
+        let mut buffer = [0u8; CONTENT_BYTES];
         let length = content_for(round, &mut buffer);
         let Some(attempt) = candidate(
             client,
@@ -613,7 +672,7 @@ fn run_publisher(client: &mut Client, config: &ClientConfig) {
 
     // The same sequence, different inputs. That is not a repeat, and calling it
     // one would let a client change what a request meant after the fact.
-    let mut other = [0u8; 64];
+    let mut other = [0u8; CONTENT_BYTES];
     let length = content_for(config.rounds + 100, &mut other);
     if let Some(attempt) = candidate(
         client,
@@ -726,7 +785,7 @@ fn run_publisher(client: &mut Client, config: &ClientConfig) {
     // not. An expectation on content would be satisfied by the wrong version;
     // an expectation on generation is refused, and that is the difference.
     if first_content != [0u8; 32] {
-        let mut buffer = [0u8; 64];
+        let mut buffer = [0u8; CONTENT_BYTES];
         let length = content_for(1, &mut buffer);
         if let Some(attempt) = candidate(
             client,
@@ -796,7 +855,7 @@ fn run_rival(client: &mut Client, config: &ClientConfig) {
         return;
     };
     let generation = state.generation;
-    let mut buffer = [0u8; 64];
+    let mut buffer = [0u8; CONTENT_BYTES];
     let length = content_for(config.leg + 900, &mut buffer);
     let Some(attempt) = candidate(
         client,
@@ -871,7 +930,7 @@ fn run_reader(client: &mut Client) {
 
     // A reader may build a candidate. Publishing it is what it may not do, and
     // the refusal is about publishing rather than about reaching the service.
-    let mut buffer = [0u8; 64];
+    let mut buffer = [0u8; CONTENT_BYTES];
     let length = content_for(777, &mut buffer);
     let attempt = candidate(
         client,

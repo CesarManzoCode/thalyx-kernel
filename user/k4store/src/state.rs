@@ -37,8 +37,9 @@ pub const MAX_OBJECTS: usize = 40;
 pub const MAX_STAGED: usize = 12;
 
 /// Digests the loop may ask the engine to keep staged at once: one candidate
-/// root per principal, plus every binding of every live workspace.
-pub const MAX_PROTECTED: usize = 24;
+/// root per principal, the last few objects each principal staged, and every
+/// binding of every live workspace.
+pub const MAX_PROTECTED: usize = 40;
 /// Largest object this service accepts.
 pub const OBJECT_MAX: usize = geometry::OBJECT_MAX_BYTES as usize;
 /// Principals the service keeps durable state for.
@@ -117,6 +118,12 @@ pub struct ObjectEntry {
     /// Staging slot, or `u32::MAX`.
     pub stage: u32,
     pub live: bool,
+    /// Staged by the request being served right now. A sweep triggered while a
+    /// request is half-way through staging a candidate must not drop what that
+    /// request has already staged: a freeze stages a tree and then a manifest
+    /// naming it, and a sweep between the two would leave the manifest naming
+    /// something that is gone.
+    pub pinned: bool,
 }
 
 impl Default for ObjectEntry {
@@ -129,6 +136,7 @@ impl Default for ObjectEntry {
             durable: false,
             stage: u32::MAX,
             live: false,
+            pinned: false,
         }
     }
 }
@@ -406,6 +414,20 @@ impl Store {
         Some(digest)
     }
 
+    /// Why a write did not happen, said in the terms the caller can act on.
+    ///
+    /// A write the driver could not even be asked for says nothing about the
+    /// medium: the store is not damaged, this service is not available. A write
+    /// the medium refused is the other case, and calling both
+    /// `INTEGRITY_FAILED` would tell a caller to distrust a store that is fine.
+    fn write_failure(&self) -> u32 {
+        if self.disk.unreachable {
+            store_status::UNAVAILABLE
+        } else {
+            store_status::INTEGRITY_FAILED
+        }
+    }
+
     /// Blocks left in the active arena.
     pub fn free_blocks(&self) -> u64 {
         (self.arena_start + self.arena_blocks).saturating_sub(self.next_block)
@@ -459,6 +481,7 @@ impl Store {
             durable: false,
             stage: slot as u32,
             live: true,
+            pinned: true,
         };
         Ok(digest)
     }
@@ -481,6 +504,7 @@ impl Store {
             durable: true,
             stage: u32::MAX,
             live: true,
+            pinned: false,
         };
     }
 
@@ -576,6 +600,17 @@ impl Store {
         true
     }
 
+    /// Drops every pin, so the next request's sweep can see what this one left.
+    ///
+    /// A pin says "the call in progress staged this"; once the call is over
+    /// that is no longer a reason to keep anything, and a pin that outlived
+    /// its call would be a staging slot nothing ever gives back.
+    pub fn unpin(&mut self) {
+        for entry in &mut self.objects {
+            entry.pinned = false;
+        }
+    }
+
     /// Frees staging held by objects nothing can still name.
     ///
     /// Staging is not durable and never was: an object lives there from the
@@ -626,9 +661,9 @@ impl Store {
         }
 
         let mut freed = 0usize;
-        for index in 0..MAX_OBJECTS {
+        for (index, kept) in keep.iter().enumerate() {
             let entry = self.objects[index];
-            if !entry.live || entry.durable || keep[index] {
+            if !entry.live || entry.durable || entry.pinned || *kept {
                 continue;
             }
             if entry.stage != u32::MAX {
@@ -1465,7 +1500,7 @@ impl Store {
         let Some(prepare_digest) =
             self.append(record_kind::PREPARE, prepare.as_bytes(), prepare_mode)
         else {
-            return Err(store_status::INTEGRITY_FAILED);
+            return Err(self.write_failure());
         };
         if !self.flush() {
             return Err(store_status::UNAVAILABLE);
@@ -1505,7 +1540,7 @@ impl Store {
                 _ => fault_mode::NONE,
             };
             if !self.write_object(index, mode) {
-                return Err(store_status::INTEGRITY_FAILED);
+                return Err(self.write_failure());
             }
         }
         let receipt_index = self.find(&receipt_digest).ok_or(store_status::NOT_FOUND)?;
@@ -1517,7 +1552,7 @@ impl Store {
                 _ => fault_mode::NONE,
             };
             if !self.write_object(receipt_index, mode) {
-                return Err(store_status::INTEGRITY_FAILED);
+                return Err(self.write_failure());
             }
         }
         if !self.flush() {
@@ -1549,10 +1584,12 @@ impl Store {
             .append(record_kind::COMMIT, commit.as_bytes(), commit_mode)
             .is_none()
         {
-            // The medium refused the commit. Nothing is published, and the
-            // prepare stays durable and unresolved: what happened to this
-            // request is not something this run may assert.
-            return Err(store_status::INTEGRITY_FAILED);
+            // The commit did not happen. Nothing is published, and the prepare
+            // stays durable and unresolved: what happened to this request is
+            // not something this run may assert. Whether the medium refused it
+            // or the driver could not be asked at all are different answers,
+            // and only one of them says the store is damaged.
+            return Err(self.write_failure());
         }
         if !self.flush() {
             return Err(store_status::UNAVAILABLE);
