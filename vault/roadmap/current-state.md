@@ -5,13 +5,13 @@ status: observed
 ---
 # Estado actual
 
-**2026-09-10 · Fundación 0.1.0 · K0, K1, K2, K3 y K4 completos. K5–K6 pendientes.**
+**2026-09-10 · Fundación 0.1.0 · K0, K1, K2, K3 y K4 completos. K5 en curso. K6 pendiente.**
 
-> **Punto de reanudación.** Este documento es el checkpoint. La sección [Reanudar aquí](#reanudar-aquí) dice exactamente dónde empieza el trabajo siguiente; no hace falta reauditar K0, K1, K2 ni K3.
+> **Punto de reanudación.** Este documento es el checkpoint. La sección [Reanudar aquí](#reanudar-aquí) dice exactamente dónde empieza el trabajo siguiente; no hace falta reauditar K0, K1, K2, K3 ni K4.
 
 ## Qué existe
 
-Un vault de 44 notas con constitución, 13 contratos de arquitectura, glosario, reconstrucción de Thalyx, 32 fuentes primarias anotadas, nueve decisiones, 23 invariantes, alternativas, integración Linux/nativa, experimentos y ruta de implementación. Se incluyen herramientas documentales y dos modelos finitos de investigación con controles negativos y resultado versionado.
+Un vault de 45 notas con constitución, 13 contratos de arquitectura, glosario, reconstrucción de Thalyx, 32 fuentes primarias anotadas, nueve decisiones, 23 invariantes, alternativas, integración Linux/nativa, experimentos y ruta de implementación. Se incluyen herramientas documentales y dos modelos finitos de investigación con controles negativos y resultado versionado.
 
 Existe además un kernel que arranca, un sistema de capacidades que se ejecuta sobre él, una ejecución en cuatro procesadores con un dispositivo de bloque real conducido desde usuario, y un almacén de versiones que sobrevive a la ejecución que lo escribió. El workspace tiene loader UEFI, protocolo de arranque, kernel con `arch/x86_64`, interfaz V0 generada desde un esquema, trece programas de usuario y dos bibliotecas que comparten —el runtime y el formato durable—, con toolchain fijada y construcción reproducible desde un solo script para las cuatro fases.
 
@@ -239,22 +239,38 @@ Lo que no existe, en orden de cuánto se parece a existir:
 
 El plano de diagnóstico de K1 sigue presente, sigue sin ser el plano de recibos, y sus dos entradas de andamiaje permanecen para que la regresión de K1 se siga ejecutando. El primer supervisor no tiene supervisor: su fallo termina la ejecución. No se ha retirado ni reemplazado Linux.
 
+## K5 — en curso
+
+El port de Thalyx. Lo que sigue describe lo que ya se ejecuta; lo que todavía no existe está en [qué no existe](#qué-no-existe-todavía) y, con detalle, en [la evidencia](../evidence/k5-thalyx-port.md).
+
+### Etapa `smoke`: el target nativo existe y ejecuta
+
+Hay un segundo target de usuario, `x86_64-thalyx`, definido en [`tools/build_native.py`](../../tools/build_native.py) y no en un triple: ELF64 estático a 0x400000 con tres segmentos separados R-X / R-- / RW-, SSE y SSE2 en hardware con `-mfpmath=sse` y **sin AVX** —el kernel guarda el área `FXSAVE` heredada de forma ansiosa y no habilita `XSAVE`—, sin protector de pila, sin tablas de desenrollado y con `-nostdinc`, de modo que la única libc en la ruta de búsqueda es `user/native`.
+
+`user/native` es el runtime que un programa C pisa: asignación sobre objetos de memoria que el programa crea contra su propio ámbito y mapea en su propio dominio, hilos que el supervisor construye antes de activar y que bloquean en una señal real, tiempo desde el único reloj que hay, transporte acotado con el origen que estampa el kernel, y una biblioteca matemática escrita aquí que **no** redondea correctamente y lo dice donde importa.
+
+La quinta imagen —mismo kernel, otro paquete— construye un dominio desde una imagen C, lo activa y lo planifica. El programa mide `.bss` a cero, lee límites y reloj, ejecuta un bucle de coma flotante sembrado por el plan que el anfitrión puso en la imagen y reporta un resultado que el anfitrión recalcula y exige idéntico, hace crecer un heap de 192 páginas en tres arenas leyendo de vuelta lo que escribió por los mapeos nuevos, y se detiene contra el techo de páginas de su ámbito con `LIMIT_EXHAUSTED` del kernel y no con un límite propio.
+
+`tools/check_k5.py` decide **13** criterios por separado, cuatro de ellos las regresiones K1–K4. `--self-test` daña la ejecución de **14** formas distintas y un criterio nombrado nota cada una.
+
+### Lo que la etapa corrigió
+
+Dos defectos que compilar no encuentra: un supervisor construido sin el script de enlace, rechazado por el kernel con `segment_unaligned` antes de ejecutar una instrucción; y un heap que creaba sus arenas sin `MEMORY_MAP` en los derechos máximos del objeto, de modo que el mapeo se rechazaba por derechos insuficientes y `malloc` no podía devolver un byte. [Detalle](../evidence/k5-thalyx-port.md).
+
 ## Reanudar aquí
 
-**Último hito terminado y pusheado:** **K4 completo**. Rama `feat/k4-durable-managed-state`, sin fusionar. K3 quedó completo en `feat/k3-smp-devices`.
+**Último hito terminado y pusheado:** **K5 etapa `smoke`**, en la rama `feat/k5-thalyx-port-tools`. K4 quedó completo en `feat/k4-durable-managed-state`.
 
-**Qué está verde, medido en este árbol y con el mismo binario de kernel en las cuatro fases:** puerta K1 13/13, puerta K2 21/21 con autocomprobación 28/28, puerta K3 28/28 en los dos perfiles de plataforma con autocomprobación 57/57, puerta K4 31/31 con autocomprobación 48/48, formato K4 12/12, cobertura K2 51/51, K3 37/59 con las 26 requeridas dentro y K4 33/59 con las 23 requeridas dentro, ABI 4/4, vault 44 notas PASS, modelos PASS, `fmt` limpio, y los cinco paquetes K4 limpios de clippy.
+**Qué está verde, medido en este árbol y con el mismo binario de kernel en las cinco fases:** puerta K1 13/13, puerta K2 21/21 con autocomprobación 28/28, puerta K3 28/28 en los dos perfiles de plataforma con autocomprobación 57/57, puerta K4 31/31 con autocomprobación 48/48, formato K4 12/12, puerta K5 13/13 con autocomprobación 14/14, ABI 4/4, vault 45 notas PASS, modelos PASS, `fmt` limpio.
 
-**Qué demostró exactamente la ejecución K4:** un medio en blanco formateado por el servicio y decodificado desde el anfitrión por el módulo que genera el esquema; tres publicaciones con CAS y una cuarta petición repetida byte a byte contestada con la misma generación; las cuatro negativas que un CAS debe hacer, cada una provocada a propósito y distinguida de las otras; un lector que prepara contenido y no puede publicarlo; dos publicadores compitiendo por una transición con una sola ganadora; el efecto admitido por el kernel antes de cada publicación y contado desde el log de control por un auditor que no es el servicio auditado; compactación de nueve objetos a la otra arena con la raíz intacta; un outbox durable, `UNKNOWN` incluido; once cortes, uno por punto de escritura, cada uno seguido de un arranque sobre lo que dejó —prepare sin resolver recuperado como abort, commit durable adoptado sin su checkpoint, registro desgarrado que corta el prefijo, respuesta perdida contestada desde el resultado durable, servicio reemplazado dentro de una ejecución—; y el plano de control perdido, donde el log lleno rechaza las admisiones que sus recibos cubrirían en vez de perderlos.
+**Qué demostró exactamente la etapa `smoke` de K5:** un programa C compilado por una toolchain cruzada del anfitrión para un target propio, cargado por el kernel desde un objeto de imagen, activado, planificado y preemptado seis veces; `.bss` a cero; la consulta de límites contestando el mismo número de procesadores que el kernel arrancó; un bucle de coma flotante en hardware cuyo resultado el anfitrión recalcula y exige idéntico; un heap crecido con objetos de memoria que el programa crea contra su propio ámbito y mapea en su propio dominio; y el techo del ámbito rechazando la siguiente arena con el estado del kernel.
 
-**Qué no demostró, y está escrito así en la evidencia:** durabilidad frente a un corte de energía, comportamiento de flush de una controladora real, aislamiento de DMA, hardware físico, un almacén de tamaño real y cobertura de caminos. [Detalle y límites](../evidence/k4-durable-state.md).
+**Qué no demostró:** nada de Thalyx todavía. No hay QuickJS, herramienta de validación, motor de inferencia ni estado administrado en esta etapa. Los límites de K3 y K4 se heredan enteros.
 
-**Siguiente paso exacto al reanudar:** K5, según [la ruta](phases.md). Nada de K4 queda pendiente y nada de K3 tampoco.
+**Siguiente paso exacto al reanudar:** la etapa `surface` de K5 —primera superficie nativa de Thalyx con fixtures y agente externo—, después `work` y después `engine`. [La ruta](phases.md).
 
-**Bugs encontrados por ejecución en K4, todos corregidos:** nueve. Tres comparten familia —dar por hecho que una cosa que se guarda no cuesta nada— y agotaban la tabla de invocaciones, la tabla global de concesiones y el área de preparación. Tres son sobre decir la verdad en la respuesta. Tres solo aparecen bajo un corte. Están descritos uno a uno en [la evidencia](../evidence/k4-durable-state.md).
+## Siguiente trabajo: terminar K5
 
-## Siguiente trabajo: K5
-
-Port de Thalyx y herramientas, según [la ruta](phases.md). Antes de eso, lo que K4 deja abierto y K5 hereda: el perfil de durabilidad declara que la supresión la hace el driver del invitado, y cualquier afirmación más fuerte necesita conocer el comportamiento de flush de un dispositivo real —el mismo tipo de dependencia que el perfil de DMA declara sobre la unidad de remapeo—.
+Según [la ruta](phases.md), quedan las etapas `surface`, `work` y `engine`. Lo que K4 deja abierto y K5 hereda: el perfil de durabilidad declara que la supresión la hace el driver del invitado, y cualquier afirmación más fuerte necesita conocer el comportamiento de flush de un dispositivo real —el mismo tipo de dependencia que el perfil de DMA declara sobre la unidad de remapeo—.
 
 No hay una elección técnica pendiente que deba devolver el diseño al usuario. [Las preguntas abiertas](open-questions.md) especifican qué dato falta y con qué decisión conservadora avanzar.

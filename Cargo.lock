@@ -199,6 +199,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "thalyx-user-k5pkg"
+version = "0.3.1"
+dependencies = [
+ "thalyx-abi",
+ "thalyx-user-k4fmt",
+ "thalyx-user-rt",
+]
+
+[[package]]
+name = "thalyx-user-k5super"
+version = "0.3.1"
+dependencies = [
+ "thalyx-abi",
+ "thalyx-user-k4fmt",
+ "thalyx-user-k5pkg",
+ "thalyx-user-rt",
+]
+
+[[package]]
 name = "thalyx-user-rt"
 version = "0.3.1"
 dependencies = [

@@ -563,6 +563,48 @@ def generate_c(schema: dict, layout: Layout) -> str:
     for item in schema["boot_slots"]:
         out.append(f"#define THALYX_BOOT_SLOT_{item['name']} {item['slot']}u")
     out.append("")
+    out.append("/* One assigned operation, as the schema publishes it. The Rust side has the")
+    out.append(" * same table; a native C program needs it for the same reason the kernel")
+    out.append(" * does -- the descriptor header carries a length the kernel checks against")
+    out.append(" * R10, and a program that guessed that length would be refused. */")
+    out.append("typedef struct {")
+    out.append("    uint32_t code;")
+    out.append("    uint32_t object_type;")
+    out.append("    uint32_t rights;")
+    out.append("    uint32_t descriptor_len; /* Header included; zero when the operation carries none. */")
+    out.append("    uint32_t writes_response;")
+    out.append("    const char *name;")
+    out.append("} thalyx_op_spec_t;")
+    out.append("")
+    out.append(f"#define THALYX_OPERATION_COUNT {len(schema['operations'])}u")
+    out.append("static const thalyx_op_spec_t thalyx_operations[THALYX_OPERATION_COUNT] = {")
+    for item in schema["operations"]:
+        code = opcode(types[item["type"]], item["ordinal"])
+        request = layout[item["request"]]["size"] + 32 if item["request"] else 0
+        response = layout[item["response"]]["size"] + 32 if item["response"] else 0
+        out.append(
+            "    { 0x%08Xu, %du, 0x%08Xu, %du, %du, \"%s\" },"
+            % (
+                code,
+                types[item["type"]],
+                rights_value(schema, item["type"], item["rights"]),
+                max(request, response),
+                1 if response else 0,
+                item["name"],
+            )
+        )
+    out.append("};")
+    out.append("")
+    out.append("/* Looks up an operation code, or NULL when the number is not assigned. */")
+    out.append("static inline const thalyx_op_spec_t *thalyx_op_spec(uint32_t code) {")
+    out.append("    for (unsigned i = 0; i < THALYX_OPERATION_COUNT; i++) {")
+    out.append("        if (thalyx_operations[i].code == code) {")
+    out.append("            return &thalyx_operations[i];")
+    out.append("        }")
+    out.append("    }")
+    out.append("    return NULL;")
+    out.append("}")
+    out.append("")
     for definition in layout.structs.values():
         typedef = "thalyx_" + snake(definition["name"]) + "_t"
         if definition.get("doc"):

@@ -22,32 +22,32 @@ use thalyx_abi::limit;
 /// scheduling on a table it does not have.
 pub const MAX_CPUS: usize = 8;
 /// Domains the kernel can hold at once.
-pub const MAX_DOMAINS: usize = 10;
+pub const MAX_DOMAINS: usize = 16;
 /// Threads the kernel can hold at once, one idle thread per processor
 /// included.
-pub const MAX_THREADS: usize = 8 + 24;
+pub const MAX_THREADS: usize = 8 + 40;
 /// Threads one domain may hold.
 pub const MAX_THREADS_PER_DOMAIN: usize = 4;
 /// Capability slots in one domain's table.
 pub const MAX_CAPS: usize = limit::MAX_HANDLES_PER_DOMAIN as usize;
 /// Scopes the kernel can hold at once.
-pub const MAX_SCOPES: usize = 16;
+pub const MAX_SCOPES: usize = 24;
 /// Grant nodes the kernel can hold at once, tombstones included.
-pub const MAX_GRANTS: usize = 128;
+pub const MAX_GRANTS: usize = 256;
 /// Memory objects the kernel can hold at once.
-pub const MAX_MEMORY_OBJECTS: usize = 24;
+pub const MAX_MEMORY_OBJECTS: usize = 72;
 /// Pages one memory object may hold.
 pub const MAX_OBJECT_PAGES: u64 = limit::MAX_MEMORY_PAGES_PER_OBJECT;
 /// Mapping records, which are also the reverse index a seal walks.
-pub const MAX_MAPS: usize = 64;
+pub const MAX_MAPS: usize = 224;
 /// Endpoints the kernel can hold at once.
-pub const MAX_ENDPOINTS: usize = 12;
+pub const MAX_ENDPOINTS: usize = 20;
 /// Messages in flight across every endpoint.
-pub const MAX_MESSAGES: usize = 32;
+pub const MAX_MESSAGES: usize = 48;
 /// Invocations the kernel can hold at once.
-pub const MAX_INVOCATIONS: usize = 32;
+pub const MAX_INVOCATIONS: usize = 48;
 /// Signals the kernel can hold at once.
-pub const MAX_SIGNALS: usize = 12;
+pub const MAX_SIGNALS: usize = 20;
 /// Timers the kernel can hold at once.
 pub const MAX_TIMERS: usize = 12;
 /// Control logs the kernel can hold at once.

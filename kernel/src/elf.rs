@@ -19,7 +19,13 @@ pub const MAX_SEGMENTS: usize = 8;
 pub const MAX_IMAGE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Largest total memory footprint accepted for one module's segments.
-pub const MAX_IMAGE_PAGES: u64 = 256;
+///
+/// Raised from 256 in K5. A native C program that carries a real language
+/// runtime does not fit in a megabyte, and the ceiling that actually binds an
+/// image is the memory object it arrives in: `MAX_MEMORY_PAGES_PER_OBJECT` is
+/// an interface limit and caps the file at two megabytes, while this number is
+/// an implementation capacity and caps the mapped footprint, `.bss` included.
+pub const MAX_IMAGE_PAGES: u64 = 768;
 
 const EI_NIDENT: usize = 16;
 const HEADER_LEN: usize = 64;

@@ -118,6 +118,29 @@ K4_INSTANCES = [
 ]
 
 
+# Programs built for the K5 package. Two toolchains meet here: the supervisor
+# and the services are Rust on the kernel's own target, and the language
+# runtime, the validation tool and the inference engine are C on the
+# `x86_64-thalyx` target that `tools/build_native.py` defines. The package is
+# what puts them in one image; nothing about building them is evidence that any
+# of them ran.
+K5_PROGRAMS = ["k5super"]
+K5_NATIVE: dict[str, list[str]] = {
+    "smoke": ["nsmoke"],
+}
+K5_STAGES = {"smoke": 1, "surface": 2, "work": 3, "engine": 4}
+
+# Mirrors `thalyx_user_k5pkg::native::Plan`.
+PLAN_MAGIC = 0x31304E414C50354B
+PLAN_FORMAT = "<QIIQQQQQ"
+
+
+def build_plan(stage: str, seed: int) -> bytes:
+    return struct.pack(
+        PLAN_FORMAT, PLAN_MAGIC, 1, K5_STAGES[stage], seed, 0, 0, 0, 0
+    )
+
+
 def run(argv: list[str], **kwargs) -> subprocess.CompletedProcess:
     print("+", " ".join(argv), file=sys.stderr)
     result = subprocess.run(argv, **kwargs)
@@ -284,7 +307,11 @@ def digest(path: Path) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", default="release", choices=["debug", "release"])
-    parser.add_argument("--phase", default="k1", choices=["k1", "k2", "k3", "k4"])
+    parser.add_argument("--phase", default="k1", choices=["k1", "k2", "k3", "k4", "k5"])
+    parser.add_argument("--stage", default="smoke", choices=sorted(K5_STAGES),
+                        help="K5 only: which stage of the port the image runs")
+    parser.add_argument("--seed", type=lambda text: int(text, 0), default=0x5EED0001,
+                        help="K5 only: the seed the plan carries")
     parser.add_argument("--size-mib", type=int, default=64)
     arguments = parser.parse_args()
 
@@ -297,7 +324,13 @@ def main() -> int:
     phase = arguments.phase
     stage = BUILD / f"thalyx-{phase}"
     image = BUILD / f"thalyx-{phase}.img"
-    programs = {"k1": K1_PROGRAMS, "k2": K2_PROGRAMS, "k3": K3_PROGRAMS, "k4": K4_PROGRAMS}[phase]
+    programs = {
+        "k1": K1_PROGRAMS,
+        "k2": K2_PROGRAMS,
+        "k3": K3_PROGRAMS,
+        "k4": K4_PROGRAMS,
+        "k5": K5_PROGRAMS,
+    }[phase]
 
     # Read by rust-lld for the loader's PE timestamp and by mtools for the FAT
     # directory entries. Set before the first build so both see it.
@@ -318,6 +351,22 @@ def main() -> int:
         source = artifact(KERNEL_TARGET, arguments.profile, program)
         shutil.copyfile(source, stage / f"{program}.elf")
 
+    native_images: list[str] = []
+    if phase == "k5":
+        native_images = K5_NATIVE[arguments.stage]
+        native = subprocess.run(
+            [sys.executable, str(ROOT / "tools/build_native.py"), *native_images],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if native.returncode != 0:
+            print(native.stdout, native.stderr, file=sys.stderr)
+            raise SystemExit("native build failed")
+        for name in native_images:
+            shutil.copyfile(BUILD / "native" / f"{name}.elf", stage / f"{name}.elf")
+        (stage / "k5plan.bin").write_bytes(build_plan(arguments.stage, arguments.seed))
+
     entries: list[tuple[str, Path, int, int]] = []
     if phase == "k1":
         entries = [
@@ -327,6 +376,12 @@ def main() -> int:
         malformed = stage / "malformed.elf"
         patch_malformed(stage / "worker.elf", malformed)
         entries.append(("malformed", malformed, MODULE_KIND_USER_ELF, MODULE_FLAG_EXPECT_REJECT))
+    elif phase == "k5":
+        entries = [("k5super", stage / "k5super.elf", MODULE_KIND_SUPERVISOR, 0)]
+        entries += [
+            (name, stage / f"{name}.elf", MODULE_KIND_USER_ELF, 0) for name in native_images
+        ]
+        entries.append(("k5plan", stage / "k5plan.bin", MODULE_KIND_USER_ELF, 0))
     else:
         instances = {"k2": K2_INSTANCES, "k3": K3_INSTANCES, "k4": K4_INSTANCES}[phase]
         entries = [(name, stage / f"{program}.elf", kind, 0) for name, program, kind in instances]
@@ -373,6 +428,12 @@ def main() -> int:
         ],
         "toolchain": tools.describe(),
     }
+    if phase == "k5":
+        manifest["stage"] = arguments.stage
+        manifest["seed"] = arguments.seed
+        native_manifest = BUILD / "native" / "native-manifest.json"
+        if native_manifest.exists():
+            manifest["native"] = json.loads(native_manifest.read_text())
     name = "image-manifest.json" if phase == "k1" else f"image-manifest-{phase}.json"
     (BUILD / name).write_text(json.dumps(manifest, indent=2) + "\n")
     print(json.dumps(manifest, indent=2))

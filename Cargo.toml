@@ -20,6 +20,8 @@ members = [
     "user/k4store",
     "user/k4client",
     "user/k4super",
+    "user/k5pkg",
+    "user/k5super",
 ]
 
 [workspace.package]
@@ -34,6 +36,7 @@ thalyx-abi = { path = "abi" }
 thalyx-boot-protocol = { path = "boot/protocol" }
 thalyx-user-rt = { path = "user/rt" }
 thalyx-user-k4fmt = { path = "user/k4fmt" }
+thalyx-user-k5pkg = { path = "user/k5pkg" }
 
 # Bare-metal images must not unwind: there is no unwinder and no runtime below
 # the kernel. `panic = "abort"` is also the target default for both

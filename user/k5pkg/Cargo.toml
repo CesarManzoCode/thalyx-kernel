@@ -1,0 +1,16 @@
+[package]
+name = "thalyx-user-k5pkg"
+description = "What the K5 package agrees on: the native target's boot record, the image record a launcher reads, and the protocols the port speaks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+thalyx-abi.workspace = true
+thalyx-user-rt.workspace = true
+thalyx-user-k4fmt.workspace = true
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
