@@ -35,8 +35,8 @@
 
 use core::sync::atomic::{Ordering, fence};
 
-use thalyx_abi::generated::{dma_profile, right};
 use thalyx_abi::boot_handle;
+use thalyx_abi::generated::{dma_profile, right};
 use thalyx_user_k4fmt::pkg::{
     DiskReply, DiskRequest, IOBUF_PAGES, IOBUF_VADDR, REGION_VADDR, RING_GRANTED_PAGES, RING_PAGES,
     RING_VADDR, bit, disk_op, disk_slot, disk_status, note,
@@ -454,9 +454,8 @@ fn serve(queue: &mut Queue, irq: u64, faults: &mut Faults, request: &DiskRequest
             // point at which the medium stops being allowed to reorder.
             if faults.latched {
                 reply.status = disk_status::LATCHED;
-            } else if !release_held(queue, irq, faults) {
-                reply.status = disk_status::IO_ERROR;
-            } else if !transfer(queue, irq, BLK_FLUSH, 0, 0, 0) {
+            } else if !release_held(queue, irq, faults) || !transfer(queue, irq, BLK_FLUSH, 0, 0, 0)
+            {
                 reply.status = disk_status::IO_ERROR;
             } else {
                 faults.flushes += 1;
@@ -502,7 +501,10 @@ fn write_with_faults(
     match request.fault_mode {
         fault_mode::DROP_WRITE => {
             faults.writes_suppressed += 1;
-            k2::note(note::DISK_SUPPRESSED, u64::from(fault_mode::DROP_WRITE) | (request.block << 8));
+            k2::note(
+                note::DISK_SUPPRESSED,
+                u64::from(fault_mode::DROP_WRITE) | (request.block << 8),
+            );
             return reply;
         }
         fault_mode::IO_ERROR => {
@@ -577,7 +579,14 @@ fn release_held(queue: &mut Queue, irq: u64, faults: &mut Faults) -> bool {
         return true;
     };
     let held = queue.ring_iova + HELD_OFFSET;
-    if !transfer(queue, irq, BLK_OUT, block, held, u64::from(count) * BLOCK_BYTES) {
+    if !transfer(
+        queue,
+        irq,
+        BLK_OUT,
+        block,
+        held,
+        u64::from(count) * BLOCK_BYTES,
+    ) {
         return false;
     }
     faults.writes_issued += 1;
@@ -680,7 +689,8 @@ fn run() -> ! {
             }
         };
         let reply = serve(&mut queue, irq, &mut faults, &request);
-        if let Err(code) = k2::invocation_reply(invocation, u64::from(reply.status), reply.as_bytes())
+        if let Err(code) =
+            k2::invocation_reply(invocation, u64::from(reply.status), reply.as_bytes())
         {
             k2::note(report::UNEXPECTED, code as u64);
         }

@@ -172,6 +172,15 @@ name = "thalyx-user-k4fmt"
 version = "0.3.1"
 
 [[package]]
+name = "thalyx-user-k4store"
+version = "0.3.1"
+dependencies = [
+ "thalyx-abi",
+ "thalyx-user-k4fmt",
+ "thalyx-user-rt",
+]
+
+[[package]]
 name = "thalyx-user-rt"
 version = "0.3.1"
 dependencies = [

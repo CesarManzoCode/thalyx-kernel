@@ -145,6 +145,18 @@ impl Disk {
     }
 }
 
+/// The whole shared buffer, as one contiguous slice.
+///
+/// # Safety
+///
+/// The supervisor mapped `IOBUF_PAGES` writable pages at `IOBUF_VADDR` before
+/// this domain ran. Used only before the store is touched, by the check that
+/// rebuilds the golden vectors, which needs more than one block at once.
+pub fn iobuf_bytes() -> &'static mut [u8] {
+    // SAFETY: as `slot_bytes`, over every page of the same mapping.
+    unsafe { core::slice::from_raw_parts_mut(IOBUF_VADDR as *mut u8, IOBUF_PAGES as usize * BLOCK) }
+}
+
 /// The bytes of one buffer slot.
 ///
 /// # Safety

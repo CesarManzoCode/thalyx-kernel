@@ -17,6 +17,7 @@ members = [
     "user/k3driver",
     "user/k4fmt",
     "user/k4disk",
+    "user/k4store",
 ]
 
 [workspace.package]

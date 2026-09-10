@@ -19,6 +19,7 @@
 //! aborted with the reason that says why.
 
 use thalyx_user_k4fmt as k4;
+use thalyx_user_k4fmt::Pod;
 use thalyx_user_k4fmt::pkg::note;
 use thalyx_user_k4fmt::{
     AbortRecord, Binding, CheckpointRecord, CommitRecord, Manifest, ObjectRecordHeader,
@@ -26,7 +27,6 @@ use thalyx_user_k4fmt::{
     StoreSuperblock, Validation, abort_reason, fault_mode, fault_point, geometry, magic,
     object_type, outbox_status, record_kind, result_outcome, store_status,
 };
-use thalyx_user_k4fmt::{BLOCK, Pod};
 use thalyx_user_rt::k2;
 
 use crate::disk::{Disk, slot_bytes};
@@ -142,6 +142,7 @@ pub struct Harness {
     pub arg: u64,
     pub leg: u64,
     pub scenario: u64,
+    pub seed: u64,
     pub stop_at_next_flush: u64,
     /// The mode has been applied and must not be applied twice.
     pub applied: bool,
@@ -150,7 +151,7 @@ pub struct Harness {
 }
 
 /// What the service decided to do at a fault point.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fault {
     /// Carry on.
     None,
@@ -168,6 +169,13 @@ pub enum Fault {
 pub struct Store {
     pub disk: Disk,
     pub harness: Harness,
+    /// A fault that asked for the run to end, or for this domain to be
+    /// replaced. The engine cannot do either: only the loop that holds the
+    /// signal can, so it is recorded here and read there. Without this a
+    /// `STOP` inside a publication is indistinguishable from a medium that
+    /// refused, and the run would carry on writing after the point it was
+    /// supposed to be cut at.
+    pub demanded: Option<Fault>,
 
     pub uuid: [u8; 16],
     pub store_epoch: u64,
@@ -221,6 +229,7 @@ impl Store {
         Self {
             disk,
             harness: Harness::default(),
+            demanded: None,
             uuid: [0u8; 16],
             store_epoch: 0,
             superblock_generation: 0,
@@ -281,6 +290,7 @@ impl Store {
             arg: directive.fault_arg,
             leg: u64::from(directive.leg),
             scenario: directive.scenario,
+            seed: directive.seed,
             stop_at_next_flush: directive.stop_at_next_flush,
             applied: false,
             armed: false,
@@ -310,7 +320,7 @@ impl Store {
             note::FAULT_APPLIED,
             u64::from(point) | (u64::from(self.harness.mode) << 8),
         );
-        match self.harness.mode {
+        let decided = match self.harness.mode {
             fault_mode::STOP => Fault::Stop,
             fault_mode::KILL_SERVICE => Fault::Kill,
             fault_mode::LOSE_RESPONSE => Fault::LoseResponse,
@@ -319,7 +329,11 @@ impl Store {
             | fault_mode::IO_ERROR
             | fault_mode::REORDER => Fault::Write(self.harness.mode),
             _ => Fault::None,
+        };
+        if let Fault::Stop | Fault::Kill | Fault::LoseResponse = decided {
+            self.demanded = Some(decided);
         }
+        decided
     }
 
     // -- the medium ----------------------------------------------------------
@@ -397,7 +411,9 @@ impl Store {
         if self.find(&digest).is_some() {
             return Ok(digest);
         }
-        let slot = self.free_stage_slot().ok_or(store_status::EXHAUSTED as i64)?;
+        let slot = self
+            .free_stage_slot()
+            .ok_or(store_status::EXHAUSTED as i64)?;
         let index = self
             .free_object_slot()
             .ok_or(store_status::EXHAUSTED as i64)?;
@@ -475,6 +491,21 @@ impl Store {
         Some(length)
     }
 
+    /// Copies one object's canonical bytes out, verified against its digest.
+    ///
+    /// `load` fills a buffer private to this module; a caller outside it needs
+    /// the bytes themselves, and getting them this way means it never sees an
+    /// object whose content did not hash to the identity it asked for.
+    pub fn read_object(&mut self, digest: &[u8; 32], out: &mut [u8]) -> Option<(u32, usize)> {
+        let index = self.find(digest)?;
+        let length = self.load(index)?;
+        if out.len() < length {
+            return None;
+        }
+        out[..length].copy_from_slice(&content()[..length]);
+        Some((self.objects[index].object_type, length))
+    }
+
     /// Writes one object as a record. Returns false when the medium refused.
     fn write_object(&mut self, index: usize, mode: u32) -> bool {
         let entry = self.objects[index];
@@ -499,7 +530,10 @@ impl Store {
             .copy_from_slice(&content()[..length]);
         let block = self.next_block;
         let total = ObjectRecordHeader::SIZE + length;
-        if self.append(record_kind::OBJECT, &body[..total], mode).is_none() {
+        if self
+            .append(record_kind::OBJECT, &body[..total], mode)
+            .is_none()
+        {
             return false;
         }
         self.objects[index].durable = true;
@@ -721,7 +755,10 @@ impl Store {
         let sequence = self.next_sequence;
         // A checkpoint opens an arena, so it links to nothing.
         self.prev_digest = [0u8; 32];
-        if self.append(record_kind::CHECKPOINT, &body[..at], fault_mode::NONE).is_none() {
+        if self
+            .append(record_kind::CHECKPOINT, &body[..at], fault_mode::NONE)
+            .is_none()
+        {
             return false;
         }
         self.checkpoint_sequence = sequence;
@@ -755,7 +792,10 @@ impl Store {
         if block.write_to(span, 0).is_err() {
             return false;
         }
-        if !self.disk.write(absolute(slot), WRITE_SLOT, fault_mode::NONE) {
+        if !self
+            .disk
+            .write(absolute(slot), WRITE_SLOT, fault_mode::NONE)
+        {
             return false;
         }
         self.durable_through = block.durable_through_sequence;
@@ -815,7 +855,10 @@ impl Store {
 
         if !self.replay(&superblock) {
             self.integrity_failed = true;
-            k2::note(note::INTEGRITY_REFUSED, store_status::INTEGRITY_FAILED as u64);
+            k2::note(
+                note::INTEGRITY_REFUSED,
+                store_status::INTEGRITY_FAILED as u64,
+            );
             return false;
         }
         if !self.resolve_pending() {
@@ -884,7 +927,12 @@ impl Store {
             self.next_sequence += 1;
             self.prev_digest = record.header.digest;
             self.scanned += 1;
-            if !self.replay_record(kind, &body[..payload_len], block, &mut last_commit_generation) {
+            if !self.replay_record(
+                kind,
+                &body[..payload_len],
+                block,
+                &mut last_commit_generation,
+            ) {
                 return false;
             }
         }
@@ -999,6 +1047,15 @@ impl Store {
                 {
                     return false;
                 }
+                // The commit has to publish what its prepare named. A record
+                // that verifies under its own digest and still names a
+                // different root is not a torn tail; it is a contradiction,
+                // and adopting it would publish a version no admission ever
+                // decided on.
+                if self.pending.candidate_root != record.root_digest {
+                    k2::note(note::RECOVERY_INTEGRITY_FAILED, record.prepare_sequence);
+                    return false;
+                }
                 // Every object the root names has to be here, and verified.
                 // A commit whose dependency is missing is not adopted, and the
                 // prepare it names is the one recovery aborts.
@@ -1010,7 +1067,10 @@ impl Store {
                     k2::note(note::RECOVERY_DEPENDENCY_MISSING, record.prepare_sequence);
                     return true;
                 }
-                if reachable[..count].iter().any(|index| !self.objects[*index].durable) {
+                if reachable[..count]
+                    .iter()
+                    .any(|index| !self.objects[*index].durable)
+                {
                     self.pending.reason = abort_reason::DEPENDENCY_MISSING;
                     self.dependency_missing += 1;
                     k2::note(note::RECOVERY_DEPENDENCY_MISSING, record.prepare_sequence);
@@ -1061,10 +1121,15 @@ impl Store {
                 let Some(record) = OutboxRecord::read_from(body, 0) else {
                     return false;
                 };
-                if let Some(index) = self.results.iter().take(self.result_count).position(|held| {
-                    held.principal == record.principal
-                        && held.request_sequence == record.request_sequence
-                }) {
+                if let Some(index) = self
+                    .results
+                    .iter()
+                    .take(self.result_count)
+                    .position(|held| {
+                        held.principal == record.principal
+                            && held.request_sequence == record.request_sequence
+                    })
+                {
                     self.results[index].outbox_status = record.status;
                 }
             }
@@ -1169,13 +1234,13 @@ impl Store {
 
         // Structure before authority before effect, in that order, which is the
         // order the interface itself admits operations in.
-        let root_index = self
-            .find(candidate_root)
-            .ok_or(store_status::NOT_FOUND)?;
+        let root_index = self.find(candidate_root).ok_or(store_status::NOT_FOUND)?;
         if self.objects[root_index].object_type != object_type::MANIFEST {
             return Err(store_status::INVALID_REQUEST);
         }
-        let length = self.load(root_index).ok_or(store_status::INTEGRITY_FAILED)?;
+        let length = self
+            .load(root_index)
+            .ok_or(store_status::INTEGRITY_FAILED)?;
         let manifest =
             Manifest::read_from(&content()[..length], 0).ok_or(store_status::INVALID_REQUEST)?;
         if manifest.policy_digest != *policy_digest
@@ -1273,11 +1338,12 @@ impl Store {
             .stage(object_type::RECEIPT, receipt.as_bytes())
             .map_err(|_| store_status::EXHAUSTED)?;
 
-        if let Fault::Stop = self.fault_at(fault_point::BEFORE_PREPARE, 0) {
-            return Err(store_status::UNAVAILABLE);
-        }
+        // Asked once. Asking twice would consume the directive on the first
+        // call and leave the second with nothing, so a mode meant for the
+        // prepare's own write would never reach it.
         let prepare_mode = match self.fault_at(fault_point::BEFORE_PREPARE, 0) {
             Fault::Write(mode) => mode,
+            Fault::Stop | Fault::Kill => return Err(store_status::UNAVAILABLE),
             _ => fault_mode::NONE,
         };
 
@@ -1328,8 +1394,7 @@ impl Store {
             return Err(store_status::NOT_FOUND);
         }
         let mut ordinal = 0u64;
-        for slot in 0..count {
-            let index = reachable[slot];
+        for index in reachable.iter().copied().take(count) {
             if self.objects[index].durable {
                 continue;
             }
@@ -1473,7 +1538,9 @@ impl Store {
         }
         let mut reachable = [0usize; MAX_OBJECTS];
         let mut count = 0usize;
-        if self.published_generation != 0 && !self.closure(&self.published_root.clone(), &mut reachable, &mut count) {
+        if self.published_generation != 0
+            && !self.closure(&self.published_root.clone(), &mut reachable, &mut count)
+        {
             return Err(store_status::INTEGRITY_FAILED);
         }
         // Roots held against reuse are copied too, or the retention would be a
@@ -1483,9 +1550,9 @@ impl Store {
             let mut held = [0usize; MAX_OBJECTS];
             let mut held_count = 0usize;
             if self.closure(&root, &mut held, &mut held_count) {
-                for slot in 0..held_count {
-                    if !reachable[..count].contains(&held[slot]) && count < MAX_OBJECTS {
-                        reachable[count] = held[slot];
+                for index in held.iter().copied().take(held_count) {
+                    if !reachable[..count].contains(&index) && count < MAX_OBJECTS {
+                        reachable[count] = index;
                         count += 1;
                     }
                 }
@@ -1525,8 +1592,8 @@ impl Store {
             self.arena_blocks = old_blocks;
             return Err(store_status::INTEGRITY_FAILED);
         }
-        for slot in 0..count {
-            let digest = copied[slot].0;
+        for entry in copied.iter().take(count) {
+            let digest = entry.0;
             let Some(index) = self.find(&digest) else {
                 return Err(store_status::INTEGRITY_FAILED);
             };
@@ -1536,7 +1603,7 @@ impl Store {
                 return Err(store_status::INTEGRITY_FAILED);
             };
             let head = ObjectRecordHeader {
-                object_type: copied[slot].1,
+                object_type: entry.1,
                 reserved0: 0,
                 length: length as u64,
                 content_digest: digest,
@@ -1623,7 +1690,10 @@ impl Store {
         if self.retained_count == MAX_RETAINED {
             return Err(store_status::EXHAUSTED);
         }
-        self.retained[self.retained_count] = RetainedEntry { root_digest: root, expiry_ns };
+        self.retained[self.retained_count] = RetainedEntry {
+            root_digest: root,
+            expiry_ns,
+        };
         self.retained_count += 1;
         Ok(self.retained_count as u64)
     }

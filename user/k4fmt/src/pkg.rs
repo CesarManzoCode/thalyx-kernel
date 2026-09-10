@@ -345,3 +345,55 @@ pub mod note {
     /// The supervisor reached the end of its script. Value: 1.
     pub const SUPER_FINISHED: u64 = 0x4043;
 }
+
+/// What the service asks a broker to do, and the key it must be idempotent on.
+///
+/// The key is the request's identity: the same publication attempted twice
+/// carries the same key, so a broker that has already accepted it can say so
+/// rather than doing it again. The service does not trust that it did — what
+/// the broker answers is recorded durably, `UNKNOWN` included, because "I do
+/// not know whether that happened" is a result and not a failure to have one.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OutboxIntent {
+    /// Which broker-side effect this names.
+    pub target: u64,
+    /// The principal whose publication carries it.
+    pub principal: u64,
+    /// That publication's request sequence.
+    pub request_sequence: u64,
+    /// The generation the publication produced.
+    pub generation: u64,
+    /// The idempotency key: the request digest.
+    pub key: [u8; 32],
+}
+
+/// What a broker answers about an intent.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OutboxAnswer {
+    /// One of the schema's `OutboxStatus` values.
+    pub status: u32,
+    /// How many times the broker has seen this key.
+    pub attempts: u32,
+    /// Reserved.
+    pub reserved0: u64,
+}
+
+// SAFETY: as above.
+unsafe impl Pod for OutboxIntent {}
+// SAFETY: as above.
+unsafe impl Pod for OutboxAnswer {}
+
+const _: () = assert!(core::mem::size_of::<OutboxIntent>() == 64);
+const _: () = assert!(core::mem::size_of::<OutboxAnswer>() == 16);
+
+impl OutboxIntent {
+    /// Encoded size in bytes.
+    pub const SIZE: usize = core::mem::size_of::<Self>();
+}
+
+impl OutboxAnswer {
+    /// Encoded size in bytes.
+    pub const SIZE: usize = core::mem::size_of::<Self>();
+}
