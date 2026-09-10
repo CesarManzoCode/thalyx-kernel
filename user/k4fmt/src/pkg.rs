@@ -367,6 +367,9 @@ pub mod note {
     pub const WORKSPACES_EXHAUSTED: u64 = 0x402B;
     /// Staged objects nothing could still name were dropped. Value: how many.
     pub const STAGING_RECLAIMED: u64 = 0x402C;
+    /// A sweep freed nothing and there was no slot left. Value: how many
+    /// digests were being kept, which is the whole of the reason.
+    pub const STAGING_EXHAUSTED: u64 = 0x402D;
 
     /// A client read what it was built to be. Value: role, principal above 8.
     pub const CLIENT_ROLE: u64 = 0x4030;

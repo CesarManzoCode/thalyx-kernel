@@ -34,12 +34,18 @@ use crate::disk::{Disk, slot_bytes};
 /// Objects the in-memory index can name at once.
 pub const MAX_OBJECTS: usize = 40;
 /// Objects that may be staged but not yet durable.
-pub const MAX_STAGED: usize = 12;
+/// Staging slots. Bigger than the most the loop can ask to keep, which is one
+/// candidate closure plus a few offers per principal: a protection set larger
+/// than the staging area means a sweep can free nothing and the service
+/// refuses work it has no reason to refuse.
+pub const MAX_STAGED: usize = 24;
 
 /// Digests the loop may ask the engine to keep staged at once: one candidate
 /// root per principal, the last few objects each principal staged, and every
 /// binding of every live workspace.
 pub const MAX_PROTECTED: usize = 40;
+
+const _: () = assert!(MAX_PRINCIPALS * 4 + MAX_PRINCIPALS < MAX_STAGED);
 /// Largest object this service accepts.
 pub const OBJECT_MAX: usize = geometry::OBJECT_MAX_BYTES as usize;
 /// Principals the service keeps durable state for.
@@ -464,9 +470,13 @@ impl Store {
             // stages a candidate and walks away from taking the service.
             self.reclaim_staged();
         }
-        let slot = self
-            .free_stage_slot()
-            .ok_or(store_status::EXHAUSTED as i64)?;
+        let Some(slot) = self.free_stage_slot() else {
+            // Which is a thing to say out loud: a sweep ran and freed nothing,
+            // so everything staged is either durable or being kept for
+            // somebody. The count of what is being kept is the cause.
+            k2::note(note::STAGING_EXHAUSTED, self.protected_count as u64);
+            return Err(store_status::EXHAUSTED as i64);
+        };
         let index = self
             .free_object_slot()
             .ok_or(store_status::EXHAUSTED as i64)?;

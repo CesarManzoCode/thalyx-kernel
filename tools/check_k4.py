@@ -97,6 +97,7 @@ NOTE = {
     "service_stopped": 0x402A,
     "workspaces_exhausted": 0x402B,
     "staging_reclaimed": 0x402C,
+    "staging_exhausted": 0x402D,
     "client_role": 0x4030,
     "client_published": 0x4031,
     "client_refused": 0x4032,
@@ -1003,15 +1004,17 @@ def check_outbox(cases: list[Case]) -> Result:
     leg = delivered.legs[0]
     # A compacted arena carries the outbox result forward in its checkpoint
     # rather than as a record, so the record itself is read where one survives.
-    entries: list[dict] = []
-    where = None
-    for other in cases:
-        for other_leg in other.legs:
-            found = outboxes(read_store(other_leg.medium))
-            if found and any(e["status"] == fmt.OUTBOXSTATUS["DELIVERED"] for e in found):
-                entries, where = found, f"{other.name}/{other_leg.index}"
+    # `cut-after-checkpoint` is the case whose arena still holds the records of
+    # all three publications: it is cut before the compaction that would carry
+    # the outbox result forward in a checkpoint and drop the record.
+    holder = case_named(cases, "cut-after-checkpoint")
+    if holder is None or not holder.legs:
+        result.detail = "no cut-after-checkpoint case to read an outbox record from"
+        return result
+    where = f"{holder.name}/{holder.legs[0].index}"
+    entries = outboxes(read_store(holder.legs[0].medium))
     if not entries:
-        result.detail = "no outbox record survives on any medium in the matrix"
+        result.detail = f"no outbox record on {where}"
         return result
     store = read_store(leg.medium)
     entries = [e for e in entries if e["status"] == fmt.OUTBOXSTATUS["DELIVERED"]]
@@ -1466,8 +1469,8 @@ def check_coverage(cases: list[Case]) -> Result:
     elsewhere = set()
     for other in cases:
         for other_leg in other.legs:
-            reached = {r.get("name") for r in by_event(other_leg.records, "k2.operation_untouched")}
-            if by_event(other_leg.records, "k2.coverage") and "INVOCATION_RESOLVE" not in reached:
+            skipped = {r.get("name") for r in by_event(other_leg.records, "k2.operation_untouched")}
+            if by_event(other_leg.records, "k2.coverage") and "INVOCATION_RESOLVE" not in skipped:
                 elsewhere.add(f"{other.name}/{other_leg.index}")
     if not elsewhere:
         result.detail = "no leg in the matrix ever resolved an invocation without answering it"
@@ -1530,15 +1533,38 @@ def check_staging_is_bounded(cases: list[Case]) -> Result:
         result.detail = "no baseline case"
         return result
     leg = case.legs[0]
-    reclaimed = note_values(leg.records, "staging_reclaimed", STORE)
+    # The sweep runs where staging is under pressure, which is a leg that keeps
+    # publishing after a recovery -- not the baseline, whose script fits. What
+    # matters is that it runs somewhere and that it never has to give up.
+    reclaimed: list[int] = []
+    swept = []
+    for other in cases:
+        for other_leg in other.legs:
+            found = note_values(other_leg.records, "staging_reclaimed", STORE)
+            if found:
+                reclaimed += found
+                swept.append(f"{other.name}/{other_leg.index}")
     if not reclaimed:
-        result.detail = "nothing was ever reclaimed, so the sweep is not exercised"
+        result.detail = "no leg in the matrix ever swept staging, so the sweep is not exercised"
         return result
     exhausted = note_values(leg.records, "exhausted", STORE)
-    workspaces = note_values(leg.records, "workspaces_exhausted", STORE)
-    if workspaces:
-        result.detail = f"a fork was refused for want of a workspace: {workspaces}"
-        return result
+    # Across the matrix, because the case that presses hardest on staging is
+    # the one with three clients preparing candidates at once, not the baseline.
+    for other in cases:
+        for other_leg in other.legs:
+            starved = note_values(other_leg.records, "staging_exhausted", STORE)
+            if starved:
+                result.detail = (
+                    f"{other.name}/{other_leg.index}: a sweep freed nothing with {starved[0]} "
+                    f"digests kept, so staging refused work"
+                )
+                return result
+            workspaces = note_values(other_leg.records, "workspaces_exhausted", STORE)
+            if workspaces:
+                result.detail = (
+                    f"{other.name}/{other_leg.index}: a fork was refused for want of a workspace"
+                )
+                return result
     store = read_store(leg.medium)
     walked = reachable_from(store, store.chosen["published_root"]) if store.chosen else None
     if walked is None:
@@ -1546,10 +1572,12 @@ def check_staging_is_bounded(cases: list[Case]) -> Result:
         return result
     result.passed = True
     result.detail = (
-        f"{len(reclaimed)} sweeps freed {sum(reclaimed)} staged objects between them, no client "
-        f"was refused for want of one, and the published root still reaches all {len(walked)} "
-        f"objects it names"
+        f"{len(reclaimed)} sweeps across {len(swept)} legs freed {sum(reclaimed)} staged objects "
+        f"between them; in no leg of any case did a sweep free nothing or a fork run out of "
+        f"workspaces, and the baseline's published root still reaches all {len(walked)} objects "
+        f"it names"
     )
+    result.evidence = [f"swept in {', '.join(swept)}"]
     if exhausted:
         result.detail += f"; the reserve refused admission {len(exhausted)} times"
     return result
@@ -1714,11 +1742,35 @@ def flip_block(block: int, offset: int = 0):
     return mutate
 
 
-def zero_block(block: int):
+def zero_blocks(*blocks: int):
     def mutate(image: bytes) -> bytes:
         blob = bytearray(image)
-        at = block * fmt.BLOCK_SIZE
-        blob[at : at + fmt.BLOCK_SIZE] = bytes(fmt.BLOCK_SIZE)
+        for block in blocks:
+            at = block * fmt.BLOCK_SIZE
+            blob[at : at + fmt.BLOCK_SIZE] = bytes(fmt.BLOCK_SIZE)
+        return bytes(blob)
+
+    return mutate
+
+
+def flip_record(kind: str, which: int = 0):
+    """Damages the `which`-th record of `kind` in whichever arena is live.
+
+    Naming a block number would make a mutation stop damaging anything the
+    moment a run lays its records out differently, and a self-test that damages
+    nothing reports success for a check it never made. This finds the record
+    the criterion is about and breaks its digest.
+    """
+
+    def mutate(image: bytes) -> bytes:
+        store = read_store(image)
+        found = [r for r in store.records if r["kind"] == fmt.RECORDKIND[kind]]
+        if len(found) <= which:
+            return image
+        blob = bytearray(image)
+        header = fmt.STRUCTS["RecordHeader"][0]
+        at = found[which]["block"] * fmt.BLOCK_SIZE + header
+        blob[at] ^= 0xFF
         return bytes(blob)
 
     return mutate
@@ -1757,10 +1809,10 @@ LOG_MUTATIONS = [
     ("a cut nothing applied", "cut-after-prepare", 1, drop_note(NOTE["fault_applied"]), "cuts"),
     ("a recovery leg that applied a fault", "cut-after-prepare", 2, rewrite_re(r"(a=0x4012) b=", r"a=0x4022 b="), "recovery_uncut"),
     ("a driver that withheld nothing", "tear-object", 1, drop_note(NOTE["disk_suppressed"]), "suppression"),
-    ("recovery that resolved nothing", "cut-after-prepare", 2, drop_note(NOTE["recovery_aborted"]), "abort"),
+    ("recovery that resolved nothing", "abort-visible", 2, drop_note(NOTE["recovery_aborted"]), "abort"),
     (
         "recovery that adopted a version from a store with none",
-        "cut-after-prepare",
+        "abort-visible",
         2,
         rewrite_re(r"a=0x4011 b=0x0", "a=0x4011 b=0x1"),
         "abort",
@@ -1769,7 +1821,21 @@ LOG_MUTATIONS = [
     ("a scan that disagrees with the medium's prefix", "tear-object", 2, rewrite_re(r"a=0x4012 b=0x[0-9a-f]+", "a=0x4012 b=0x63"), "torn"),
     ("a client that never asked what it had already done", "cut-after-superblock", 2, drop_note(NOTE["client_resumed"]), "retry"),
     ("a supervisor that started no replacement", "kill-service", 1, drop_note(NOTE["super_restarted"]), "replace"),
-    ("nobody refused for a stale expectation in the race", "rival", 1, drop_note(NOTE["publish_refused"]), "rival"),
+    ("the loser of the race, never refused", "rival", 1, drop_note(NOTE["client_refused"]), "rival"),
+    (
+        "both racers told they had published",
+        "rival",
+        1,
+        rewrite_re(r"(name=k4pub[^\n]*)a=0x4032 b=0x[0-9a-f]+", r"\1a=0x4031 b=0x1"),
+        "rival",
+    ),
+    (
+        "a sweep that freed nothing",
+        "cut-after-checkpoint",
+        2,
+        rewrite_re(r"a=0x402c b=0x([0-9a-f]+)", r"a=0x402d b=0x\1"),
+        "staging",
+    ),
     ("no coverage record", "baseline", 1, drop_event("k2.coverage"), "coverage"),
     (
         "an operation K4 rests on, never reached",
@@ -1780,7 +1846,7 @@ LOG_MUTATIONS = [
     ),
     ("a driver that acknowledged no flush", "baseline", 1, drop_note(NOTE["disk_flush"]), "profile"),
     ("a platform claiming a remapping unit", "baseline", 1, rewrite_re(r"remapping_programmed=0", "remapping_programmed=1"), "profile"),
-    ("staging that was never swept", "baseline", 1, drop_note(NOTE["staging_reclaimed"]), "staging"),
+
     ("a control log that never filled", "control-lost", 1, drop_event("k2.admission_exhausted"), "control"),
     (
         "a control log that lost receipts instead of refusing work",
@@ -1796,12 +1862,35 @@ LOG_MUTATIONS = [
         rewrite_re(r"a=0x4017 b=0xb", "a=0x4017 b=0xd"),
         "control",
     ),
-    ("a fork refused for want of a workspace", "baseline", 1, rewrite_re(r"a=0x402c b=0x4", "a=0x402b b=0x11111"), "staging"),
+    (
+        "a fork refused for want of a workspace",
+        "cut-after-checkpoint",
+        2,
+        rewrite_re(r"a=0x402c b=0x[0-9a-f]+", "a=0x402b b=0x11111"),
+        "staging",
+    ),
+]
+
+# (name, mutation, criterion that must fail) applied to every leg of every case,
+# for the criteria whose claim is about the matrix rather than about one run.
+MATRIX_MUTATIONS = [
+    ("staging that was never swept anywhere", drop_note(NOTE["staging_reclaimed"]), "staging"),
+    ("no leg that resolved an invocation without answering", drop_event("k2.operation_untouched"), "coverage"),
+    ("no commit record anywhere in the matrix", drop_note(NOTE["client_published"]), "identity"),
 ]
 
 # (name, case, leg index, how to damage the medium, criterion that must fail)
 MEDIUM_MUTATIONS = [
-    ("both superblocks gone", "baseline", 1, zero_block(fmt.STORE_BASE_BLOCK), "formatted"),
+    (
+        "both superblocks gone",
+        "baseline",
+        1,
+        zero_blocks(
+            fmt.STORE_BASE_BLOCK + fmt.SUPERBLOCK_A_BLOCK,
+            fmt.STORE_BASE_BLOCK + fmt.SUPERBLOCK_B_BLOCK,
+        ),
+        "formatted",
+    ),
     (
         "a superblock whose digest does not cover it",
         "baseline",
@@ -1809,29 +1898,43 @@ MEDIUM_MUTATIONS = [
         flip_block(fmt.STORE_BASE_BLOCK + fmt.SUPERBLOCK_B_BLOCK, 32),
         "published",
     ),
+    ("the checkpoint the arena opens with, damaged", "baseline", 1, flip_record("CHECKPOINT"), "published"),
+    ("an object the published root names, gone", "baseline", 1, flip_record("OBJECT", 1), "compaction"),
+    ("the abort record recovery wrote, gone", "abort-visible", 2, flip_record("ABORT"), "abort"),
+    ("the commit the next boot adopted, gone", "cut-after-commit", 1, flip_record("COMMIT"), "adopt"),
+    ("the prepare the cut left behind, gone", "abort-visible", 1, flip_record("PREPARE"), "abort"),
     (
-        "the first record of the published arena, damaged",
-        "baseline",
+        "the torn block, made whole again",
+        "tear-object",
         1,
-        flip_block(fmt.STORE_BASE_BLOCK + fmt.ARENA1_START_BLOCK, 200),
-        "published",
+        zero_blocks(fmt.STORE_BASE_BLOCK + fmt.ARENA0_START_BLOCK + 6),
+        "torn",
     ),
-    (
-        "an object the published root names, gone",
-        "baseline",
-        1,
-        flip_block(fmt.STORE_BASE_BLOCK + fmt.ARENA1_START_BLOCK + 2, 200),
-        "compaction",
-    ),
-    ("the abort record recovery wrote, gone", "cut-after-prepare", 2, flip_block(fmt.STORE_BASE_BLOCK + fmt.ARENA0_START_BLOCK + 2, 200), "abort"),
-    ("the commit the next boot adopted, gone", "cut-after-commit", 1, flip_block(fmt.STORE_BASE_BLOCK + fmt.ARENA0_START_BLOCK + 8, 200), "adopt"),
-    ("the torn block, made whole again", "tear-object", 1, zero_block(fmt.STORE_BASE_BLOCK + fmt.ARENA0_START_BLOCK + 3), "torn"),
-    ("the outbox record, gone", "baseline", 1, flip_block(fmt.STORE_BASE_BLOCK + fmt.ARENA1_START_BLOCK + 9, 200), "outbox"),
+    ("the outbox record, gone", "cut-after-checkpoint", 1, flip_record("OUTBOX"), "outbox"),
 ]
 
 
 def clone(cases: list[Case]) -> list[Case]:
     return [Case(c.name, c.spec, [Leg(**vars(leg)) for leg in c.legs]) for c in cases]
+
+
+def damage_every_log(cases: list[Case], mutate) -> list[Case]:
+    """Applies one mutation to every leg of every case.
+
+    A criterion that reads the whole matrix cannot be broken by damaging one
+    leg of it, and pretending otherwise would report success for a check the
+    self-test never made. Some claims are about the matrix, so some damage has
+    to be too.
+    """
+    copy = clone(cases)
+    for entry in copy:
+        raw = json.loads((Path(entry.spec["directory"]) / "run.json").read_text())
+        for one in entry.legs:
+            for leg in raw["legs"]:
+                if leg["leg"] == one.index:
+                    path = ROOT / leg["serial_log"]
+                    one.records = parse(mutate(path.read_text(errors="replace")))
+    return copy
 
 
 def damage_log(cases: list[Case], case: str, leg: int, mutate) -> list[Case] | None:
@@ -1881,11 +1984,15 @@ def self_test(cases: list[Case], gates: dict, manifest: dict | None, quiet: bool
 
     every = [(name, case, leg, mutate, criterion, "log") for name, case, leg, mutate, criterion in LOG_MUTATIONS]
     every += [(name, case, leg, mutate, criterion, "medium") for name, case, leg, mutate, criterion in MEDIUM_MUTATIONS]
+    every += [(name, None, 0, mutate, criterion, "matrix") for name, mutate, criterion in MATRIX_MUTATIONS]
 
     width = max(len(name) for name, *_ in every)
     missed = []
     for name, case, leg, mutate, criterion, kind in every:
-        damaged = (damage_log if kind == "log" else damage_medium)(cases, case, leg, mutate)
+        if kind == "matrix":
+            damaged = damage_every_log(cases, mutate)
+        else:
+            damaged = (damage_log if kind == "log" else damage_medium)(cases, case, leg, mutate)
         check = by_name.get(criterion)
         if damaged is None:
             missed.append((name, criterion, f"no {case}/{leg} to damage"))

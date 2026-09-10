@@ -49,6 +49,8 @@ Construir driver de fallos que corta/reordena escrituras, pierde completions y d
 
 Evidencia: EXP-07–09 con reinicios en cada frontera, no solo tests del parser. Un almacén RAM o rename en el host no cumple la fase durable.
 
+**Ejecutado.** El formato se fijó antes de escribir nada, el servicio publica versiones inmutables con CAS sobre un medio real, y la matriz corta la ejecución en cada punto de escritura y arranca de nuevo sobre lo que el corte dejó. La puerta decide desde los registros del kernel y desde los bytes del medio, decodificados por el módulo que genera el esquema. Lo que **no** demuestra es durabilidad frente a un corte de energía: la supresión la hace el driver del invitado, no el emulador, y el perfil declara esa dependencia igual que el de DMA declara la suya. [Qué se ejecutó exactamente](../evidence/k4-durable-state.md).
+
 ## K5 — Port de Thalyx y herramientas
 
 Inventariar dependencias y extraer interfaces en Thalyx manteniendo Linux. Portar runtime de usuario, transporte, filesystem administrado de compatibilidad y launch. Thalyx usa su API semántica sobre el backend nativo.
