@@ -18,6 +18,8 @@ members = [
     "user/k4fmt",
     "user/k4disk",
     "user/k4store",
+    "user/k4client",
+    "user/k4super",
 ]
 
 [workspace.package]

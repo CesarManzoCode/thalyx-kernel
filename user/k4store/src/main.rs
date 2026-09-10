@@ -50,7 +50,9 @@ mod state;
 use thalyx_abi::boot_handle;
 use thalyx_abi::generated::{outcome, receipt_kind};
 use thalyx_user_k4fmt as k4;
-use thalyx_user_k4fmt::pkg::{OutboxAnswer, OutboxIntent, bit, facet, note, store_slot};
+use thalyx_user_k4fmt::pkg::{
+    OutboxAnswer, OutboxIntent, STORE_CONFIG_VADDR, StoreConfig, bit, facet, note, store_slot,
+};
 use thalyx_user_k4fmt::{
     Binding, Manifest, Pod, StoreReply, StoreRequest, object_type, outbox_status, result_outcome,
     store_op, store_status,
@@ -86,6 +88,17 @@ static mut TRANSFER: [u8; OBJECT_MAX] = [0u8; OBJECT_MAX];
 /// One tree's canonical bytes, under construction.
 static mut TREE: [u8; OBJECT_MAX] = [0u8; OBJECT_MAX];
 
+// As in `state`: the raw form is what the edition requires, and clippy's
+// redundant-dereference reading of it is wrong here.
+#[allow(clippy::deref_addrof)]
+/// The configuration the supervisor wrote and mapped read-only.
+fn store_configuration() -> StoreConfig {
+    // SAFETY: one page, mapped read-only at this address before this domain
+    // ran, holding exactly this structure written by the supervisor.
+    let bytes = unsafe { core::slice::from_raw_parts(STORE_CONFIG_VADDR as *const u8, 4096) };
+    StoreConfig::read_from(bytes, 0).unwrap_or_default()
+}
+
 /// The transfer buffer.
 fn transfer() -> &'static mut [u8; OBJECT_MAX] {
     // SAFETY: this domain is single-threaded and every caller drops the borrow
@@ -94,6 +107,7 @@ fn transfer() -> &'static mut [u8; OBJECT_MAX] {
 }
 
 /// The tree buffer.
+#[allow(clippy::deref_addrof)]
 fn tree() -> &'static mut [u8; OBJECT_MAX] {
     // SAFETY: as `transfer`.
     unsafe { &mut *(&raw mut TREE) }
@@ -894,6 +908,12 @@ fn run() -> ! {
         rt::exit(1)
     }
 
+    let configuration = store_configuration();
+    k2::note(
+        note::SUPER_BUILT,
+        configuration.instance | (configuration.leg << 8) | (configuration.scenario << 16),
+    );
+
     let mut service_state = Service {
         store: Store::new(Disk::new(disk_endpoint)),
         workspaces: [Workspace::default(); MAX_WORKSPACES],
@@ -904,8 +924,17 @@ fn run() -> ! {
         control_lost: 0,
     };
 
-    service_state.store.read_directive();
-    let seed = service_state.store.harness.seed;
+    // A replacement service does not re-apply the directive the run it
+    // replaced was cut by. It is told which it is; working it out from the
+    // medium would be the harness leaking into the store.
+    if configuration.apply_directive != 0 {
+        service_state.store.read_directive();
+    }
+    let seed = if service_state.store.harness.present {
+        service_state.store.harness.seed
+    } else {
+        configuration.scenario
+    };
     if !service_state.store.recover(seed) {
         // Refusing to serve is the answer when the prefix that was supposed to
         // be durable is not there. The run continues so the gate can see the
@@ -948,6 +977,12 @@ fn run() -> ! {
 
         let reply = service_state.serve(principal, invocation, &request, lent);
         service_state.answered += 1;
+        // The handle the caller lent is charged to this domain's table until
+        // it is closed, and a service that kept one per call would run out of
+        // table rather than out of store.
+        if lent != 0 {
+            let _ = k2::cap_close(lent);
+        }
 
         // The control plane's own coverage. A service that reported receipts
         // it never had would be claiming more than the log promises.

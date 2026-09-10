@@ -67,6 +67,12 @@ static mut CONTENT: [u8; OBJECT_MAX] = [0u8; OBJECT_MAX];
 // `&'static mut`; this domain is single-threaded and no two of them are alive
 // over the same region at once, which is what makes that sound.
 
+// `&raw mut` then dereference, rather than `&mut STATIC` directly: taking a
+// reference to a `static mut` is what the 2024 edition refuses, and the raw
+// form is the way around it. Clippy reads the pair as a redundant dereference,
+// which it is not here, so the lint is turned off for these four accessors
+// with the reason written down rather than left to be rediscovered.
+#[allow(clippy::deref_addrof)]
 /// The staged content of slot `index`.
 fn staged(index: usize) -> &'static mut [u8; OBJECT_MAX] {
     // SAFETY: this domain is single-threaded and every caller drops the borrow
@@ -75,18 +81,21 @@ fn staged(index: usize) -> &'static mut [u8; OBJECT_MAX] {
 }
 
 /// The record payload under construction.
+#[allow(clippy::deref_addrof)]
 fn payload() -> &'static mut [u8; OBJECT_MAX + 256] {
     // SAFETY: as `staged`.
     unsafe { &mut *(&raw mut PAYLOAD) }
 }
 
 /// The record payload being replayed.
+#[allow(clippy::deref_addrof)]
 fn replayed() -> &'static mut [u8; OBJECT_MAX + 256] {
     // SAFETY: as `staged`.
     unsafe { &mut *(&raw mut REPLAYED) }
 }
 
 /// The object content buffer.
+#[allow(clippy::deref_addrof)]
 fn content() -> &'static mut [u8; OBJECT_MAX] {
     // SAFETY: as `staged`.
     unsafe { &mut *(&raw mut CONTENT) }

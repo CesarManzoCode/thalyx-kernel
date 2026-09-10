@@ -238,6 +238,43 @@ impl ClientConfig {
     pub const SIZE: usize = core::mem::size_of::<Self>();
 }
 
+/// What the supervisor tells a state service about the run it is part of.
+///
+/// A replacement service is not a first one. It is told so here rather than
+/// working it out from the medium, because "am I the run the directive was
+/// written for?" is a question about the harness and not about the store, and
+/// a service that re-applied a fault it already applied would never finish
+/// recovering.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StoreConfig {
+    /// 0 for the first service of a run, 1 for the first replacement, and so on.
+    pub instance: u64,
+    /// Which leg of the scenario this run is.
+    pub leg: u64,
+    /// The scenario the run was started with.
+    pub scenario: u64,
+    /// Scaffolding: 1 means read the fault directive and obey it.
+    pub apply_directive: u64,
+    /// Reserved.
+    pub reserved0: u64,
+    /// Reserved.
+    pub reserved1: u64,
+}
+
+// SAFETY: as above.
+unsafe impl Pod for StoreConfig {}
+
+const _: () = assert!(core::mem::size_of::<StoreConfig>() == 48);
+
+impl StoreConfig {
+    /// Encoded size in bytes.
+    pub const SIZE: usize = core::mem::size_of::<Self>();
+}
+
+/// Where a state service finds the configuration the supervisor wrote.
+pub const STORE_CONFIG_VADDR: u64 = 0x2000_0000;
+
 /// Diagnostic note kinds K4 uses.
 ///
 /// Numbered in their own range so a K4 note and a K2 or K3 note can never be

@@ -1,0 +1,20 @@
+[package]
+name = "thalyx-user-k4super"
+description = "K4 user domain: k4super, the supervisor that builds the durable-state run."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "k4super"
+path = "src/main.rs"
+
+[dependencies]
+thalyx-abi.workspace = true
+thalyx-user-rt.workspace = true
+thalyx-user-k4fmt.workspace = true
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
