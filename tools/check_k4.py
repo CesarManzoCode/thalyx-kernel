@@ -175,12 +175,6 @@ class Record:
         except ValueError:
             return None
 
-    def signed(self, key: str) -> int | None:
-        value = self.number(key)
-        if value is None:
-            return None
-        return value - (1 << 64) if value >= (1 << 63) else value
-
 
 @dataclass
 class Leg:
@@ -1968,7 +1962,7 @@ def damage_medium(cases: list[Case], case: str, leg: int, mutate) -> list[Case] 
     return None
 
 
-def self_test(cases: list[Case], gates: dict, manifest: dict | None, quiet: bool) -> int:
+def self_test(cases: list[Case], quiet: bool) -> int:
     by_name = {}
     for check in CRITERIA:
         by_name[check(cases).name] = check
@@ -2049,7 +2043,7 @@ def main() -> int:
     gates = {"K1": read(arguments.k1), "K2": read(arguments.k2), "K3": read(arguments.k3)}
 
     if arguments.self_test:
-        return self_test(cases, gates, manifest, arguments.quiet)
+        return self_test(cases, arguments.quiet)
 
     results = [check(cases) for check in CRITERIA]
     results.append(check_regression(gates["K1"], "K1", 13))
