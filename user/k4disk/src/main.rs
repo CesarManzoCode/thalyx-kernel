@@ -189,6 +189,7 @@ impl Queue {
             ring_write::<u64>(header + 8, sector);
             ring_write::<u8>(self.base + STATUS_OFFSET, 0xFF);
 
+            let data_index = head + 1;
             let status_index = if length == 0 { head + 1 } else { head + 2 };
             ring_write(
                 self.desc(head),
@@ -196,7 +197,16 @@ impl Queue {
                     addr: self.ring_iova + HEADER_OFFSET,
                     len: 16,
                     flags: DESC_NEXT,
-                    next: status_index,
+                    // The header links to the data descriptor when there is
+                    // one. Linking straight to the status descriptor leaves a
+                    // chain the device completes successfully and that moves no
+                    // bytes at all, which is worse than a failure: the caller is
+                    // told the transfer happened.
+                    next: if length == 0 {
+                        status_index
+                    } else {
+                        data_index
+                    },
                 },
             );
             if length != 0 {

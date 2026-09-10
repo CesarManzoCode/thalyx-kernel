@@ -294,7 +294,18 @@ pub fn grant_alloc(
     if u64::from(depth) > thalyx_abi::limit::MAX_DERIVE_DEPTH {
         return None;
     }
-    let index = machine.grants.iter().position(|node| !node.used)?;
+    let Some(index) = machine.grants.iter().position(|node| !node.used) else {
+        // A refusal that says which resource ran out. Without this the caller
+        // sees only "exhausted" and has to guess between a scope ceiling it
+        // set and a machine-wide table it did not.
+        event!(
+            "k2.grants_exhausted",
+            "used={} capacity={} sponsor={sponsor}",
+            machine.grants.iter().filter(|node| node.used).count(),
+            machine.grants.len()
+        );
+        return None;
+    };
     if !scope::reserve(&mut machine.scopes, sponsor, scope::Resource::Metadata, 1) {
         return None;
     }

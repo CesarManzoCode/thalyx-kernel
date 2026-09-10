@@ -35,9 +35,9 @@ use thalyx_abi::generated::{
 };
 use thalyx_user_k4fmt as k4;
 use thalyx_user_k4fmt::pkg::{
-    CONFIG_VADDR, ClientConfig, DiskReply, DiskRequest, IOBUF_PAGES, IOBUF_VADDR, REGION_VADDR,
-    RING_PAGES, RING_VADDR, STAGE_PAGES, STAGE_VADDR, STORE_CONFIG_VADDR, StoreConfig, bit,
-    client_slot, disk_op, disk_slot, disk_status, facet, note, role, store_slot,
+    CONFIG_VADDR, ClientConfig, DiskReply, DiskRequest, IOBUF_PAGES, IOBUF_VADDR, PRINCIPALS,
+    REGION_VADDR, RING_PAGES, RING_VADDR, STAGE_PAGES, STAGE_VADDR, STORE_CONFIG_VADDR,
+    StoreConfig, bit, client_slot, disk_op, disk_slot, disk_status, facet, note, role, store_slot,
 };
 use thalyx_user_k4fmt::{BLOCK, Pod, geometry};
 use thalyx_user_rt as rt;
@@ -95,10 +95,53 @@ fn image_named(label: &str) -> Option<u64> {
     None
 }
 
+/// Releases a handle this supervisor will not name again.
+///
+/// A handle is a grant, and grants are a fixed global resource. A supervisor
+/// that keeps every handle it ever made runs the machine out of them, and the
+/// first thing to fail is whatever needed one next -- which is not where the
+/// mistake was. Closing at the point of last use keeps the failure and the
+/// cause in the same place.
+fn drop_handle(handle: u64) {
+    let _ = k2::cap_close(handle);
+}
+
+/// Reports which build step refused, and with what, before giving up.
+///
+/// A supervisor that answers "it did not work" is not evidence of anything.
+/// Every step that can refuse says which one it was and what the kernel
+/// answered, so a failed run names its own cause.
+fn step(which: u64, outcome: Result<u64, i64>) -> Option<u64> {
+    match outcome {
+        Ok(value) => Some(value),
+        Err(code) => {
+            k2::note(report::BUILD_FAILED, which);
+            k2::note(report::UNEXPECTED, code as u64);
+            None
+        }
+    }
+}
+
+/// Binds a facet on an endpoint and says which one the kernel assigned.
+///
+/// The facet number is the kernel's to give, not the caller's to choose: the
+/// request carries zero and the grant comes back carrying the number. That is
+/// what makes a facet an identity rather than a claim, and it is why the
+/// supervisor checks the number it got instead of assuming that the order it
+/// bound them in produced the one it wanted.
+fn bind_facet(endpoint: u64, rights: u32) -> Option<(u64, u64)> {
+    // The supervisor's own handle on the facet carries `TRANSFER`, because
+    // installing it into a domain is a transfer. What the domain then gets is
+    // narrower: a client cannot pass its own identity on to anyone.
+    let handle = k2::endpoint_bind_facet(endpoint, 0, rights | right::TRANSFER, 0).ok()?;
+    let info = k2::cap_inspect(handle).ok()?;
+    Some((handle, info.facet))
+}
+
 fn limits_for(cpu_budget_ns: u64, memory_pages: u64, parallelism: u32) -> ScopeLimits {
     ScopeLimits {
         memory_pages,
-        metadata_objects: 48,
+        metadata_objects: 200,
         cpu_budget_ns,
         queue_bytes: 16384,
         closure_reserve_ns: 800_000,
@@ -149,8 +192,7 @@ struct Run {
 }
 
 /// Builds the block driver and starts it. Returns the endpoint it serves on.
-#[allow(clippy::too_many_arguments)]
-fn build_driver(scope: u64, supervision: u64, iobuf: u64, log: u64, image: u64) -> Option<u64> {
+fn build_driver(scope: u64, supervision: u64, iobuf: u64, image: u64) -> Option<u64> {
     let device = boot_handle(boot_slot::FIRST_DEVICE);
     let info = match k2::device_query(device) {
         Ok(info) => info,
@@ -175,7 +217,7 @@ fn build_driver(scope: u64, supervision: u64, iobuf: u64, log: u64, image: u64) 
         name16("ring"),
     )
     .ok()?;
-    let endpoint = k2::scope_create_endpoint(scope, 16, name16("disk")).ok()?;
+    let endpoint = k2::scope_create_endpoint(scope, 8, name16("disk")).ok()?;
 
     let windows = (info.region_count as usize).min(REGION_VADDR.len());
     for (index, vaddr) in REGION_VADDR.iter().enumerate().take(windows) {
@@ -260,17 +302,14 @@ fn build_driver(scope: u64, supervision: u64, iobuf: u64, log: u64, image: u64) 
         0,
     )
     .ok()?;
-    k2::domain_install_cap(
-        domain,
-        log,
-        disk_slot::SCOPE,
-        right::INSPECT | right::LOG_APPEND,
-        0,
-    )
-    .ok()?;
     k2::domain_set_fault_channel(domain, supervision).ok()?;
     k2::domain_activate(domain).ok()?;
-    let _ = k2::cap_close(ring);
+    // The driver holds what it was given. The supervisor keeps the device and
+    // the shared buffer because it uses both later; the ring, the driver's
+    // domain and its own copy of the interrupt it will not name again.
+    drop_handle(ring);
+    drop_handle(domain);
+    drop_handle(irq);
 
     // Bus mastering last, and by the authority that keeps it. Until this, the
     // device cannot issue a transaction whatever the driver writes.
@@ -315,73 +354,92 @@ fn read_directive(disk: u64) -> Option<k4::HarnessDirective> {
 
 /// Builds one state service over the medium and activates it.
 fn build_store(run: &mut Run, config: StoreConfig) -> Option<u64> {
-    let domain =
-        k2::scope_create_domain(run.store_scope, run.store_image, name16("k4store")).ok()?;
+    let domain = step(
+        101,
+        k2::scope_create_domain(run.store_scope, run.store_image, name16("k4store")),
+    )?;
     let page = config_object(run.store_scope, "storecfg", &config)?;
-    k2::domain_map(domain, page, STORE_CONFIG_VADDR, 0, 1, right::MEMORY_READ).ok()?;
+    step(
+        102,
+        k2::domain_map(domain, page, STORE_CONFIG_VADDR, 0, 1, right::MEMORY_READ),
+    )?;
     let _ = k2::cap_close(page);
-    k2::domain_map(
-        domain,
-        run.iobuf,
-        IOBUF_VADDR,
-        0,
-        IOBUF_PAGES as u32,
-        right::MEMORY_READ | right::MEMORY_WRITE,
-    )
-    .ok()?;
+    step(
+        103,
+        k2::domain_map(
+            domain,
+            run.iobuf,
+            IOBUF_VADDR,
+            0,
+            IOBUF_PAGES as u32,
+            right::MEMORY_READ | right::MEMORY_WRITE,
+        ),
+    )?;
 
     // A facet of the driver's endpoint, and nothing else that reaches a
     // device. This is the whole of the service's access to persistence.
-    k2::domain_install_cap(
-        domain,
-        run.disk_facet,
-        store_slot::DISK,
-        right::INSPECT | right::ENDPOINT_CALL,
-        0,
-    )
-    .ok()?;
-    k2::domain_install_cap(
-        domain,
-        run.iobuf,
-        store_slot::IOBUF,
-        right::INSPECT | right::MEMORY_READ | right::MEMORY_WRITE,
-        0,
-    )
-    .ok()?;
-    k2::domain_install_cap(
-        domain,
-        run.store_endpoint,
-        store_slot::SERVICE,
-        right::INSPECT | right::ENDPOINT_RECEIVE,
-        0,
-    )
-    .ok()?;
-    k2::domain_install_cap(
-        domain,
-        run.log,
-        store_slot::LOG,
-        right::INSPECT | right::LOG_APPEND | right::LOG_READ,
-        0,
-    )
-    .ok()?;
-    k2::domain_install_cap(
-        domain,
-        run.broker_facet,
-        store_slot::BROKER,
-        right::INSPECT | right::ENDPOINT_CALL,
-        0,
-    )
-    .ok()?;
-    k2::domain_install_cap(
-        domain,
-        run.signal,
-        store_slot::CRASH,
-        right::INSPECT | right::SIGNAL_RAISE | right::SIGNAL_WAIT,
-        0,
-    )
-    .ok()?;
-    k2::domain_set_fault_channel(domain, run.supervision).ok()?;
-    k2::domain_activate(domain).ok()?;
+    step(
+        104,
+        k2::domain_install_cap(
+            domain,
+            run.disk_facet,
+            store_slot::DISK,
+            right::INSPECT | right::ENDPOINT_CALL,
+            0,
+        ),
+    )?;
+    step(
+        105,
+        k2::domain_install_cap(
+            domain,
+            run.iobuf,
+            store_slot::IOBUF,
+            right::INSPECT | right::MEMORY_READ | right::MEMORY_WRITE,
+            0,
+        ),
+    )?;
+    step(
+        106,
+        k2::domain_install_cap(
+            domain,
+            run.store_endpoint,
+            store_slot::SERVICE,
+            right::INSPECT | right::ENDPOINT_RECEIVE,
+            0,
+        ),
+    )?;
+    step(
+        107,
+        k2::domain_install_cap(
+            domain,
+            run.log,
+            store_slot::LOG,
+            right::INSPECT | right::LOG_APPEND | right::LOG_READ,
+            0,
+        ),
+    )?;
+    step(
+        108,
+        k2::domain_install_cap(
+            domain,
+            run.broker_facet,
+            store_slot::BROKER,
+            right::INSPECT | right::ENDPOINT_CALL,
+            0,
+        ),
+    )?;
+    step(
+        109,
+        k2::domain_install_cap(
+            domain,
+            run.signal,
+            store_slot::CRASH,
+            right::INSPECT | right::SIGNAL_RAISE | right::SIGNAL_WAIT,
+            0,
+        ),
+    )?;
+    step(110, k2::domain_set_fault_channel(domain, run.supervision))?;
+    step(111, k2::domain_activate(domain))?;
     run.instances += 1;
     Some(domain)
 }
@@ -394,99 +452,126 @@ fn build_client(
     config: ClientConfig,
     done: u64,
     broker_endpoint: u64,
+    store_facet: u64,
 ) -> Option<u64> {
-    let domain = k2::scope_create_domain(run.client_scope, image, name16(name)).ok()?;
+    let domain = step(
+        201,
+        k2::scope_create_domain(run.client_scope, image, name16(name)),
+    )?;
     let page = config_object(run.client_scope, "clientcfg", &config)?;
-    k2::domain_map(domain, page, CONFIG_VADDR, 0, 1, right::MEMORY_READ).ok()?;
+    step(
+        202,
+        k2::domain_map(domain, page, CONFIG_VADDR, 0, 1, right::MEMORY_READ),
+    )?;
     let _ = k2::cap_close(page);
 
-    let stage = k2::scope_create_memory(
-        run.client_scope,
-        STAGE_PAGES,
-        right::MEMORY_READ | right::MEMORY_WRITE | right::MEMORY_MAP,
-        name16("stage"),
-    )
-    .ok()?;
-    k2::domain_map(
-        domain,
-        stage,
-        STAGE_VADDR,
-        0,
-        STAGE_PAGES as u32,
-        right::MEMORY_READ | right::MEMORY_WRITE,
-    )
-    .ok()?;
-    k2::domain_install_cap(
-        domain,
-        stage,
-        client_slot::STAGE,
-        right::INSPECT | right::MEMORY_READ | right::MEMORY_WRITE,
-        0,
-    )
-    .ok()?;
+    let stage = step(
+        203,
+        k2::scope_create_memory(
+            run.client_scope,
+            STAGE_PAGES,
+            right::MEMORY_READ | right::MEMORY_WRITE | right::MEMORY_MAP,
+            name16("stage"),
+        ),
+    )?;
+    step(
+        204,
+        k2::domain_map(
+            domain,
+            stage,
+            STAGE_VADDR,
+            0,
+            STAGE_PAGES as u32,
+            right::MEMORY_READ | right::MEMORY_WRITE,
+        ),
+    )?;
+    step(
+        205,
+        k2::domain_install_cap(
+            domain,
+            stage,
+            client_slot::STAGE,
+            // Narrowing this buffer and handing the narrowing over are what a
+            // client does with it on every call, so both rights are here. What
+            // it lends the service each time is never this handle.
+            right::INSPECT
+                | right::MEMORY_READ
+                | right::MEMORY_WRITE
+                | right::DERIVE
+                | right::TRANSFER,
+            0,
+        ),
+    )?;
     let _ = k2::cap_close(stage);
 
     if config.role != role::BROKER {
-        // Its own facet of the one service endpoint. The facet is the
-        // principal: this is where a client's identity comes from.
-        let facet = k2::endpoint_bind_facet(
-            run.store_endpoint,
-            config.principal,
-            right::INSPECT | right::ENDPOINT_CALL,
-            0,
-        )
-        .ok()?;
-        k2::domain_install_cap(
-            domain,
-            facet,
-            client_slot::STORE,
-            right::INSPECT | right::ENDPOINT_CALL,
-            0,
-        )
-        .ok()?;
-        let _ = k2::cap_close(facet);
+        // Its own facet of the one service endpoint, bound before any client
+        // existed and checked then. The facet is the principal: this is where a
+        // client's identity comes from, and nothing it sends can change it.
+        step(
+            206,
+            k2::domain_install_cap(
+                domain,
+                store_facet,
+                client_slot::STORE,
+                right::INSPECT | right::ENDPOINT_CALL,
+                0,
+            ),
+        )?;
     } else {
+        step(
+            207,
+            k2::domain_install_cap(
+                domain,
+                broker_endpoint,
+                client_slot::SERVICE,
+                right::INSPECT | right::ENDPOINT_RECEIVE,
+                0,
+            ),
+        )?;
+    }
+    step(
+        208,
         k2::domain_install_cap(
             domain,
-            broker_endpoint,
-            client_slot::SERVICE,
-            right::INSPECT | right::ENDPOINT_RECEIVE,
+            done,
+            client_slot::DONE,
+            right::INSPECT | right::SIGNAL_RAISE,
             0,
-        )
-        .ok()?;
-    }
-    k2::domain_install_cap(
-        domain,
-        done,
-        client_slot::DONE,
-        right::INSPECT | right::SIGNAL_RAISE,
-        0,
-    )
-    .ok()?;
-    k2::domain_set_fault_channel(domain, run.supervision).ok()?;
-    k2::domain_activate(domain).ok()?;
+        ),
+    )?;
+    step(209, k2::domain_set_fault_channel(domain, run.supervision))?;
+    step(210, k2::domain_activate(domain))?;
     Some(domain)
 }
 
 /// Waits for the service to say it is admitting requests.
+///
+/// A wait consumes the bits it observed, so what it returns is the only report
+/// of them: querying the signal afterwards would find them already gone. That
+/// is why nothing here polls.
 fn await_ready(signal: u64) -> bool {
     let deadline = k2::now_ns() + READY_DEADLINE_NS;
-    while k2::now_ns() < deadline {
-        if let Ok(info) = k2::signal_query(signal) {
-            if info.bits & bit::READY != 0 {
-                return true;
+    loop {
+        match k2::signal_wait(signal, bit::READY | bit::CRASH | bit::RESTART, deadline) {
+            Ok(info) => {
+                k2::note(report::SIGNAL_OBSERVED, info.bits);
+                if info.bits & bit::READY != 0 {
+                    return true;
+                }
+                if info.bits & (bit::CRASH | bit::RESTART) != 0 {
+                    return false;
+                }
             }
-            if info.bits & (bit::CRASH | bit::RESTART) != 0 {
+            Err(code) => {
+                k2::note(report::UNEXPECTED, code as u64);
                 return false;
             }
         }
-        let _ = k2::signal_wait(
-            signal,
-            bit::READY | bit::CRASH | bit::RESTART,
-            k2::now_ns() + POLL_NS,
-        );
+        if k2::now_ns() >= deadline {
+            return false;
+        }
     }
-    false
 }
 
 fn run() -> ! {
@@ -500,6 +585,12 @@ fn run() -> ! {
         Err(code) => fail(1, code),
     };
     k2::note(report::LIMITS, limits.page_size);
+    if let Ok(info) = k2::scope_query(own_scope) {
+        k2::note(
+            report::BOUNDED,
+            info.limits.metadata_objects | (info.metadata_used << 32),
+        );
+    }
 
     let disk_image = match image_named("k4disk") {
         Some(handle) => handle,
@@ -560,7 +651,7 @@ fn run() -> ! {
         Ok(handle) => handle,
         Err(code) => fail(11, code),
     };
-    let store_endpoint = match k2::scope_create_endpoint(own_scope, 16, name16("store")) {
+    let store_endpoint = match k2::scope_create_endpoint(own_scope, 8, name16("store")) {
         Ok(handle) => handle,
         Err(code) => fail(12, code),
     };
@@ -570,7 +661,7 @@ fn run() -> ! {
     };
     k2::note(report::BUILT, 1);
 
-    let Some(disk_endpoint) = build_driver(disk_scope, supervision, iobuf, log, disk_image) else {
+    let Some(disk_endpoint) = build_driver(disk_scope, supervision, iobuf, disk_image) else {
         fail(14, status::INVALID_HANDLE)
     };
     k2::note(note::SUPER_BUILT, 1);
@@ -589,11 +680,13 @@ fn run() -> ! {
     {
         fail(15, status::INVALID_ARGUMENT);
     }
-    let super_disk =
-        match k2::endpoint_bind_facet(disk_endpoint, 0, right::INSPECT | right::ENDPOINT_CALL, 0) {
-            Ok(handle) => handle,
-            Err(code) => fail(16, code),
-        };
+    // The mapping holds the buffer; the handle on this domain is what is now
+    // redundant, and every handle is a grant the rest of the run cannot have.
+    drop_handle(own_domain);
+    let super_disk = match bind_facet(disk_endpoint, right::INSPECT | right::ENDPOINT_CALL) {
+        Some((handle, _)) => handle,
+        None => fail(16, status::INVALID_ARGUMENT),
+    };
     let directive = read_directive(super_disk);
     let (leg, scenario) = match directive {
         Some(directive) => (u64::from(directive.leg), directive.scenario),
@@ -610,17 +703,32 @@ fn run() -> ! {
     );
     let _ = k2::cap_close(super_disk);
 
-    let disk_facet =
-        match k2::endpoint_bind_facet(disk_endpoint, 1, right::INSPECT | right::ENDPOINT_CALL, 0) {
-            Ok(handle) => handle,
-            Err(code) => fail(17, code),
-        };
-    let broker_facet =
-        match k2::endpoint_bind_facet(broker_endpoint, 1, right::INSPECT | right::ENDPOINT_CALL, 0)
-        {
-            Ok(handle) => handle,
-            Err(code) => fail(18, code),
-        };
+    let disk_facet = match bind_facet(disk_endpoint, right::INSPECT | right::ENDPOINT_CALL) {
+        Some((handle, _)) => handle,
+        None => fail(17, status::INVALID_ARGUMENT),
+    };
+    let broker_facet = match bind_facet(broker_endpoint, right::INSPECT | right::ENDPOINT_CALL) {
+        Some((handle, _)) => handle,
+        None => fail(18, status::INVALID_ARGUMENT),
+    };
+
+    // One facet per principal, bound in principal order and checked against the
+    // number that came back. A client's identity is this number, so the run
+    // does not start if the kernel gave a different one.
+    let mut principals = [0u64; PRINCIPALS];
+    for wanted in [facet::PUBLISHER, facet::RIVAL, facet::READER] {
+        match bind_facet(store_endpoint, right::INSPECT | right::ENDPOINT_CALL) {
+            Some((handle, facet)) if facet == wanted => {
+                principals[wanted as usize] = handle;
+                k2::note(report::BOUND, facet);
+            }
+            Some((_, facet)) => {
+                k2::note(report::UNEXPECTED, facet);
+                fail(19, status::STATE_CONFLICT)
+            }
+            None => fail(19, status::INVALID_ARGUMENT),
+        }
+    }
 
     let mut run = Run {
         log,
@@ -648,7 +756,7 @@ fn run() -> ! {
             reserved1: 0,
         },
     ) else {
-        fail(19, status::INVALID_HANDLE)
+        fail(20, status::INVALID_HANDLE)
     };
     run.store_domain = store_domain;
     k2::note(note::SUPER_BUILT, 2);
@@ -684,13 +792,43 @@ fn run() -> ! {
             rounds,
             reserved0: 0,
         };
-        match build_client(&run, client_image, name, config, done, broker_endpoint) {
+        let store_facet = if which == role::BROKER {
+            0
+        } else {
+            principals[principal as usize]
+        };
+        match build_client(
+            &run,
+            client_image,
+            name,
+            config,
+            done,
+            broker_endpoint,
+            store_facet,
+        ) {
             Some(domain) => {
                 clients[built] = domain;
                 built += 1;
+                if store_facet != 0 {
+                    drop_handle(store_facet);
+                }
             }
-            None => fail(20 + built as u64, status::INVALID_HANDLE),
+            None => fail(30 + built as u64, status::INVALID_HANDLE),
         }
+    }
+    // Everything the supervisor bound through has been installed where it
+    // belongs. What it still names is what it still uses: the store's image for
+    // a replacement, the clients' domains to see them finish, the two signals,
+    // the buffer, and the log.
+    drop_handle(broker_endpoint);
+    drop_handle(store_endpoint);
+    drop_handle(client_image);
+    drop_handle(disk_image);
+    drop_handle(disk_endpoint);
+    drop_handle(disk_scope);
+    drop_handle(client_scope);
+    if let Ok(info) = k2::scope_query(own_scope) {
+        k2::note(report::BOUNDED, info.metadata_used);
     }
     k2::note(note::SUPER_BUILT, 4);
 
@@ -698,7 +836,9 @@ fn run() -> ! {
     let mut restarts = 0u64;
     loop {
         let _ = k2::signal_wait(done, bit::CLIENT_DONE, k2::now_ns() + POLL_NS);
-        if let Ok(info) = k2::signal_query(signal) {
+        // Consuming rather than querying, for the reason `await_ready` gives.
+        if let Ok(info) = k2::signal_wait(signal, bit::CRASH | bit::RESTART, k2::now_ns() + POLL_NS)
+        {
             if info.bits & bit::CRASH != 0 {
                 // The service asked for the run to end at a named point. It
                 // ends here, with nothing further written, which is the whole
@@ -724,7 +864,7 @@ fn run() -> ! {
                         run.store_domain = domain;
                         k2::note(note::SUPER_RESTARTED, restarts);
                     }
-                    None => fail(30, status::INVALID_HANDLE),
+                    None => fail(40, status::INVALID_HANDLE),
                 }
             }
         }

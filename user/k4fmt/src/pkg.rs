@@ -46,15 +46,15 @@ pub mod disk_slot {
     pub const IOBUF: u32 = 4;
     /// The endpoint the driver receives block requests on.
     pub const SERVICE: u32 = 5;
-    /// The driver's own scope.
-    pub const SCOPE: u32 = 6;
 }
 
 /// Capability slots the supervisor fills in the state service.
 pub mod store_slot {
     /// A facet of the block driver's endpoint.
     pub const DISK: u32 = 1;
-    /// The buffer the service stages blocks in.
+    /// The buffer the service stages blocks in. Read once, to confirm it is
+    /// the shape the mapping assumes, and then closed: a handle held for the
+    /// life of a run is a grant nothing else can have.
     pub const IOBUF: u32 = 2;
     /// The endpoint the service receives store requests on.
     pub const SERVICE: u32 = 3;
@@ -76,8 +76,6 @@ pub mod client_slot {
     pub const SERVICE: u32 = 3;
     /// The signal a client raises when it has finished.
     pub const DONE: u32 = 4;
-    /// The client's own scope.
-    pub const SCOPE: u32 = 5;
 }
 
 /// Where the block driver finds each device register window.

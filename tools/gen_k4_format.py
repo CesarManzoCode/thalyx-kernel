@@ -506,6 +506,34 @@ def generate_python(schema: dict, layout: Layout, vectors: Vectors) -> str:
     out.append("}")
     out.append("")
     out.append('''
+def encode(name: str, fields: dict) -> bytes:
+    """Encodes one schema structure. Every field not given is zero.
+
+    The gate writes exactly one structure with this, the fault directive, and
+    that block is outside the store. Nothing that belongs to a store is ever
+    written by the host: what a medium holds is what the guest put there.
+    """
+    size, layout = STRUCTS[name]
+    blob = bytearray(size)
+    known = {field[0] for field in layout}
+    unknown = set(fields) - known
+    if unknown:
+        raise ValueError(f"{name} has no field {sorted(unknown)}")
+    for field, offset, code, count in layout:
+        value = fields.get(field)
+        if value is None:
+            continue
+        if count is None:
+            struct.pack_into("<" + code, blob, offset, value)
+        elif code == "B":
+            if len(value) > count:
+                raise ValueError(f"{name}.{field} takes {count} bytes, got {len(value)}")
+            blob[offset : offset + len(value)] = value
+        else:
+            struct.pack_into(f"<{count}{code}", blob, offset, *value)
+    return bytes(blob)
+
+
 def decode(name: str, blob: bytes, offset: int = 0) -> dict:
     """Decodes one schema structure out of `blob` at `offset`."""
     size, fields = STRUCTS[name]

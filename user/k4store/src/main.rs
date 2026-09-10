@@ -51,7 +51,8 @@ use thalyx_abi::boot_handle;
 use thalyx_abi::generated::{outcome, receipt_kind};
 use thalyx_user_k4fmt as k4;
 use thalyx_user_k4fmt::pkg::{
-    OutboxAnswer, OutboxIntent, STORE_CONFIG_VADDR, StoreConfig, bit, facet, note, store_slot,
+    IOBUF_PAGES, OutboxAnswer, OutboxIntent, STORE_CONFIG_VADDR, StoreConfig, bit, facet, note,
+    store_slot,
 };
 use thalyx_user_k4fmt::{
     Binding, Manifest, Pod, StoreReply, StoreRequest, object_type, outbox_status, result_outcome,
@@ -899,6 +900,26 @@ fn run() -> ! {
     // same schema with a different implementation. A disagreement here is a
     // disagreement about the format, and there is no point writing a medium
     // the gate would decode differently.
+    // The buffer this domain assumes is mapped, confirmed against the object
+    // itself rather than assumed from the address it was mapped at. The handle
+    // is closed afterwards: it has no further use, and a handle kept is a grant
+    // nothing else can have.
+    let iobuf = boot_handle(store_slot::IOBUF);
+    match k2::memory_query(iobuf) {
+        Ok(info) if u64::from(info.pages) >= IOBUF_PAGES => {
+            k2::note(report::MAPPED, u64::from(info.pages));
+        }
+        Ok(info) => {
+            k2::note(report::UNEXPECTED, u64::from(info.pages));
+            rt::exit(1)
+        }
+        Err(code) => {
+            k2::note(report::UNEXPECTED, code as u64);
+            rt::exit(1)
+        }
+    }
+    let _ = k2::cap_close(iobuf);
+
     let report = k4::verify_golden(iobuf_bytes());
     k2::note(
         note::GOLDEN_VERIFIED,

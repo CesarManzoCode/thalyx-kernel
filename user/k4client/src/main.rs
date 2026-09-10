@@ -119,7 +119,21 @@ impl Client {
                 false,
             )
         } else {
-            let narrowed = k2::derive(self.stage_cap, right::INSPECT | lend, 0, 0).ok()?;
+            // `TRANSFER` is what sending a capability costs: without it the
+            // handle cannot cross the call at all. Everything else is dropped,
+            // so what the service receives can do one thing to this buffer.
+            let narrowed = match k2::derive(
+                self.stage_cap,
+                right::INSPECT | right::TRANSFER | lend,
+                0,
+                0,
+            ) {
+                Ok(handle) => handle,
+                Err(code) => {
+                    k2::note(report::UNEXPECTED, code as u64);
+                    return None;
+                }
+            };
             k2::endpoint_call(
                 self.store,
                 self.calls,
@@ -130,7 +144,13 @@ impl Client {
             )
         };
         match result {
-            Ok(reply) => StoreReply::read_from(&reply.payload, 0),
+            Ok(reply) => match StoreReply::read_from(&reply.payload, 0) {
+                Some(decoded) => Some(decoded),
+                None => {
+                    k2::note(report::UNEXPECTED, u64::from(reply.payload_len));
+                    None
+                }
+            },
             Err(code) => {
                 k2::note(report::UNEXPECTED, code as u64);
                 None
