@@ -136,6 +136,14 @@ pub mod module_flags {
     /// the diagnostic plane so a rejection is distinguishable from a build
     /// accident.
     pub const EXPECT_REJECT: u32 = 1 << 0;
+    /// On the supervisor module: once that supervisor is built, the kernel
+    /// writes summary records to the diagnostic plane but withholds trace
+    /// records -- one per operation or object -- and states how many it
+    /// withheld. Under hardware virtualization a trace record costs about as
+    /// much as a thousand of the operations it describes, so a package that
+    /// measures asks for this. It changes nothing the kernel does, only what
+    /// it says about it; the control-receipt plane is not affected.
+    pub const TRACE_OFF: u32 = 1 << 1;
 }
 
 /// Root hand-off structure. The loader passes its **physical** address in RDI;

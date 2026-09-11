@@ -52,6 +52,7 @@ PACKAGE_ENTRY_LEN = 64
 MODULE_KIND_USER_ELF = 1
 MODULE_KIND_SUPERVISOR = 2
 MODULE_FLAG_EXPECT_REJECT = 1
+MODULE_FLAG_TRACE_OFF = 2
 
 # Mirrors `thalyx_boot_protocol::USER_MAX_ADDR`: the patched module's segment is
 # placed above it so the kernel's range check is what rejects the image.
@@ -145,6 +146,15 @@ K5_NATIVE: dict[str, list[str]] = {
     "engine": ["nhacer", "ncheck", "nengine"],
 }
 K5_STAGES = {"smoke": 1, "surface": 2, "work": 3, "engine": 4}
+
+# The K6 package: the native half of the paired benchmarks. One supervisor
+# that builds and audits, one C program that is every role of the benchmark,
+# and K5's engine with K5's model, so a benchmark of the engine measures that
+# engine. The plan -- which entries, in which order, how many samples -- is
+# written by tools/run_k6.py for each boot and enters the package as a module,
+# as K5's plan does, so one image runs one boot of one round.
+K6_PROGRAMS = ["k6super"]
+K6_NATIVE = ["nbench", "nengine"]
 
 # The model the engine stage carries: the one Thalyx's own `dev/tiny-model.py`
 # writes, produced by tools/build_reference.py and pinned there. It enters the
@@ -342,7 +352,9 @@ def digest(path: Path) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", default="release", choices=["debug", "release"])
-    parser.add_argument("--phase", default="k1", choices=["k1", "k2", "k3", "k4", "k5"])
+    parser.add_argument("--phase", default="k1", choices=["k1", "k2", "k3", "k4", "k5", "k6"])
+    parser.add_argument("--plan", type=Path, default=None,
+                        help="K6 only: the plan this boot runs, as tools/run_k6.py writes it")
     parser.add_argument("--stage", default="smoke", choices=sorted(K5_STAGES),
                         help="K5 only: which stage of the port the image runs")
     parser.add_argument("--seed", type=lambda text: int(text, 0), default=0x5EED0001,
@@ -365,7 +377,11 @@ def main() -> int:
         "k3": K3_PROGRAMS,
         "k4": K4_PROGRAMS,
         "k5": K5_PROGRAMS + K5_STAGE_PROGRAMS[arguments.stage],
+        "k6": K6_PROGRAMS,
     }[phase]
+    if phase == "k6" and (arguments.plan is None or not arguments.plan.exists()):
+        print("the k6 phase needs --plan: a plan tools/run_k6.py wrote", file=sys.stderr)
+        return 1
 
     # Read by rust-lld for the loader's PE timestamp and by mtools for the FAT
     # directory entries. Set before the first build so both see it.
@@ -387,6 +403,21 @@ def main() -> int:
         shutil.copyfile(source, stage / f"{program}.elf")
 
     native_images: list[str] = []
+    if phase == "k6":
+        native_images = K6_NATIVE
+        native = subprocess.run(
+            [sys.executable, str(ROOT / "tools/build_native.py"), *native_images],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if native.returncode != 0:
+            print(native.stdout, native.stderr, file=sys.stderr)
+            raise SystemExit("native build failed")
+        for name in native_images:
+            shutil.copyfile(BUILD / "native" / f"{name}.elf", stage / f"{name}.elf")
+        shutil.copyfile(arguments.plan, stage / "k6plan.bin")
+        shutil.copyfile(reference_model(), stage / "k5model.gguf")
     if phase == "k5":
         native_images = K5_NATIVE[arguments.stage]
         native = subprocess.run(
@@ -425,6 +456,17 @@ def main() -> int:
         if arguments.stage == "engine":
             shutil.copyfile(reference_model(), stage / "k5model.gguf")
             entries.append(("k5model", stage / "k5model.gguf", MODULE_KIND_USER_ELF, 0))
+    elif phase == "k6":
+        # Summaries only: under KVM one trace record costs about a thousand of
+        # the operations it describes, and this package exists to time them.
+        # The kernel counts what it withholds and says so in diag.summary.
+        entries = [("k6super", stage / "k6super.elf", MODULE_KIND_SUPERVISOR,
+                    MODULE_FLAG_TRACE_OFF)]
+        entries += [
+            (name, stage / f"{name}.elf", MODULE_KIND_USER_ELF, 0) for name in native_images
+        ]
+        entries.append(("k6plan", stage / "k6plan.bin", MODULE_KIND_USER_ELF, 0))
+        entries.append(("k5model", stage / "k5model.gguf", MODULE_KIND_USER_ELF, 0))
     else:
         instances = {"k2": K2_INSTANCES, "k3": K3_INSTANCES, "k4": K4_INSTANCES}[phase]
         entries = [(name, stage / f"{program}.elf", kind, 0) for name, program, kind in instances]
@@ -474,6 +516,11 @@ def main() -> int:
     if phase == "k5":
         manifest["stage"] = arguments.stage
         manifest["seed"] = arguments.seed
+        native_manifest = BUILD / "native" / "native-manifest.json"
+        if native_manifest.exists():
+            manifest["native"] = json.loads(native_manifest.read_text())
+    if phase == "k6":
+        manifest["plan"] = {"source": str(arguments.plan), "sha256": digest(stage / "k6plan.bin")}
         native_manifest = BUILD / "native" / "native-manifest.json"
         if native_manifest.exists():
             manifest["native"] = json.loads(native_manifest.read_text())

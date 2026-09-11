@@ -67,6 +67,10 @@ const COOKIE: u64 = 0xC11E_0001;
 /// Sized so the server gets scheduled while this domain is still alive.
 const LINGER_ROUNDS: u64 = 64;
 const LINGER_WORK: u64 = 20_000;
+/// And for at least this long. The rounds alone were a duration on one
+/// platform: under KVM they were over in a few milliseconds, and a client gone
+/// before the server looks is one the server can only see as dead, not fenced.
+const LINGER_MIN_NS: u64 = 50_000_000;
 
 /// Where the supervisor maps the sealed page it published.
 const PUBLISHED_VADDR: u64 = 0x0000_0000_5000_0000;
@@ -168,8 +172,9 @@ fn run() -> ! {
     // things -- and it is also what lets the server observe the origin as
     // fenced rather than only as gone. A domain that exited the instant it was
     // cancelled would erase the distinction the run exists to show.
+    let linger_until = k2::now_ns() + LINGER_MIN_NS;
     let mut linger = 0u64;
-    while linger < LINGER_ROUNDS {
+    while linger < LINGER_ROUNDS || k2::now_ns() < linger_until {
         let _ = rt::burn(LINGER_WORK, linger | 1);
         linger += 1;
     }

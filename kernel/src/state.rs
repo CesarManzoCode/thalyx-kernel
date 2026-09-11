@@ -95,6 +95,14 @@ pub struct CpuSlot {
     pub budget_stalls: u64,
     /// Nanoseconds of user execution this processor charged.
     pub user_ns: u64,
+    /// A thread was made runnable here and no processor has been told. Settled
+    /// when this processor next schedules or returns to a thread that keeps
+    /// running; see `sched::kick_idle`.
+    pub wake_pending: bool,
+    /// Time-stamp counter when the pending wake was noted.
+    pub wake_pending_at: u64,
+    /// Reschedule interrupts this processor sent to idle ones.
+    pub kicks: u64,
 }
 
 impl CpuSlot {
@@ -108,6 +116,9 @@ impl CpuSlot {
             previous: usize::MAX,
             ticks: 0,
             dispatches: 0,
+            wake_pending: false,
+            wake_pending_at: 0,
+            kicks: 0,
             preemptions: 0,
             budget_stalls: 0,
             user_ns: 0,
@@ -274,6 +285,8 @@ pub struct Domain {
     pub refusals: u64,
     /// Refusal records already emitted before the plane starts coalescing.
     pub refusal_records: u32,
+    /// Capability entries naming this domain, wherever they are held.
+    pub refs: u32,
 }
 
 impl Domain {
@@ -310,6 +323,7 @@ impl Domain {
             invocations: 0,
             refusals: 0,
             refusal_records: 0,
+            refs: 0,
         }
     }
 
@@ -379,6 +393,8 @@ pub enum Wait {
     Receive(u16, u32),
     /// Waiting for any of a mask of signal bits.
     Signal(u16, u32, u64),
+    /// Waiting for a control log to hold a receipt.
+    Log(u16, u32),
 }
 
 /// An execution context.

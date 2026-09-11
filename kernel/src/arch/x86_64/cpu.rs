@@ -44,6 +44,10 @@ pub const CR0_TS: u64 = 1 << 3;
 pub const CR0_NE: u64 = 1 << 5;
 /// `CR0.WP`, supervisor write protection.
 pub const CR0_WP: u64 = 1 << 16;
+/// `CR0.NW`, not write-through. Set by INIT; must be clear for normal caching.
+pub const CR0_NW: u64 = 1 << 29;
+/// `CR0.CD`, cache disable. Set by INIT; must be clear for normal caching.
+pub const CR0_CD: u64 = 1 << 30;
 
 /// `CR4.OSFXSR`, enables FXSAVE/FXRSTOR and SSE.
 pub const CR4_OSFXSR: u64 = 1 << 9;
@@ -240,6 +244,29 @@ pub unsafe fn wait_for_interrupt() {
     // SAFETY: `sti`, `hlt` and `cli` at CPL 0 are permitted, and the caller
     // guarantees no lock is held across the window.
     unsafe { asm!("sti", "hlt", "cli", options(nomem, nostack)) }
+}
+
+/// Runs `body` with interrupts enabled, then masks them again.
+///
+/// The second place interrupts are enabled outside user mode, with the same
+/// justification and the same condition as [`wait_for_interrupt`]: an idle
+/// processor that watches for a wake instead of halting at once has to let the
+/// interrupts in that a halted one would have taken -- a timer, a shootdown,
+/// a reschedule.
+///
+/// # Safety
+///
+/// The caller must hold no lock: an interrupt handler that runs here takes
+/// the machine lock, and it may switch away from this context entirely.
+#[inline]
+pub unsafe fn with_interrupts_enabled<T>(body: impl FnOnce() -> T) -> T {
+    // SAFETY: `sti` and `cli` at CPL 0 are permitted, and the caller
+    // guarantees no lock is held across the window.
+    unsafe { asm!("sti", options(nomem, nostack)) };
+    let value = body();
+    // SAFETY: as above.
+    unsafe { asm!("cli", options(nomem, nostack)) };
+    value
 }
 
 /// Halts the CPU with interrupts masked and never returns.

@@ -82,6 +82,9 @@ pub mod bit {
     /// on its done signal, so a supervisor that means to close it while the
     /// engine computes for it knows when that is.
     pub const WORK_ASKING: u64 = 1 << 2;
+    /// A held work may begin. Raised by the supervisor on the work's done
+    /// signal, which the work waits on before its first step.
+    pub const WORK_GO: u64 = 1 << 3;
     /// A work domain is asked to stop what it is doing.
     pub const CANCEL: u64 = 1 << 6;
     /// The engine has loaded its weights and is admitting requests.
@@ -124,8 +127,10 @@ pub struct WorkConfig {
     pub uses_engine: u32,
     /// How many inferences it asks for.
     pub inferences: u32,
-    /// Reserved, zero.
-    pub reserved0: u32,
+    /// Whether the work waits for `bit::WORK_GO` on its done signal before it
+    /// does anything: what lets a supervisor order one work after another
+    /// rather than race them.
+    pub hold: u32,
 }
 
 const _: () = assert!(size_of::<WorkConfig>() == 40);

@@ -22,12 +22,12 @@ use thalyx_boot_protocol::{PAGE_SIZE, USER_MAX_ADDR, USER_MIN_ADDR};
 use crate::api::{BODY, Ctx, begin_response, resolve};
 use crate::arch::x86_64::trap::{DEVICE_VECTOR_BASE, DEVICE_VECTOR_COUNT};
 use crate::device::{self, State};
-use crate::event;
 use crate::limits::{MAX_DEVICE_REGIONS, MAX_DMA_GRANTS, MAX_IRQ_BINDINGS};
 use crate::mm::{Frame, Owner, Rights};
 use crate::scope::{self, Resource};
 use crate::state::{DomainState, MACHINE, Machine};
 use crate::ucopy::Staging;
+use crate::{event, trace};
 
 /// Physical base of the interrupt address space a message-signalled interrupt
 /// writes to.
@@ -209,7 +209,7 @@ pub fn map_region(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Re
     };
     machine.devices[index].regions[slot].maps += 1;
     let id = machine.devices[index].id;
-    event!(
+    trace!(
         "device.region_mapped",
         "device={id} region={slot} kind={} domain={domain} vaddr=0x{:x} pages={pages} \
          cacheable=0 executable=0 session={}",
@@ -248,7 +248,7 @@ pub fn unmap_region(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u
         )
     };
     let ack = crate::tlb::shootdown();
-    event!(
+    trace!(
         "device.region_unmapped",
         "device={id} vaddr=0x{:x} pages={pages} invalidation_generation={} \
          acknowledged_cpus={} expected_cpus={} acknowledged={}",
@@ -517,7 +517,7 @@ pub fn dma_map(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Resul
         memory_object_id: machine.memories[object].id,
     };
     let id = machine.devices[index].id;
-    event!(
+    trace!(
         "device.dma_granted",
         "device={id} grant={slot} object={} iova=0x{base:x} length=0x{length:x} \
          rights=0x{:x} profile={profile} profile_reason={reason} session={} \
@@ -570,7 +570,7 @@ pub fn dma_unmap(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Res
         .ok_or(status::INVALID_ARGUMENT)?;
     let released = revoke_grant(machine, slot);
     let id = machine.devices[index].id;
-    event!(
+    trace!(
         "device.dma_revoked",
         "device={id} grant={slot} iova=0x{:x} pages={released} session={} \
          device_quiescent=1",

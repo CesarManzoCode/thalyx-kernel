@@ -26,9 +26,10 @@ use crate::arch::x86_64::paging::{AddressSpace, FLAG_USER, FLAG_WRITABLE};
 ///
 /// The interface allows 4 KiB; no operation of this revision needs more than
 /// this, and the difference is what keeps the staging buffer small enough to
-/// live on a kernel stack. An operation that grew past it would fail the
-/// assertion below rather than overflow anything.
-pub const MAX_OP_DESCRIPTOR: usize = 512;
+/// live on a kernel stack: an eighth of one, as of K6's sixteen-receipt read
+/// batch, on a path with nothing else large on it. An operation that grew
+/// past it would fail the assertion below rather than overflow anything.
+pub const MAX_OP_DESCRIPTOR: usize = 2048;
 
 const _: () = {
     let mut index = 0;

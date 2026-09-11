@@ -1588,19 +1588,22 @@ def check_rivals_two_works(runs: dict[str, Run]) -> Result:
     scopes = (scope_id(run, "work"), scope_id(run, "rival"))
     seen = (note_values(run.records, "version_seen", "k5pub"),
             note_values(run.records, "version_seen", "k5riv"))
-    started_from = [v & 0xFFFF_FFFF for values in seen for v in values if v >> 32]
+    # Each work's first load, whichever of them wins: the loser loads a second
+    # time, over the version that won, and that load belongs to the other
+    # criteria.
+    started_from = [next((v & 0xFFFF_FFFF for v in values if v >> 32), None) for values in seen]
     result.passed = (
         pub is not None and riv is not None and pub != riv
         and store_facets == ({"1"}, {"2"})
         and launch_facets == ({"1"}, {"2"})
         and len(runtimes) >= 2
         and None not in scopes and scopes[0] != scopes[1]
-        and started_from[:2] == [1, 1]
+        and started_from == [1, 1]
     )
     result.detail = (
         f"work domains {pub} and {riv}, store facets {store_facets}, launcher facets "
         f"{launch_facets}, runtimes launched {len(runtimes)}, scopes {scopes}, "
-        f"versions each first loaded {started_from[:2]}"
+        f"versions each first loaded {started_from}"
     )
     return result
 
@@ -2690,6 +2693,15 @@ def rivals_mark(runs: dict[str, Run], who: str) -> bytes:
     return mark_of(seed if who == "k5pub" else seed ^ RIVAL_SALT)
 
 
+def rivals_roles(runs: dict[str, Run]) -> tuple[str, str]:
+    """Winner and loser of the rivals race. The race is real, either work may
+    win it, and a damage has to hit the one that actually lost."""
+    run = case_leg(runs, "rivals", 1)
+    if run is not None and 2 in note_values(run.records, "published", "k5riv"):
+        return "k5riv", "k5pub"
+    return "k5pub", "k5riv"
+
+
 def case_mark(runs: dict[str, Run], case: str) -> bytes:
     run = case_leg(runs, case, 1)
     return mark_of(run.spec.get("seed") if run else 0)
@@ -2719,6 +2731,12 @@ DAMAGE += [
             origin_domain=work_domain_id(run, "k5riv") or "", endpoint=endpoint_of(run, "store") or "")),
     ),
     (
+        "the rival started from a later version than the first",
+        "rivals_two_works",
+        lambda runs: in_case(runs, "rivals", 1, lambda run: note_set(
+            run, "version_seen", "k5riv", (4 << 32) | 2)),
+    ),
+    (
         "the rival's runtime never launched",
         "rivals_two_works",
         lambda runs: in_case(runs, "rivals", 1, lambda run: event_drop(run, "domain.created", name="nhacer")),
@@ -2745,17 +2763,20 @@ DAMAGE += [
     (
         "the loser's refusal not a stale generation",
         "rivals_one_wins",
-        lambda runs: in_case(runs, "rivals", 1, lambda run: note_set(run, "publish_refused", "k5riv", 7)),
+        lambda runs: in_case(runs, "rivals", 1, lambda run: note_set(
+            run, "publish_refused", rivals_roles(runs)[1], 7)),
     ),
     (
         "the loser never rebased",
         "rivals_one_wins",
-        lambda runs: in_case(runs, "rivals", 1, lambda run: note_drop(run, "work_rebased", "k5riv")),
+        lambda runs: in_case(runs, "rivals", 1, lambda run: note_drop(
+            run, "work_rebased", rivals_roles(runs)[1])),
     ),
     (
-        "both marks in the published module",
+        "the loser's mark in the published module instead of the winner's",
         "rivals_one_wins",
-        lambda runs: rewrite_medium(runs, rivals_mark(runs, "k5pub"), rivals_mark(runs, "k5riv")),
+        lambda runs: rewrite_medium(runs, rivals_mark(runs, rivals_roles(runs)[0]),
+                                    rivals_mark(runs, rivals_roles(runs)[1])),
     ),
     (
         "the rival's maintenance request not refused",

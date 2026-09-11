@@ -18,18 +18,31 @@
 //! waiting for it, so the two cannot wait on each other. A complete invalidation
 //! is correct at any point, which is what makes it safe to do from inside a
 //! wait for an unrelated lock.
+//!
+//! The lock is a ticket lock: processors acquire it in the order they asked.
+//! Until K6 it was a test-and-set flag, which a processor releasing and
+//! re-acquiring the lock in a tight loop wins every time, since the line is
+//! hot in its cache and cold in every other. K6's closure benchmark found the
+//! consequence: a supervisor spinning on `SCOPE_RETIRE` -- a lock acquisition
+//! or three per call -- kept the processor whose switch away from a stopped
+//! thread the retirement was waiting for from ever taking the lock to do it,
+//! for milliseconds at a time, until the supervisor was preempted. Fairness
+//! costs one more atomic per release and removes the starvation.
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 /// A mutual-exclusion cell that never blocks and never yields while held.
 pub struct SpinLock<T> {
-    locked: AtomicBool,
+    /// The next ticket to hand out.
+    next: AtomicU32,
+    /// The ticket now allowed in.
+    serving: AtomicU32,
     value: UnsafeCell<T>,
 }
 
-// SAFETY: access to `value` is serialised by `locked`, so a `&SpinLock<T>`
+// SAFETY: access to `value` is serialised by the ticket, so a `&SpinLock<T>`
 // shared between contexts can only ever hand out one `&mut T` at a time.
 unsafe impl<T: Send> Sync for SpinLock<T> {}
 // SAFETY: the lock adds no thread affinity of its own.
@@ -39,26 +52,22 @@ impl<T> SpinLock<T> {
     /// Creates an unlocked cell.
     pub const fn new(value: T) -> Self {
         Self {
-            locked: AtomicBool::new(false),
+            next: AtomicU32::new(0),
+            serving: AtomicU32::new(0),
             value: UnsafeCell::new(value),
         }
     }
 
-    /// Acquires the lock, spinning until it is free.
+    /// Acquires the lock, spinning until its turn comes.
     ///
     /// The returned guard must be dropped before any context switch: switching
     /// with a kernel lock held would let the next thread deadlock against a
     /// holder that is no longer running.
     pub fn lock(&self) -> SpinGuard<'_, T> {
-        while self
-            .locked
-            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            while self.locked.load(Ordering::Relaxed) {
-                crate::tlb::refresh_local();
-                core::hint::spin_loop();
-            }
+        let ticket = self.next.fetch_add(1, Ordering::Relaxed);
+        while self.serving.load(Ordering::Acquire) != ticket {
+            crate::tlb::refresh_local();
+            core::hint::spin_loop();
         }
         SpinGuard { lock: self }
     }
@@ -117,6 +126,6 @@ impl<T> DerefMut for SpinGuard<'_, T> {
 
 impl<T> Drop for SpinGuard<'_, T> {
     fn drop(&mut self) {
-        self.lock.locked.store(false, Ordering::Release);
+        self.lock.serving.fetch_add(1, Ordering::Release);
     }
 }

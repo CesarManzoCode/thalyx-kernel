@@ -90,6 +90,12 @@ pub struct MemoryObject {
     pub label: [u8; 16],
     /// Capability entries naming this object.
     pub refs: u32,
+    /// Invalidation generation published when the object's last mapping was
+    /// withdrawn, zero if it was never mapped. An object nothing can reach any
+    /// more gives its frames straight back to the pool once every processor
+    /// has flushed past this generation, and through the quarantine while one
+    /// may not have.
+    pub unmapped_at: u64,
 }
 
 impl MemoryObject {
@@ -109,6 +115,7 @@ impl MemoryObject {
             dma_grants: 0,
             label: [0; 16],
             refs: 0,
+            unmapped_at: 0,
         }
     }
 

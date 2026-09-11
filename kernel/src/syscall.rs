@@ -28,9 +28,9 @@ use thalyx_boot_protocol::{USER_MAX_ADDR, USER_MIN_ADDR};
 
 use crate::arch::x86_64::cpu;
 use crate::arch::x86_64::trap::TrapFrame;
-use crate::event;
 use crate::state::{MACHINE, ThreadKind};
 use crate::ucopy;
+use crate::{event, trace};
 
 /// Handles one `syscall` entry.
 pub fn handle(frame: &mut TrapFrame) {
@@ -118,6 +118,9 @@ pub fn handle(frame: &mut TrapFrame) {
             );
         }
     }
+    // This thread keeps running: a thread it woke and nobody picked up is
+    // handed to an idle processor here, on the way out.
+    crate::sched::flush_wake();
 
     // Every return to ring 3 passes here. A thread whose domain was terminated
     // by authority while it was inside this entry does not get the return.
@@ -237,7 +240,7 @@ fn thread_pointer_set(domain: usize, thread: usize, frame: &mut TrapFrame) {
     unsafe { cpu::wrmsr(cpu::MSR_FS_BASE, value) };
     if first {
         let name = crate::domain::domain_name(domain);
-        event!(
+        trace!(
             "thread.pointer",
             "domain={domain} name={name} thread={thread} fs_base=0x{value:x}"
         );

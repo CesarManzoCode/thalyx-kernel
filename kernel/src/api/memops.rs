@@ -22,13 +22,13 @@ use thalyx_boot_protocol::PAGE_SIZE;
 
 use crate::api::{BODY, Ctx, begin_response, resolve};
 use crate::arch::x86_64::cpu;
-use crate::event;
 use crate::limits::MAX_OBJECT_PAGES;
 use crate::memobj::{MemoryObject, State};
-use crate::mm::{Owner, Rights};
+use crate::mm::{Frame, Owner, Rights};
 use crate::obj::{ObjKind, ObjRef};
 use crate::scope::{self, Resource};
 use crate::state::{MACHINE, Machine};
+use crate::trace;
 use crate::ucopy::Staging;
 
 /// Translates interface memory rights into a platform mapping request.
@@ -118,6 +118,7 @@ pub fn create(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
         dma_grants: 0,
         label: request.label,
         refs: 0,
+        unmapped_at: 0,
     };
 
     let object = ObjRef::new(ObjKind::Memory, index as u16, generation);
@@ -143,7 +144,7 @@ pub fn create(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
     let handle = crate::api::cap_install(machine, ctx.domain, object, grant, None)
         .ok_or(status::LIMIT_EXHAUSTED)?;
 
-    event!(
+    trace!(
         "mem.created",
         "object={id} label={} pages={} max_rights=0x{:x} sponsor_scope={} base=0x{:x}",
         machine.memories[index].label_str(),
@@ -363,7 +364,8 @@ pub fn withdraw_map(machine: &mut Machine, map_index: usize) -> u32 {
     // installed against; decrementing the counters of whatever occupies the
     // slot now would corrupt the accounting of an unrelated object.
     let memory = record.memory as usize;
-    if machine.memories[memory].generation == record.memory_generation {
+    let same_object = machine.memories[memory].generation == record.memory_generation;
+    if same_object {
         machine.memories[memory].map_count = machine.memories[memory].map_count.saturating_sub(1);
         if record.rights & right::MEMORY_WRITE != 0 {
             machine.memories[memory].writable_maps =
@@ -385,9 +387,84 @@ pub fn withdraw_map(machine: &mut Machine, map_index: usize) -> u32 {
         crate::api::collect_grant(machine, grant);
     }
     if removed != 0 {
-        crate::tlb::publish();
+        let published = crate::tlb::publish();
+        // Recorded on the object, so a later release knows whether every
+        // processor has flushed past the withdrawal of its last mapping.
+        if same_object {
+            machine.memories[memory].unmapped_at = published;
+        }
+    }
+    if same_object {
+        collect_memory(machine, memory);
     }
     removed
+}
+
+/// Releases a memory object nothing can reach any more.
+///
+/// "Nothing" is exact: no capability names it, no mapping holds it, and no
+/// device grant lets a device write it. Its frames go straight back to the
+/// pool when every processor has flushed past the invalidation that withdrew
+/// its last mapping -- the ordinary case, because an unmap does not answer
+/// until every processor has acknowledged -- and through the quarantine when
+/// one may not have. The sponsor's charge ends here either way, as it would at
+/// retirement.
+///
+/// An object whose sponsor has already retired is left where retirement left
+/// it: retirement reported it as retained, and the slot of a retired scope is
+/// not one this can safely credit.
+pub fn collect_memory(machine: &mut Machine, index: usize) {
+    let Some(object) = machine.memories.get(index) else {
+        return;
+    };
+    if object.state == State::Empty
+        || object.refs != 0
+        || object.map_count != 0
+        || object.dma_grants != 0
+    {
+        return;
+    }
+    let sponsor = object.sponsor;
+    if !matches!(
+        machine.scopes[sponsor as usize].state,
+        scope::State::Open | scope::State::Fenced | scope::State::Quiescent
+    ) {
+        return;
+    }
+    let (base, pages, generation, id, state, unmapped_at) = (
+        object.base,
+        u64::from(object.pages),
+        object.generation,
+        object.id,
+        object.state,
+        object.unmapped_at,
+    );
+    let immediate = unmapped_at == 0 || crate::tlb::safe_generation() >= unmapped_at;
+    for page in 0..pages {
+        let frame = Frame::containing(base.addr() + page * PAGE_SIZE);
+        if immediate {
+            // SAFETY: no capability names the object and no mapping holds it,
+            // so no page table points at these frames; every processor has
+            // flushed past the invalidation that removed the last such entry,
+            // so no cached translation reaches them; and no device grant names
+            // them.
+            unsafe { machine.allocator().release(frame, Owner::Scope(sponsor)) };
+        } else {
+            machine.allocator().retire(frame, Owner::Scope(sponsor));
+        }
+    }
+    scope::release(&mut machine.scopes, sponsor, Resource::MemoryPages, pages);
+    scope::release(&mut machine.scopes, sponsor, Resource::Metadata, 1);
+    machine.memories[index] = MemoryObject::empty();
+    machine.memories[index].generation = generation;
+    trace!(
+        "mem.released",
+        "object={id} pages={pages} state_at_release={} sponsor_scope={} reason=unreferenced \
+         release={}",
+        state.name(),
+        machine.scopes[sponsor as usize].id,
+        if immediate { "immediate" } else { "deferred" }
+    );
 }
 
 /// Describes a memory object as the interface reports it.
@@ -460,7 +537,7 @@ pub fn seal(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
         // is told to finish the device's own withdrawal first.
         if machine.memories[index].dma_grants != 0 {
             let grants = machine.memories[index].dma_grants;
-            event!(
+            trace!(
                 "mem.seal_failed",
                 "object={id} dma_grants={grants} reason=device_can_still_reach_pages"
             );
@@ -483,7 +560,7 @@ pub fn seal(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
             {
                 continue;
             }
-            event!(
+            trace!(
                 "mem.writer_withdrawn",
                 "object={id} domain={} vaddr=0x{:x} offset_pages={} pages={} reason=sealing",
                 record.domain,
@@ -519,7 +596,7 @@ pub fn seal(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
         return Err(status::PEER_DEAD);
     }
     if machine.memories[index].writable_maps != 0 {
-        event!(
+        trace!(
             "mem.seal_failed",
             "object={id} writable_maps={} reason=alias_remains",
             machine.memories[index].writable_maps
@@ -527,7 +604,7 @@ pub fn seal(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
         return Err(status::STATE_CONFLICT);
     }
     if ack.timed_out {
-        event!(
+        trace!(
             "mem.seal_failed",
             "object={id} reason=invalidation_unacknowledged generation={} \
              acknowledged={} expected={} spins={} state=sealing",
@@ -544,7 +621,7 @@ pub fn seal(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
     let map_count = machine.memories[index].map_count;
     let label = machine.memories[index].label_str();
     let object_pages = machine.memories[index].pages;
-    event!(
+    trace!(
         "mem.sealed",
         "object={id} label={label} pages={object_pages} writers_withdrawn={withdrawn} \
          pages_unmapped={pages} remaining_maps={map_count} \

@@ -16,9 +16,9 @@ use thalyx_abi::generated::{
 };
 
 use crate::api::{BODY, Ctx, begin_response, grant_within, receipt, resolve};
-use crate::event;
 use crate::obj::NO_GRANT;
 use crate::state::Machine;
+use crate::trace;
 use crate::ucopy::Staging;
 
 /// Reports what a capability names and what its lineage still permits.
@@ -111,7 +111,7 @@ pub fn derive(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
         Some(handle) => {
             let child_id = machine.grants[child as usize].id;
             let name = machine.domains[ctx.domain].name_str();
-            event!(
+            trace!(
                 "cap.derive",
                 "domain={} name={name} object={} parent_grant={} child_grant={} \
                  parent_rights=0x{:x} child_rights=0x{:x} deadline_ns={deadline} depth={}",
@@ -166,7 +166,7 @@ pub fn fence(machine: &mut Machine, ctx: &Ctx) -> Result<u64, i64> {
     let grant_id = machine.grants[ctx.cap.grant as usize].id;
     let object = crate::api::object_id(machine, ctx.cap.object);
     let scope = machine.domains[ctx.domain].owner_scope;
-    event!(
+    trace!(
         "cap.fence",
         "domain={} grant={grant_id} object_type={} object={object} nodes_fenced={changed}",
         ctx.domain,

@@ -38,10 +38,10 @@ pub mod scopeops;
 use thalyx_abi::generated::{DescriptorHeader, OpSpec, flag, object_type, op, spec, status};
 
 use crate::arch::x86_64::trap::TrapFrame;
-use crate::event;
 use crate::obj::{GrantId, NO_GRANT, ObjKind, ObjRef, ScopeId};
 use crate::scope;
 use crate::state::{MACHINE, Machine};
+use crate::trace;
 use crate::ucopy::{self, Staging};
 
 /// Diagnostic records of refused operations emitted per domain before the
@@ -161,7 +161,8 @@ fn adjust_object_refs(machine: &mut Machine, object: ObjRef, delta: i32) {
         }
     };
     match object.kind {
-        ObjKind::Scope | ObjKind::Domain => {}
+        ObjKind::Scope => apply(&mut machine.scopes[index].refs),
+        ObjKind::Domain => apply(&mut machine.domains[index].refs),
         ObjKind::Memory => apply(&mut machine.memories[index].refs),
         ObjKind::Endpoint => apply(&mut machine.endpoints[index].refs),
         ObjKind::Invocation => apply(&mut machine.invocations[index].refs),
@@ -241,6 +242,19 @@ fn release_entry(machine: &mut Machine, domain: usize, entry: crate::obj::CapEnt
     adjust_object_refs(machine, entry.object, -1);
     if entry.object.kind == ObjKind::Invocation {
         collect_invocation(machine, entry.object.index as usize);
+    }
+    // A memory object that nothing names and nothing maps can never be reached
+    // again. Until K6 it stayed anyway, its pages charged and its table slot
+    // held, until the scope that sponsored it retired: K6's first native run
+    // created and closed objects in a loop and exhausted the kernel's table of
+    // them after forty-two iterations.
+    if entry.object.kind == ObjKind::Memory
+        && machine
+            .memories
+            .get(entry.object.index as usize)
+            .is_some_and(|object| object.generation == entry.object.generation)
+    {
+        memops::collect_memory(machine, entry.object.index as usize);
     }
     collect_grant(machine, entry.grant);
 }
@@ -322,7 +336,7 @@ pub fn grant_alloc(
         // A refusal that says which resource ran out. Without this the caller
         // sees only "exhausted" and has to guess between a scope ceiling it
         // set and a machine-wide table it did not.
-        event!(
+        trace!(
             "k2.grants_exhausted",
             "used={} capacity={} sponsor={sponsor}",
             machine.grants.iter().filter(|node| node.used).count(),
@@ -505,7 +519,7 @@ pub fn note_refusal(machine: &mut Machine, domain: usize, operation: u32, code: 
     }
     machine.domains[domain].refusal_records += 1;
     let domain_name = machine.domains[domain].name_str();
-    event!(
+    trace!(
         "k2.refused",
         "domain={domain} name={domain_name} op={name} op_code=0x{operation:x} \
          status={code} refusals={count}"
@@ -599,7 +613,6 @@ fn simple(
         op::TIMER_CANCEL => evtops::cancel(machine, ctx),
         op::TIMER_QUERY => evtops::query_timer(machine, ctx, staging),
 
-        op::LOG_READ => logops::read(machine, ctx, staging),
         op::LOG_APPEND => logops::append(machine, ctx, staging),
         op::LOG_ACK => logops::acknowledge(machine, ctx, staging),
         op::LOG_QUERY => logops::query(machine, ctx, staging),
@@ -639,6 +652,7 @@ const fn waits(operation: u32) -> bool {
         op::ENDPOINT_CALL
             | op::ENDPOINT_RECEIVE
             | op::SIGNAL_WAIT
+            | op::LOG_READ
             | op::MEMORY_SEAL
             | op::DOMAIN_UNMAP
             | op::DEVICE_UNMAP_REGION
@@ -707,7 +721,7 @@ pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64)
             // that passed an unmapped pointer and one that passed a kernel
             // address get the same status, and telling them apart from the
             // outside is otherwise guesswork.
-            event!(
+            trace!(
                 "user.copy_refused",
                 "domain={domain} op={} direction=in addr=0x{:x} len={} reason={}",
                 operation_name(operation),
@@ -742,6 +756,17 @@ pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64)
         },
     };
 
+    // A domain that has stopped is reaped on an idle turn of some processor.
+    // On a busy machine that turn may be a long time coming, and the caller
+    // asking whether a perimeter has drained is spinning on exactly that, so
+    // the closing operations reap on the way in -- a retirement then sees the
+    // quiescence its own termination produced -- and the termination on the
+    // way out, once the domain it stopped is off every processor.
+    let closing = matches!(operation, op::SCOPE_DRAIN_STATUS | op::SCOPE_RETIRE);
+    if closing {
+        crate::domain::reap_dead();
+    }
+
     let outcome = if waits(operation) {
         // These own their locking: they may sleep, and a lock is never held
         // across a context switch.
@@ -749,6 +774,7 @@ pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64)
             op::ENDPOINT_CALL => ipcops::call(&ctx_base, spec, &mut staging),
             op::ENDPOINT_RECEIVE => ipcops::receive(&ctx_base, spec, &mut staging),
             op::SIGNAL_WAIT => evtops::wait(&ctx_base, spec, &mut staging),
+            op::LOG_READ => logops::read(&ctx_base, spec, &mut staging),
             op::MEMORY_SEAL => memops::seal(&ctx_base, spec, &mut staging),
             op::DOMAIN_UNMAP => domainops::unmap(&ctx_base, spec, &mut staging),
             op::DEVICE_UNMAP_REGION => devops::unmap_region(&ctx_base, spec, &mut staging),
@@ -778,6 +804,10 @@ pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64)
         }
     };
 
+    if operation == op::DOMAIN_TERMINATE {
+        crate::domain::reap_dead();
+    }
+
     // A response goes back whenever a handler wrote one, whatever the status.
     // Most refusals write nothing and the caller's buffer is left alone; the
     // ones that refuse with an explanation -- a retirement reporting what is
@@ -795,7 +825,7 @@ pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64)
         if let Err(fault) = written {
             // The operation happened. A failed copy of its result is a delivery
             // failure, not an undo, and the interface says so.
-            event!(
+            trace!(
                 "user.copy_refused",
                 "domain={domain} op={} direction=out addr=0x{:x} len={} reason={} \
                  note=operation_already_happened",
@@ -909,12 +939,14 @@ pub fn receipt(
     let lost = log.lost;
     let coalesced = log.coalesced;
     let used = log.count;
-    event!(
+    let generation = log.generation;
+    trace!(
         "ctrl.receipt",
         "seq={sequence} kind={kind} origin_domain={domain_id} origin_scope={scope_id} \
          object={object} grant={grant} parent={parent_invocation} result={result} \
          a=0x{a:x} b=0x{b:x} used={used} lost={lost} coalesced={coalesced}"
     );
+    logops::wake_reader(machine, log_index as usize, generation);
     sequence
 }
 

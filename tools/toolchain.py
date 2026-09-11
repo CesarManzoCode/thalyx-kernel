@@ -16,6 +16,14 @@ Environment:
   THALYX_MFORMAT      Path to mformat.
   THALYX_MMD          Path to mmd.
   THALYX_MCOPY        Path to mcopy.
+  THALYX_ACCEL        Accelerator the guest runs on: `tcg` (the default, and the
+                      platform every gate's recorded evidence was gathered on) or
+                      `kvm`, which runs the same image on the host processor's
+                      hardware virtualization and is recorded as a different
+                      platform, never as the same one.
+  THALYX_CPU          Processor model that replaces each runner's own. Unset, a
+                      runner uses the model its phase fixes. Set, the run record
+                      says so, because a different model is a different platform.
 """
 
 from __future__ import annotations
@@ -51,6 +59,40 @@ OVMF_VARS_CANDIDATES = [
 
 class MissingTool(RuntimeError):
     """A tool K1 needs is not installed and was not pointed at."""
+
+
+ACCELERATORS = ("tcg", "kvm")
+
+
+def accelerator() -> str:
+    """The accelerator this run uses, refused rather than downgraded.
+
+    A run that asked for KVM on a host without it must not quietly become a TCG
+    run: the two are different platforms, and evidence recorded under the wrong
+    name is worse than no evidence."""
+    value = os.environ.get("THALYX_ACCEL", "tcg")
+    if value not in ACCELERATORS:
+        raise MissingTool(f"THALYX_ACCEL={value!r} is not one of {', '.join(ACCELERATORS)}")
+    if value == "kvm" and not os.access("/dev/kvm", os.R_OK | os.W_OK):
+        raise MissingTool("THALYX_ACCEL=kvm but /dev/kvm is not readable and writable here")
+    return value
+
+
+def machine() -> str:
+    """The `-machine` argument: q35 on the selected accelerator."""
+    return f"q35,accel={accelerator()}"
+
+
+def cpu_model(default: str) -> str:
+    """The processor model: the runner's own unless `THALYX_CPU` replaces it."""
+    return os.environ.get("THALYX_CPU") or default
+
+
+def irqchip() -> str:
+    """What provides the interrupt controllers, for the run record."""
+    if accelerator() == "tcg":
+        return "in-kernel-not-applicable-under-tcg"
+    return "kvm, qemu default for q35"
 
 
 @dataclass

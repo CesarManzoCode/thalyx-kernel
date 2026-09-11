@@ -24,12 +24,12 @@ use thalyx_abi::generated::{
 };
 
 use crate::api::{BODY, Ctx, begin_response, receipt, reserve_receipt, resolve};
-use crate::event;
 use crate::ipc::{Cancel, DeliveredCap, Effect, Endpoint, Invocation, Message, NO_MESSAGE, State};
 use crate::obj::{NO_GRANT, ObjKind, ObjRef, ScopeId};
 use crate::scope::{self, Resource};
 use crate::state::{FaultRecord, MACHINE, Machine, ThreadState, Wait};
 use crate::ucopy::Staging;
+use crate::{event, trace};
 
 /// Bytes charged per message on top of its payload: the record the kernel keeps
 /// for it. Charging only the payload would let a flood of empty messages cost a
@@ -45,7 +45,7 @@ const MESSAGE_OVERHEAD_BYTES: u64 = 64;
 /// one is the receiver's fault, one the sender's, and three are the machine's.
 /// Naming the table and what it held is what turns the refusal into evidence.
 fn exhausted(resource: &str, used: u64, capacity: u64) -> i64 {
-    event!(
+    trace!(
         "k2.admission_exhausted",
         "resource={resource} used={used} capacity={capacity}"
     );
@@ -131,7 +131,7 @@ pub fn create_endpoint(
     .ok_or(status::LIMIT_EXHAUSTED)?;
     let handle = crate::api::cap_install(machine, ctx.domain, object, grant, None)
         .ok_or(status::LIMIT_EXHAUSTED)?;
-    event!(
+    trace!(
         "ipc.endpoint_created",
         "endpoint={id} label={} epoch={id} capacity={} scope={}",
         machine.endpoints[index].label_str(),
@@ -188,7 +188,7 @@ pub fn bind_facet(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Re
     .ok_or(status::LIMIT_EXHAUSTED)?;
     let handle = crate::api::cap_install(machine, ctx.domain, ctx.cap.object, grant, None)
         .ok_or(status::LIMIT_EXHAUSTED)?;
-    event!(
+    trace!(
         "ipc.facet_bound",
         "endpoint={} epoch={} facet={facet} grant={} rights=0x{:x} domain={}",
         machine.endpoints[index].id,
@@ -486,7 +486,7 @@ fn admit(
     machine.endpoints[endpoint].admitted += 1;
     machine.scopes[origin_scope as usize].invocations_pending += 1;
 
-    event!(
+    trace!(
         "ipc.admitted",
         "invocation={id} endpoint={} epoch={} facet={} grant={} origin_domain={} \
          origin_scope={} parent={parent_id} payload_len={} caps={} queued={} charged_bytes={charged} \
@@ -515,7 +515,11 @@ fn admit(
         true,
     );
 
-    wake_receiver(machine, endpoint);
+    // A caller that will block for the reply leaves its processor free, and
+    // that processor picks the receiver up on its way to idle; kicking another
+    // one would turn a round trip on one processor into two interrupts across
+    // two. A sender that keeps running has no free processor to offer.
+    wake_receiver(machine, endpoint, waiter.is_none());
     Ok(Admitted {
         invocation: invocation_index as u16,
         generation,
@@ -523,7 +527,7 @@ fn admit(
     })
 }
 
-fn wake_receiver(machine: &mut Machine, endpoint: usize) {
+fn wake_receiver(machine: &mut Machine, endpoint: usize, kick: bool) {
     let generation = machine.endpoints[endpoint].generation;
     for index in 0..machine.threads.len() {
         if machine.threads[index].state != ThreadState::Blocked {
@@ -534,6 +538,9 @@ fn wake_receiver(machine: &mut Machine, endpoint: usize) {
             machine.threads[index].wait_deadline_ns = 0;
             machine.threads[index].wake_status = status::OK;
             machine.threads[index].state = ThreadState::Ready;
+            if kick {
+                crate::sched::kick_idle(machine);
+            }
             return;
         }
     }
@@ -550,6 +557,7 @@ fn wake_waiter(machine: &mut Machine, invocation: usize, code: i64) {
     machine.threads[thread].wait_deadline_ns = 0;
     machine.threads[thread].wake_status = code;
     machine.threads[thread].state = ThreadState::Ready;
+    crate::sched::kick_idle(machine);
 }
 
 /// Admits a message without waiting for a reply.
@@ -666,7 +674,7 @@ pub fn receive(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i
                 machine.endpoints[endpoint].receiver_domain = ctx.domain as u16;
                 machine.endpoints[endpoint].receiver_generation =
                     machine.domains[ctx.domain].generation;
-                event!(
+                trace!(
                     "ipc.receiver_claimed",
                     "endpoint={} domain={} name={} route=self_claim",
                     machine.endpoints[endpoint].id,
@@ -795,7 +803,7 @@ fn deliver(
     begin_response(staging, ctx.operation);
     staging.write(BODY, result);
 
-    event!(
+    trace!(
         "ipc.delivered",
         "invocation={} endpoint={} receiver_domain={} facet={} caps={} payload_len={} \
          cancel={} ticket=0x{ticket:x}",
@@ -930,7 +938,7 @@ pub fn reply(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<
     machine.invocations[index].replied = true;
     machine.invocations[index].outcome = outcome_value::COMMITTED;
 
-    event!(
+    trace!(
         "ipc.replied",
         "invocation={} responder_domain={} payload_len={} caps={} result=0x{:x}",
         invocation.id,
@@ -973,7 +981,7 @@ pub fn begin_effect(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> 
         } else {
             status::SCOPE_CLOSED
         };
-        event!(
+        trace!(
             "effect.refused",
             "invocation={} origin_scope={} grant={} status={code} reason=barrier_or_expiry",
             invocation.id,
@@ -1016,7 +1024,7 @@ pub fn begin_effect(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> 
     machine.invocations[index].closure_reserved_ns = reserve;
     machine.scopes[invocation.origin_scope as usize].effects_pending += 1;
 
-    event!(
+    trace!(
         "effect.admitted",
         "invocation={} origin_scope={} service_scope={} grant={} closure_reserve_ns={reserve} \
          kind={}",
@@ -1069,7 +1077,7 @@ pub fn resolve_invocation(
         outcome_value::UNKNOWN => status::PENDING,
         _ => status::CANCELLED,
     };
-    event!(
+    trace!(
         "ipc.resolved",
         "invocation={} responder_domain={} outcome={} from_state={} effect={} \
          cancel={} detail=0x{:x} origin_scope={}",
@@ -1186,7 +1194,7 @@ pub fn bind_worker(machine: &mut Machine, ctx: &Ctx) -> Result<u64, i64> {
     scope::take_parallelism(&mut machine.scopes, charged);
     machine.threads[thread].parallelism_scope = Some(charged);
     machine.invocations[index].refs += 1;
-    event!(
+    trace!(
         "sched.bound",
         "thread={thread} domain={} invocation={} effective_scope={} origin_scope={} \
          account={} recovery={}",

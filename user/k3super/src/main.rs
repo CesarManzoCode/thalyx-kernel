@@ -64,6 +64,16 @@ const SERVICED_BEFORE_FENCE: u64 = 12;
 /// Windows the supervisor watches the shared budget over.
 const BUDGET_WINDOWS: u64 = 12;
 
+/// The most windows the supervisor waits for the writer to have run on every
+/// processor and the probe to have read its page.
+const SPREAD_WINDOWS: u64 = 200;
+
+/// The longest the supervisor waits for the callers' first call.
+const FIRST_CALL_NS: u64 = 20_000_000_000;
+/// How long a fenced scope is watched before its retirement is attempted
+/// regardless. Generous: the watch ends at quiescence.
+const DRAIN_DEADLINE_NS: u64 = 30_000_000_000;
+
 /// Where the supervisor keeps its own view of the shared page.
 const SUPER_SHARED_VADDR: u64 = 0x1000_0000;
 /// Where the supervisor keeps the object it is going to seal.
@@ -452,7 +462,7 @@ fn run() -> ! {
     };
     built += 1;
 
-    match build_worker(
+    let writer = match build_worker(
         mem_scope,
         worker_image,
         "writer",
@@ -472,9 +482,9 @@ fn run() -> ! {
         false,
         None,
     ) {
-        Some(domain) => drop_handle(domain),
+        Some(domain) => domain,
         None => fail(19, status::STATE_CONFLICT),
-    }
+    };
     built += 1;
 
     for instance in 0..2u64 {
@@ -529,6 +539,36 @@ fn run() -> ! {
     }
     k2::note(report::SHARED_COUNTER, shared_total());
 
+    // --- the conditions the next two steps are judged against --------------
+    // The withdrawal is judged against a probe that had read the page, and the
+    // seal against a writer whose address space had run on every processor,
+    // so the invalidation has every processor to reach. Both used to be
+    // assumed from the windows waited above; K6's scheduler, which keeps a
+    // woken thread on the processor that woke it when that processor is
+    // about to yield, spread the writer less, and the assumption failed on
+    // KVM. Waited for as conditions now, bounded, and reported either way.
+    let everyone = if limits.cpus_online >= 32 {
+        u32::MAX
+    } else {
+        (1u32 << limits.cpus_online) - 1
+    };
+    let mut waited = 0u64;
+    let mut mask = 0u32;
+    while waited < SPREAD_WINDOWS {
+        mask = k2::domain_query(writer).map_or(0, |info| info.space_cpu_mask);
+        // SAFETY: the supervisor mapped the shared object writable in its own
+        // domain at this address; slot 2 is the probe's word.
+        let probe_rounds =
+            unsafe { core::ptr::read_volatile((SUPER_SHARED_VADDR + 2 * 8) as *const u64) };
+        if mask & everyone == everyone && probe_rounds > 0 {
+            break;
+        }
+        sleep_until(timer, stop, k2::now_ns() + limits.cpu_window_ns);
+        waited += 1;
+    }
+    k2::note(report::SPREAD_OBSERVED, u64::from(mask) | (waited << 32));
+    drop_handle(writer);
+
     // --- a mapping taken away while the space is live ----------------------
     // The domain has two threads, so this is a withdrawal from an address space
     // another processor may be executing in right now. It does not answer until
@@ -570,9 +610,21 @@ fn run() -> ! {
     );
 
     // --- a barrier raised while calls are being admitted -------------------
+    // The first call is waited for as a condition, bounded: the callers share
+    // this supervisor's half-window of execution with the burners and the
+    // writer, and under KVM, where every diagnostic record a burner writes
+    // overruns its dispatch by milliseconds and leaves its scope in debt,
+    // their first turn can come seconds after they were built. A barrier
+    // raised before any call was admitted would have nothing to be measured
+    // against, and the gate says so.
     let mut serviced = 0u64;
     while serviced < SERVICED_BEFORE_FENCE {
-        let deadline = k2::now_ns() + 200_000_000;
+        let deadline = k2::now_ns()
+            + if serviced == 0 {
+                FIRST_CALL_NS
+            } else {
+                200_000_000
+            };
         match k2::endpoint_receive(work_endpoint, deadline, false) {
             Ok((_, invocation)) => {
                 let _ = k2::invocation_reply(invocation, serviced, b"ok");
@@ -614,9 +666,16 @@ fn read_word(memory: u64) -> u64 {
 }
 
 /// Fences, watches and retires a scope, reporting what it was still holding.
+///
+/// Watched until quiescent or until a deadline, not for a count of polls. The
+/// count was sixty-four twenty-millisecond waits, which held under TCG; under
+/// KVM the spinning workers of the budget scope pay for their own diagnostic
+/// notes out of a small budget, still had rounds to run when the sixty-fourth
+/// poll came, and finished three milliseconds after the retirement was refused.
 fn drain_and_retire(scope: u64, timer: u64, signal: u64) {
     let _ = k2::scope_fence(scope);
-    for _ in 0..64 {
+    let give_up = k2::now_ns() + DRAIN_DEADLINE_NS;
+    while k2::now_ns() < give_up {
         let Ok(report_) = k2::scope_drain_status(scope) else {
             return;
         };

@@ -17,6 +17,11 @@ use thalyx_abi::generated::scope_state;
 use crate::limits::{CPU_WINDOW_NS, MAX_SCOPES};
 use crate::obj::ScopeId;
 
+/// `scope.debt` records written per scope before the diagnostic plane counts
+/// overruns instead of writing each one. The observability contract permits
+/// coalescing and requires saying so; `scope.accounting` says so.
+pub const DEBT_RECORD_LIMIT: u32 = 16;
+
 /// Ceilings of one scope.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Limits {
@@ -188,6 +193,10 @@ pub struct Scope {
     pub overruns: u64,
     /// The largest overrun observed.
     pub max_overrun_ns: u64,
+    /// Overruns written out as their own `scope.debt` record. Every overrun is
+    /// counted in `overruns`; past [`DEBT_RECORD_LIMIT`] the plane stops writing
+    /// one line per window and the summary states how many it stands for.
+    pub debt_records: u32,
     /// Threads whose owning domain belongs to this scope.
     pub threads: u32,
     /// Threads currently charging this scope.
@@ -206,6 +215,8 @@ pub struct Scope {
     pub drain_token: u64,
     /// Live children, so a parent is not reused while a child exists.
     pub children: u32,
+    /// Capability entries naming this scope, wherever they are held.
+    pub refs: u32,
 }
 
 impl Scope {
@@ -250,6 +261,7 @@ impl Scope {
             windows_closed: 0,
             overruns: 0,
             max_overrun_ns: 0,
+            debt_records: 0,
             threads: 0,
             parallelism_used: 0,
             invocations_pending: 0,
@@ -259,6 +271,7 @@ impl Scope {
             last_progress_ns: 0,
             drain_token: 0,
             children: 0,
+            refs: 0,
         }
     }
 
@@ -376,7 +389,7 @@ pub fn reserve(table: &mut Table, scope: ScopeId, resource: Resource, amount: u6
         // limit whose accounting nobody can check: the record names the
         // ancestor that actually bound the request, which is not always the one
         // the caller addressed.
-        crate::event!(
+        crate::trace!(
             "scope.limit_refused",
             "scope={scope} binding_scope={binding} binding_id={} resource={} \
              requested={amount} used={} limit={} state={}",
@@ -431,12 +444,19 @@ pub fn roll_window(table: &mut Table, now_ns: u64) {
         }
         let closing = node.cpu_window_ns;
         let overrun = node.cpu_window_ns.saturating_sub(node.limits.cpu_budget_ns);
-        if overrun != 0 {
+        // Written for the first overruns of a scope and counted after that.
+        // One line per window was a line per ten milliseconds per spinning
+        // scope, written from the timer with the machine lock held; under KVM
+        // each line cost about a millisecond of port I/O, the run lasted
+        // longer, more windows closed in debt, and the records fed on
+        // themselves until a drain that should have finished timed out.
+        let written = overrun != 0 && node.debt_records < DEBT_RECORD_LIMIT;
+        if written {
             // Carried debt that nobody can see is not a limit, it is a number.
             // The record is emitted only when a window actually closed over
             // budget, so it says something happened rather than that a window
             // went by.
-            crate::event!(
+            crate::trace!(
                 "scope.debt",
                 "scope={index} id={} label={} window={window} overrun_ns={overrun} \
                  debt_ns={} budget_ns={} carried_into_next=1",
@@ -447,6 +467,9 @@ pub fn roll_window(table: &mut Table, now_ns: u64) {
             );
         }
         let node = &mut table[index];
+        if written {
+            node.debt_records += 1;
+        }
         node.windows_closed += 1;
         if closing > node.max_window_ns {
             node.max_window_ns = closing;
@@ -755,6 +778,44 @@ pub fn pending(table: &Table, root: ScopeId) -> Pending {
     total.pages = table[root as usize].memory_pages;
     total.metadata = table[root as usize].metadata;
     total
+}
+
+/// Frees the table slot of a retired scope that nothing names and nothing
+/// depends on: no capability entry, no child scope, no frame of its still in
+/// quarantine. The slot keeps its generation, so a handle that outlived the
+/// scope names nothing rather than the next occupant, and the parent's count
+/// of children goes down by one.
+///
+/// Called when a creation finds no empty slot, not at retirement: a retired
+/// scope's slot is also its accounting, which the run's summary reads at the
+/// end. Until K6 a retired scope kept its slot for the rest of the boot, and
+/// K6's closure benchmark, which builds and retires a scope per sample, found
+/// the table of twenty-four full after twenty-two.
+pub fn collect_retired(machine: &mut crate::state::Machine, index: usize) -> bool {
+    let node = &machine.scopes[index];
+    if node.state != State::Retired || node.refs != 0 || node.threads != 0 {
+        return false;
+    }
+    let (generation, id, parent) = (node.generation, node.id, node.parent);
+    let has_child = machine
+        .scopes
+        .iter()
+        .any(|other| other.state != State::Empty && other.parent == Some(index as ScopeId));
+    if has_child {
+        return false;
+    }
+    machine.allocator().reassign_quarantine(
+        crate::mm::Owner::Scope(index as u16),
+        crate::mm::Owner::Kernel,
+    );
+    crate::trace!("scope.collected", "scope={index} id={id}");
+    if let Some(parent) = parent {
+        machine.scopes[parent as usize].children =
+            machine.scopes[parent as usize].children.saturating_sub(1);
+    }
+    machine.scopes[index] = Scope::empty();
+    machine.scopes[index].generation = generation;
+    true
 }
 
 /// Promotes fenced scopes with nothing left to observe into `Quiescent`.

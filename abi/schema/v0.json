@@ -14,7 +14,7 @@
   ],
   "version": {
     "major": 0,
-    "minor": 3
+    "minor": 4
   },
   "limits": {
     "max_descriptor_len": 4096,
@@ -28,9 +28,9 @@
     "cpu_window_ns": 10000000,
     "cpu_quantum_ns": 1000000,
     "page_size": 4096,
-    "control_log_capacity": 64,
+    "control_log_capacity": 256,
     "control_log_reserved": 8,
-    "receipt_batch": 4
+    "receipt_batch": 16
   },
   "flags": [
     {
@@ -848,7 +848,7 @@
       "rights": [
         "LOG_READ"
       ],
-      "doc": "Read a bounded batch of receipts and the loss count."
+      "doc": "Read a bounded batch of receipts and the loss count. With a deadline, waits until a full batch is there or the deadline passes, and answers with what there is; without one, answers at once."
     },
     {
       "name": "LOG_APPEND",
@@ -1821,8 +1821,9 @@
           "type": "u32"
         },
         {
-          "name": "reserved0",
-          "type": "u32"
+          "name": "space_cpu_mask",
+          "type": "u32",
+          "doc": "Processors this domain's address space has executed on, one bit each: the set an invalidation of its translations has to reach."
         },
         {
           "name": "domain_id",
@@ -2447,7 +2448,7 @@
         },
         {
           "name": "records",
-          "type": "struct:ReceiptRecord[4]"
+          "type": "struct:ReceiptRecord[16]"
         }
       ]
     },

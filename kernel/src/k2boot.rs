@@ -22,13 +22,13 @@
 use thalyx_abi::{boot_slot, right};
 use thalyx_boot_protocol::{BootModule, HHDM_BASE, PAGE_SIZE};
 
-use crate::event;
 use crate::limits::{CONTROL_LOG_CAPACITY, CONTROL_LOG_RESERVED, MAX_OBJECT_PAGES, MAX_THREADS};
 use crate::memobj::{MemoryObject, State as MemState};
 use crate::mm::Owner;
 use crate::obj::{NO_GRANT, ObjKind, ObjRef, ScopeId};
 use crate::scope::{self, Limits, Resource, State};
 use crate::state::Machine;
+use crate::{event, trace};
 
 /// Recovery budget the root scope keeps for closing obligations, per window.
 const ROOT_CLOSURE_RESERVE_NS: u64 = 2_000_000;
@@ -47,10 +47,22 @@ const ROOT_METADATA: u64 = 2048;
 /// Queue bytes the root scope may hold pending.
 const ROOT_QUEUE_BYTES: u64 = 64 * 1024;
 
+/// Execution the machine can admit per window: one window per processor that
+/// completed the handshake. The resource contract lets a budget exceed the
+/// window where the parallelism does, and bounds it by "the permitted cores";
+/// this is that bound for the root and the system scope beneath it. Until K6
+/// it was one window regardless, and a four-processor machine admitted one
+/// processor's worth of work per window: K6's compute scaling benchmark ran
+/// four threads and got one thread's throughput.
+fn machine_budget_ns() -> u64 {
+    crate::limits::CPU_WINDOW_NS * u64::from(crate::smp::online_count().max(1))
+}
+
 /// Creates the root scope that owns everything the machine has.
 pub fn establish_root(machine: &mut Machine) -> ScopeId {
     let free = machine.allocator().free_frames() as u64;
     let id = machine.next_id().expect("first identity");
+    let budget = machine_budget_ns();
     let node = &mut machine.scopes[0];
     *node = scope::Scope::empty();
     node.state = State::Open;
@@ -62,7 +74,7 @@ pub fn establish_root(machine: &mut Machine) -> ScopeId {
     node.limits = Limits {
         memory_pages: free,
         metadata_objects: ROOT_METADATA,
-        cpu_budget_ns: crate::limits::CPU_WINDOW_NS,
+        cpu_budget_ns: budget,
         queue_bytes: ROOT_QUEUE_BYTES,
         closure_reserve_ns: ROOT_CLOSURE_RESERVE_NS,
         parallelism: MAX_THREADS as u32,
@@ -71,10 +83,10 @@ pub fn establish_root(machine: &mut Machine) -> ScopeId {
     event!(
         "scope.root",
         "scope=0 id={id} memory_pages={free} metadata={ROOT_METADATA} \
-         cpu_budget_ns={} window_ns={} closure_reserve_ns={ROOT_CLOSURE_RESERVE_NS} \
-         parallelism={}",
+         cpu_budget_ns={budget} window_ns={} processors={} \
+         closure_reserve_ns={ROOT_CLOSURE_RESERVE_NS} parallelism={}",
         crate::limits::CPU_WINDOW_NS,
-        crate::limits::CPU_WINDOW_NS,
+        crate::smp::online_count(),
         MAX_THREADS
     );
     0
@@ -131,7 +143,7 @@ fn child_scope(
     node.label[..len].copy_from_slice(&label[..len]);
     node.limits = limits;
     machine.scopes[parent as usize].children += 1;
-    event!(
+    trace!(
         "scope.created",
         "scope={index} id={id} label={} parent={parent} depth={depth} memory_pages={} \
          metadata={} cpu_budget_ns={} parallelism={} queue_bytes={} closure_reserve_ns={}",
@@ -197,6 +209,7 @@ fn image_object(
         dma_grants: 0,
         label,
         refs: 0,
+        unmapped_at: 0,
     };
 
     // SAFETY: the loader copied the module into reserved memory covered by the
@@ -214,7 +227,7 @@ fn image_object(
     // perimeter can write the object from here on, which is what the seal
     // promises.
     machine.memories[index].state = MemState::Sealed;
-    event!(
+    trace!(
         "mem.sealed",
         "object={id} label={} pages={pages} writers_withdrawn=0 pages_unmapped=0 \
          remaining_maps=0 perimeter=uniprocessor_no_dma origin=boot_module",
@@ -263,7 +276,7 @@ pub fn establish_supervisor(
         Limits {
             memory_pages: free.min(machine.scopes[root as usize].limits.memory_pages),
             metadata_objects: ROOT_METADATA - 8,
-            cpu_budget_ns: crate::limits::CPU_WINDOW_NS,
+            cpu_budget_ns: machine_budget_ns(),
             queue_bytes: ROOT_QUEUE_BYTES,
             closure_reserve_ns: ROOT_CLOSURE_RESERVE_NS,
             parallelism: MAX_THREADS as u32,

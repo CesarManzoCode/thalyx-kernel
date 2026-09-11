@@ -54,11 +54,11 @@ pub struct Engine {
 /// what llama.cpp asks for, not what it uses. The first ceiling, sixteen
 /// megabytes, ended in `GGML_ASSERT(ctx->mem_buffer != NULL)`. What residency
 /// really costs is read from the scope after the run.
-fn engine_limits(cpu_window_ns: u64) -> ScopeLimits {
+fn engine_limits(cpu_budget_ns: u64) -> ScopeLimits {
     ScopeLimits {
         memory_pages: 16384,
         metadata_objects: 160,
-        cpu_budget_ns: cpu_window_ns / 2,
+        cpu_budget_ns,
         queue_bytes: 16384,
         // The engine finishes an inference whose caller has gone with this
         // reserve, a token at a time, until it notices and stops.
@@ -73,13 +73,19 @@ fn engine_limits(cpu_window_ns: u64) -> ScopeLimits {
 /// Answers `None` with a note naming the step when anything refuses, and when
 /// the engine stops before it is ready -- which is what a model llama.cpp will
 /// not load looks like from here.
+///
+/// `cpu_budget_ns` is the engine scope's execution per window: K5 gives it
+/// half a window, K6 a whole processor's worth, so that what K6 times is the
+/// engine and not the budget. `quiet` asks the engine for none of the notes
+/// that describe a request; K5 reads them, K6 measures without them.
 pub fn build(
     system: u64,
     supervision: u64,
     image: u64,
     model: u64,
     model_bytes: u64,
-    cpu_window_ns: u64,
+    cpu_budget_ns: u64,
+    quiet: bool,
     seed: u64,
 ) -> Option<Engine> {
     let Ok(info) = k2::memory_query(model) else {
@@ -100,7 +106,7 @@ pub fn build(
         k2::note(note::BUILD_STEP_FAILED, 305);
         return None;
     }
-    let Ok(scope) = k2::scope_create_child(system, engine_limits(cpu_window_ns), name16("engine"))
+    let Ok(scope) = k2::scope_create_child(system, engine_limits(cpu_budget_ns), name16("engine"))
     else {
         k2::note(note::BUILD_STEP_FAILED, 302);
         return None;
@@ -127,7 +133,7 @@ pub fn build(
         seed,
         arg0: CONTEXT_TOKENS,
         arg1: COMPUTE_THREADS,
-        arg2: 0,
+        arg2: u64::from(quiet),
         arg3: 0,
     };
     let recipe = Recipe {

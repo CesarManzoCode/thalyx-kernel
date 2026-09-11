@@ -1,0 +1,525 @@
+{
+  "schema": "thalyx-k6-bench/v1",
+  "comment": [
+    "The paired protocols of K6, from one source. Every benchmark here is run",
+    "on two backends -- this kernel, and Linux on the same virtual machine --",
+    "from the same C source, with only the primitive under measurement",
+    "differing, and this file is where both sides and their judge read what a",
+    "benchmark is, what each side does for it, and what the comparison is",
+    "allowed to conclude. `tools/gen_k6_bench.py` derives the C header both C",
+    "builds include and the Rust module the native supervisor reads;",
+    "`tools/check_k6_bench.py` regenerates and compares.",
+    "",
+    "`equivalence` is the part that decides what a result may say, and it is",
+    "decided here, before anything is measured:",
+    "  equivalent   the same contract on both sides. A difference whose",
+    "               confidence interval excludes no-difference may be stated as",
+    "               a speed difference of that primitive on this platform.",
+    "  comparable   the same question answered by primitives with different",
+    "               guarantees, listed in `differences`. The two costs are",
+    "               reported side by side with their ratio; the conclusion is",
+    "               about each primitive with its guarantees, never that one",
+    "               kernel is faster.",
+    "  different    the two sides do different things that answer related",
+    "               questions. Both numbers are reported; no ratio is",
+    "               interpreted.",
+    "  native_only  a characterization of a mechanism Linux does not have in",
+    "               this form. No comparison.",
+    "",
+    "Samples are time-stamp-counter cycles unless `unit` says otherwise. Both",
+    "backends read the same counter on the same virtual machine, and each",
+    "calibrates it against its own monotonic clock and reports the result, so",
+    "a disagreement between the two calibrations is visible rather than hidden",
+    "inside a conversion.",
+    "",
+    "The ROLE_, SLOT_, _BIT and SHARED_ constants are the agreement between the",
+    "native supervisor and the native benchmark program: which role a domain is",
+    "built as, which capability slot holds which facet, which signal bits hand",
+    "an entry from the program to the supervisor and back, and where the plan",
+    "and a handoff request sit in the page the supervisor shares with the",
+    "program. The Linux build ignores them; they name nothing there."
+  ],
+  "version": {
+    "major": 1,
+    "minor": 0
+  },
+  "constants": {
+    "PLAN_MAGIC": 3544385891052868683,
+    "PLAN_VERSION": 1,
+    "PLAN_ENTRIES": 32,
+    "SAMPLES_MAX": 16384,
+    "CAL_WINDOW_NS": 200000000,
+    "SLICE_NS": 10000000,
+    "LOST_SAMPLE": 4294967295,
+    "ENGINE_PROMPTS": 5,
+    "ROLE_CLIENT": 16,
+    "ROLE_SERVER": 17,
+    "ROLE_SPIN": 18,
+    "ROLE_ASKER": 19,
+    "ROLE_IDLE": 20,
+    "SLOT_PAIR0": 2,
+    "SLOT_PAIR1": 9,
+    "SLOT_PAIR2": 10,
+    "SLOT_PAIR3": 11,
+    "SLOT_ENGINE": 12,
+    "SLOT_HANDOFF": 13,
+    "HANDOFF_REQUEST_BIT": 1,
+    "HANDOFF_DONE_BIT": 2,
+    "ASKER_ASKING_BIT": 4,
+    "IDLE_READY_BIT": 8,
+    "SHARED_PLAN_OFFSET": 0,
+    "SHARED_HANDOFF_OFFSET": 2048,
+    "SHARED_BYTES": 4096,
+    "WAKE_BIT": 1099511627776,
+    "MAP_VADDR": 1879048192,
+    "SEAL_VADDR": 1946157056,
+    "PROMPT_VADDR": 2013265920
+  },
+  "cancel_grammar": "root ::= \"hola \" root",
+  "notes": {
+    "PLAN": {
+      "value": 24576,
+      "doc": "The plan this run follows. Value: its seed."
+    },
+    "TSC_HZ": {
+      "value": 24577,
+      "doc": "Time-stamp-counter frequency calibrated against this backend's monotonic clock over CAL_WINDOW_NS."
+    },
+    "BEGIN": {
+      "value": 24578,
+      "doc": "A benchmark starts. Value: id | param << 16 | samples << 32."
+    },
+    "SAMPLE": {
+      "value": 24579,
+      "doc": "Two samples, the earlier in the low 32 bits. LOST_SAMPLE marks a sample that was not taken."
+    },
+    "END": {
+      "value": 24580,
+      "doc": "A benchmark ended. Value: id | errors << 32."
+    },
+    "ERROR": {
+      "value": 24581,
+      "doc": "An operation under measurement failed. Value: id | (status & 0xffffffff) << 32."
+    },
+    "MISMATCH": {
+      "value": 24582,
+      "doc": "An engine answer was not the reference completion. Value: prompt index."
+    },
+    "CHECK": {
+      "value": 24583,
+      "doc": "A correctness check the benchmark makes on its own work passed. Value: id | count << 32."
+    },
+    "AUX": {
+      "value": 24584,
+      "doc": "A benchmark-specific quantity. Value: id | quantity index << 16 | value << 32."
+    },
+    "DONE": {
+      "value": 24831,
+      "doc": "The plan ran to its end. Value: benchmarks run."
+    },
+    "DIGEST": {
+      "value": 24585,
+      "doc": "FNV-1a of the first answer an engine gave to one prompt. Value: the digest; the prompt is the AUX note before it."
+    }
+  },
+  "families": {
+    "primitive": "What one kernel primitive costs, with its guarantees described (linux-comparison question 1).",
+    "sched": "Scheduling behaviour a program observes: how long a woken thread waits to run.",
+    "quota": "How closely an aggregate CPU budget is enforced.",
+    "scale": "Throughput as independent work is added on four processors.",
+    "closure": "Stopping a unit of work and getting its resources back.",
+    "engine": "The real load: Thalyx's resident engine answering the fixture's questions (linux-comparison question 2).",
+    "v0": "Data for re-evaluating the V0 interface parameters."
+  },
+  "benchmarks": [
+    {
+      "id": 1,
+      "name": "entry.version",
+      "family": "primitive",
+      "param": "none",
+      "params": [
+        0
+      ],
+      "unit": "cycles",
+      "statistic": "latency",
+      "equivalence": "equivalent",
+      "native": "the VERSION_QUERY entry: no descriptor, no object, no lock",
+      "linux": "syscall(SYS_getppid)",
+      "differences": []
+    },
+    {
+      "id": 2,
+      "name": "entry.clock",
+      "family": "primitive",
+      "param": "none",
+      "params": [
+        0
+      ],
+      "unit": "cycles",
+      "statistic": "latency",
+      "equivalence": "equivalent",
+      "native": "the CLOCK_QUERY entry: a monotonic reading converted in the kernel",
+      "linux": "syscall(SYS_clock_gettime, CLOCK_MONOTONIC), bypassing the vDSO",
+      "differences": []
+    },
+    {
+      "id": 3,
+      "name": "ipc.call",
+      "family": "primitive",
+      "param": "payload_bytes",
+      "params": [
+        0,
+        64,
+        256
+      ],
+      "unit": "cycles",
+      "statistic": "latency",
+      "equivalence": "comparable",
+      "native": "ENDPOINT_CALL from one domain to another that answers with RECEIVE and INVOCATION_REPLY, the payload copied both ways",
+      "linux": "a SOCK_SEQPACKET socket pair between two processes: send and recv, the server receiving with SO_PASSCRED so every message carries the sender's credentials, the payload copied both ways",
+      "differences": [
+        "native: the kernel stamps origin domain, origin scope, facet and causal parent into a header the payload cannot overwrite; linux: the kernel attaches pid, uid and gid",
+        "native: every admission reserves and writes a control receipt, which an auditor has to drain; linux: nothing is recorded",
+        "native: queue bytes are charged to the caller's scope and an invocation object is created and discharged; linux: socket buffer accounting against the sender",
+        "native: the reply is a one-shot object bound to the invocation; linux: any later message on the socket"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "ipc.caps",
+      "family": "primitive",
+      "param": "capabilities",
+      "params": [
+        1,
+        4
+      ],
+      "unit": "cycles",
+      "statistic": "latency",
+      "equivalence": "comparable",
+      "native": "ENDPOINT_CALL copying N capabilities to memory objects into the receiver, which closes them before replying",
+      "linux": "sendmsg with SCM_RIGHTS carrying N descriptors of memfd objects; the receiver closes them before replying",
+      "differences": [
+        "native: every capability is a grant in the caller's lineage, installed in the receiver at admission, all or none, and charged as metadata; linux: descriptors are duplicated into the receiver's table at receive",
+        "native: the batch is refused whole if the receiver has no room; linux: descriptors that do not fit are discarded with MSG_CTRUNC"
+      ]
+    },
+    {
+      "id": 5,
+      "name": "mem.map",
+      "family": "primitive",
+      "param": "pages",
+      "params": [
+        1,
+        64
+      ],
+      "unit": "cycles",
+      "statistic": "latency",
+      "equivalence": "comparable",
+      "native": "SCOPE_CREATE_MEMORY, DOMAIN_MAP, a write to every page, DOMAIN_UNMAP and CAP_CLOSE",
+      "linux": "mmap of anonymous private memory, a write to every page, munmap",
+      "differences": [
+        "native: pages are zeroed and charged to the caller's scope when the object is created; linux: pages are allocated and zeroed on first touch and charged to the process",
+        "native: DOMAIN_UNMAP does not return until every processor the domain ran on has acknowledged the invalidation; linux: munmap invalidates the processors in the mm's cpumask"
+      ]
+    },
+    {
+      "id": 6,
+      "name": "mem.seal",
+      "family": "primitive",
+      "param": "pages",
+      "params": [
+        16
+      ],
+      "unit": "cycles",
+      "statistic": "latency",
+      "equivalence": "comparable",
+      "native": "create an object, map it writable, write it, MEMORY_SEAL (which withdraws the writable mapping and waits for every processor), map it read-only, read it, unmap, close",
+      "linux": "memfd_create, ftruncate, mmap writable, write, munmap, F_ADD_SEALS with F_SEAL_WRITE|F_SEAL_SHRINK|F_SEAL_GROW, mmap read-only, read, munmap, close",
+      "differences": [
+        "native: the seal withdraws writable mappings itself; linux: sealing is refused while a writable mapping exists, so the program removes it first",
+        "native: after the seal no writer exists in the declared perimeter, DMA excepted under the weak profile; linux: the same for the file's mappings"
+      ]
+    },
+    {
+      "id": 7,
+      "name": "cap.derive",
+      "family": "primitive",
+      "param": "none",
+      "params": [
+        0
+      ],
+      "unit": "cycles",
+      "statistic": "latency",
+      "equivalence": "comparable",
+      "native": "CAP_DERIVE narrowing the rights of a memory capability, then CAP_CLOSE of the derived handle",
+      "linux": "fcntl(F_DUPFD_CLOEXEC) of a memfd descriptor, then close",
+      "differences": [
+        "native: the derived grant narrows rights, joins the lineage a barrier reaches, and is charged as metadata; linux: the duplicate carries the same rights and nothing can close the lineage"
+      ]
+    },
+    {
+      "id": 8,
+      "name": "sched.wake",
+      "family": "sched",
+      "param": "none",
+      "params": [
+        0
+      ],
+      "unit": "cycles",
+      "statistic": "latency",
+      "equivalence": "equivalent",
+      "native": "a thread raises a signal another thread of the same domain is blocked on and keeps running; the sample is the time until the woken thread executes",
+      "linux": "a thread wakes another thread of the same process blocked in FUTEX_WAIT and keeps running; the sample is the time until the woken thread executes",
+      "differences": []
+    },
+    {
+      "id": 9,
+      "name": "quota.share",
+      "family": "quota",
+      "param": "budget_percent",
+      "params": [
+        25
+      ],
+      "unit": "ns",
+      "statistic": "share",
+      "equivalence": "equivalent",
+      "native": "a thread that never blocks, in a scope whose budget is the given share of each 10 ms window; the sample is the execution it received in one window",
+      "linux": "a thread that never blocks, in a cgroup whose cpu.max is the given share of a 10 ms period; the sample is the execution it received in one period",
+      "differences": []
+    },
+    {
+      "id": 10,
+      "name": "scale.ipc",
+      "family": "scale",
+      "param": "pairs",
+      "params": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "unit": "count",
+      "statistic": "throughput",
+      "equivalence": "comparable",
+      "native": "N independent caller/answerer pairs on N endpoints; the sample is round trips completed by all pairs in one 10 ms slice",
+      "linux": "N independent SOCK_SEQPACKET pairs; the sample is round trips completed by all pairs in one 10 ms slice",
+      "differences": [
+        "native: the guarantees of ipc.call, including a receipt per admission that one auditor drains for all pairs",
+        "native: one machine lock serialises every kernel entry that touches an object; linux: per-socket locks"
+      ]
+    },
+    {
+      "id": 11,
+      "name": "scale.compute",
+      "family": "scale",
+      "param": "threads",
+      "params": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "unit": "count",
+      "statistic": "throughput",
+      "equivalence": "equivalent",
+      "native": "N threads running a fixed integer loop with no kernel entry; the sample is loop iterations completed by all threads in one 10 ms slice",
+      "linux": "the same loop in N threads of one process",
+      "differences": []
+    },
+    {
+      "id": 12,
+      "name": "closure.unit",
+      "family": "closure",
+      "param": "none",
+      "params": [
+        0
+      ],
+      "unit": "cycles",
+      "statistic": "latency",
+      "equivalence": "different",
+      "native": "SCOPE_FENCE, DOMAIN_TERMINATE and SCOPE_RETIRE, until the retirement succeeds, of a scope whose one domain has signalled that it is about to block in the kernel; quantities 1-4 break the first sample into fence, terminate and retire microseconds and retire attempts",
+      "linux": "SIGKILL to a child process blocked in the kernel, then waitpid",
+      "differences": [
+        "native: the barrier also reaches every capability derived under the scope, withdraws its undelivered messages, and the retirement is refused until nothing it sponsors is outstanding; linux: the process ends and its descriptors close",
+        "native: the domain's frames pass through a quarantine that waits for every processor's invalidation before reuse; linux: pages are freed as the mm is torn down"
+      ]
+    },
+    {
+      "id": 13,
+      "name": "engine.load",
+      "family": "engine",
+      "param": "none",
+      "params": [
+        0
+      ],
+      "unit": "us",
+      "statistic": "latency",
+      "equivalence": "comparable",
+      "native": "from activating the engine domain to its ready signal: llama.cpp loads the pinned model from the sealed object into memory charged to the engine's scope",
+      "linux": "from fork of Thalyx's engine, unchanged, to its ready frame: llama.cpp loads the same model with mmap",
+      "differences": [
+        "native: the weights are read into memory the engine's scope pays for; linux: the model file is mapped",
+        "native: the libc, allocator and math library are this repository's; linux: glibc"
+      ]
+    },
+    {
+      "id": 14,
+      "name": "engine.infer",
+      "family": "engine",
+      "param": "fixture_prompt",
+      "params": [
+        0,
+        1,
+        4
+      ],
+      "unit": "us",
+      "statistic": "latency",
+      "equivalence": "equivalent",
+      "native": "one request to the resident engine with the fixture's prompt, answered with the same completion the reference gives; the sample is the caller's time from request to answer",
+      "linux": "one request frame to Thalyx's engine, unchanged, with the same prompt; the sample is the caller's time from request to answer",
+      "differences": [
+        "the libc, allocator and math library differ, and the answer is checked byte for byte against the reference so the work is the same work"
+      ]
+    },
+    {
+      "id": 15,
+      "name": "engine.cancel",
+      "family": "engine",
+      "param": "none",
+      "params": [
+        0
+      ],
+      "unit": "us",
+      "statistic": "latency",
+      "equivalence": "different",
+      "native": "a request for four hundred tokens under a grammar that cannot end (cancel_grammar) is cancelled by fencing the caller's scope once the engine has computed ten milliseconds for it; the sample is the time from the fence to the next answered request from another caller, the engine staying resident",
+      "linux": "the same request to Thalyx's engine is cancelled by SIGKILL to the engine once it has computed ten milliseconds for it, as the Linux profile declares; the sample is the time from the signal to the next answered request, which needs the engine started and loaded again",
+      "differences": [
+        "this is the declared cancellation mechanism of each profile, not the same mechanism: scope_closure_between_tokens against process_signal",
+        "the fixture's own long prompt ends at an end-of-generation token after a few tokens on this model, so the request is made under a grammar that never accepts one"
+      ]
+    },
+    {
+      "id": 16,
+      "name": "ipc.lineage",
+      "family": "v0",
+      "param": "extra_derivations",
+      "params": [
+        0,
+        8,
+        16,
+        28
+      ],
+      "unit": "cycles",
+      "statistic": "latency",
+      "equivalence": "native_only",
+      "native": "ENDPOINT_CALL with no payload through a facet the caller derived further by the given number of steps, so admission walks that many more grants; the facet's own depth is reported beside it",
+      "linux": "",
+      "differences": []
+    },
+    {
+      "id": 17,
+      "name": "audit.drain",
+      "family": "v0",
+      "param": "none",
+      "params": [
+        0
+      ],
+      "unit": "cycles",
+      "statistic": "latency",
+      "equivalence": "native_only",
+      "native": "LOG_READ and LOG_ACK of one batch of receipts by the auditor, per batch of RECEIPT_BATCH",
+      "linux": "",
+      "differences": []
+    }
+  ],
+  "structs": [
+    {
+      "name": "Plan",
+      "doc": "What one boot runs, in order. The same bytes reach both backends: a module of the native package, a file of the Linux one.",
+      "fields": [
+        {
+          "name": "magic",
+          "type": "u64",
+          "doc": "PLAN_MAGIC."
+        },
+        {
+          "name": "version",
+          "type": "u32",
+          "doc": "PLAN_VERSION."
+        },
+        {
+          "name": "count",
+          "type": "u32",
+          "doc": "Entries in use."
+        },
+        {
+          "name": "seed",
+          "type": "u64",
+          "doc": "Seed the host drew for this boot; it decided the order of the entries."
+        },
+        {
+          "name": "round",
+          "type": "u32",
+          "doc": "Which round of the paired design this boot is."
+        },
+        {
+          "name": "flags",
+          "type": "u32",
+          "doc": "Reserved, zero."
+        },
+        {
+          "name": "model_bytes",
+          "type": "u64",
+          "doc": "Bytes of the engine model the package carries; a sealed module is whole pages, so the length is said here and checked against the object. Zero when no entry asks the engine. Linux reads the file and ignores it."
+        },
+        {
+          "name": "bench",
+          "type": "u32[32]",
+          "doc": "Benchmark ids, in the order they run."
+        },
+        {
+          "name": "param",
+          "type": "u32[32]",
+          "doc": "The parameter of each entry."
+        },
+        {
+          "name": "samples",
+          "type": "u32[32]",
+          "doc": "Samples each entry takes."
+        },
+        {
+          "name": "warmup",
+          "type": "u32[32]",
+          "doc": "Unrecorded iterations before them."
+        }
+      ]
+    },
+    {
+      "name": "Handoff",
+      "doc": "An entry the native program hands to its supervisor, which runs it and answers with HANDOFF_DONE_BIT. At SHARED_HANDOFF_OFFSET.",
+      "fields": [
+        {
+          "name": "bench",
+          "type": "u32",
+          "doc": "Benchmark id."
+        },
+        {
+          "name": "param",
+          "type": "u32",
+          "doc": "Its parameter."
+        },
+        {
+          "name": "samples",
+          "type": "u32",
+          "doc": "Samples to take."
+        },
+        {
+          "name": "status",
+          "type": "u32",
+          "doc": "Written by the supervisor: zero, or the negated status it stopped with."
+        }
+      ]
+    }
+  ]
+}

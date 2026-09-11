@@ -212,6 +212,27 @@ impl FrameAllocator {
             .count()
     }
 
+    /// Moves the quarantined frames of `from` onto `to`'s account.
+    ///
+    /// A frame in quarantine still belongs to an owner's tally, and an owner
+    /// whose table slot is about to be reused must not have frames credited
+    /// to whoever takes the slot next when they are finally released. The
+    /// frames themselves are untouched: they wait out the same invalidation.
+    /// Returns how many moved.
+    pub fn reassign_quarantine(&mut self, from: Owner, to: Owner) -> usize {
+        let mut moved = 0;
+        for slot in &mut self.quarantine {
+            if slot.used && slot.owner == from {
+                slot.owner = to;
+                moved += 1;
+            }
+        }
+        let (source, target) = (from.slot(), to.slot());
+        self.charged[source] = self.charged[source].saturating_sub(moved);
+        self.charged[target] = self.charged[target].saturating_add(moved);
+        moved
+    }
+
     /// Most frames the quarantine has held at once.
     #[must_use]
     pub const fn quarantine_peak(&self) -> usize {

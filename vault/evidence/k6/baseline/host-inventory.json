@@ -1,0 +1,340 @@
+{
+  "note": "an inventory of the development host, the physical machine under the KVM platform; this kernel was not booted on it directly",
+  "kernel": {
+    "release": "7.2.4-arch1-2",
+    "version": "#1 SMP PREEMPT_DYNAMIC Tue, 08 Sep 2026 10:22:31 +0000"
+  },
+  "cpu": {
+    "vendor_id": "AuthenticAMD",
+    "cpu_family": "25",
+    "model": "80",
+    "model_name": "AMD Ryzen 5 5600G with Radeon Graphics",
+    "stepping": "0",
+    "microcode": "0xa500012",
+    "cpu_MHz": "3558.365",
+    "cache_size": "512 KB",
+    "siblings": "12",
+    "cpu_cores": "6",
+    "features_of_interest": {
+      "svm": true,
+      "vmx": false,
+      "smep": true,
+      "smap": true,
+      "x2apic": true,
+      "pdpe1gb": true,
+      "invariant_tsc": true,
+      "constant_tsc": true,
+      "nonstop_tsc": true,
+      "avx": true,
+      "avx2": true,
+      "xsave": true,
+      "sse4_2": true,
+      "pcid": false,
+      "invpcid": true
+    },
+    "logical_processors": 12,
+    "smt_sibling_groups": [
+      "0,6",
+      "1,7",
+      "2,8",
+      "3,9",
+      "4,10",
+      "5,11"
+    ],
+    "governor": "powersave",
+    "boost": "1",
+    "host_vulnerabilities": {
+      "gather_data_sampling": "Not affected",
+      "ghostwrite": "Not affected",
+      "indirect_target_selection": "Not affected",
+      "itlb_multihit": "Not affected",
+      "l1tf": "Not affected",
+      "mds": "Not affected",
+      "meltdown": "Not affected",
+      "mmio_stale_data": "Not affected",
+      "old_microcode": "Not affected",
+      "reg_file_data_sampling": "Not affected",
+      "retbleed": "Not affected",
+      "spec_rstack_overflow": "Mitigation: Safe RET",
+      "spec_store_bypass": "Mitigation: Speculative Store Bypass disabled via prctl",
+      "spectre_v1": "Mitigation: usercopy/swapgs barriers and __user pointer sanitization",
+      "spectre_v2": "Mitigation: Retpolines; IBPB: conditional; IBRS_FW; STIBP: always-on; RSB filling; PBRSB-eIBRS: Not affected; BHI: Not affected",
+      "srbds": "Not affected",
+      "tsa": "Mitigation: Clear CPU buffers",
+      "tsx_async_abort": "Not affected",
+      "vmscape": "Mitigation: IBPB before exit to userspace"
+    }
+  },
+  "memory": {
+    "MemTotal": "15635072 kB",
+    "MemAvailable": "11357420 kB",
+    "SwapTotal": "4194300 kB"
+  },
+  "firmware": {
+    "boot": "uefi",
+    "secure_boot_efivar_present": true,
+    "dmi": {
+      "bios_vendor": "American Megatrends Inc.",
+      "bios_version": "6062",
+      "bios_date": "02/24/2023",
+      "board_vendor": "ASUSTeK COMPUTER INC.",
+      "board_name": "PRIME A320M-K",
+      "board_version": "Rev X.0x",
+      "sys_vendor": "System manufacturer",
+      "product_name": "System Product Name",
+      "product_version": "System Version"
+    }
+  },
+  "iommu": {
+    "groups": 16,
+    "iommu_units": [
+      "ivhd0"
+    ],
+    "group_devices": {
+      "0": [
+        {
+          "address": "0000:00:01.0",
+          "vendor": "0x1022",
+          "device": "0x1632",
+          "class": "0x060000"
+        }
+      ],
+      "1": [
+        {
+          "address": "0000:00:02.0",
+          "vendor": "0x1022",
+          "device": "0x1632",
+          "class": "0x060000"
+        }
+      ],
+      "2": [
+        {
+          "address": "0000:00:02.1",
+          "vendor": "0x1022",
+          "device": "0x1634",
+          "class": "0x060400"
+        }
+      ],
+      "3": [
+        {
+          "address": "0000:00:08.0",
+          "vendor": "0x1022",
+          "device": "0x1632",
+          "class": "0x060000"
+        }
+      ],
+      "4": [
+        {
+          "address": "0000:00:08.1",
+          "vendor": "0x1022",
+          "device": "0x1635",
+          "class": "0x060400"
+        }
+      ],
+      "5": [
+        {
+          "address": "0000:00:08.2",
+          "vendor": "0x1022",
+          "device": "0x1635",
+          "class": "0x060400"
+        }
+      ],
+      "6": [
+        {
+          "address": "0000:00:14.0",
+          "vendor": "0x1022",
+          "device": "0x790b",
+          "class": "0x0c0500"
+        },
+        {
+          "address": "0000:00:14.3",
+          "vendor": "0x1022",
+          "device": "0x790e",
+          "class": "0x060100"
+        }
+      ],
+      "7": [
+        {
+          "address": "0000:00:18.0",
+          "vendor": "0x1022",
+          "device": "0x166a",
+          "class": "0x060000"
+        },
+        {
+          "address": "0000:00:18.1",
+          "vendor": "0x1022",
+          "device": "0x166b",
+          "class": "0x060000"
+        },
+        {
+          "address": "0000:00:18.2",
+          "vendor": "0x1022",
+          "device": "0x166c",
+          "class": "0x060000"
+        },
+        {
+          "address": "0000:00:18.3",
+          "vendor": "0x1022",
+          "device": "0x166d",
+          "class": "0x060000"
+        },
+        {
+          "address": "0000:00:18.4",
+          "vendor": "0x1022",
+          "device": "0x166e",
+          "class": "0x060000"
+        },
+        {
+          "address": "0000:00:18.5",
+          "vendor": "0x1022",
+          "device": "0x166f",
+          "class": "0x060000"
+        },
+        {
+          "address": "0000:00:18.6",
+          "vendor": "0x1022",
+          "device": "0x1670",
+          "class": "0x060000"
+        },
+        {
+          "address": "0000:00:18.7",
+          "vendor": "0x1022",
+          "device": "0x1671",
+          "class": "0x060000"
+        }
+      ],
+      "8": [
+        {
+          "address": "0000:01:00.0",
+          "vendor": "0x1022",
+          "device": "0x43bc",
+          "class": "0x0c0330"
+        },
+        {
+          "address": "0000:01:00.1",
+          "vendor": "0x1022",
+          "device": "0x43b8",
+          "class": "0x010601"
+        },
+        {
+          "address": "0000:01:00.2",
+          "vendor": "0x1022",
+          "device": "0x43b3",
+          "class": "0x060400"
+        },
+        {
+          "address": "0000:02:04.0",
+          "vendor": "0x1022",
+          "device": "0x43b4",
+          "class": "0x060400"
+        },
+        {
+          "address": "0000:02:05.0",
+          "vendor": "0x1022",
+          "device": "0x43b4",
+          "class": "0x060400"
+        },
+        {
+          "address": "0000:02:06.0",
+          "vendor": "0x1022",
+          "device": "0x43b4",
+          "class": "0x060400"
+        },
+        {
+          "address": "0000:02:07.0",
+          "vendor": "0x1022",
+          "device": "0x43b4",
+          "class": "0x060400"
+        },
+        {
+          "address": "0000:05:00.0",
+          "vendor": "0x10ec",
+          "device": "0x8168",
+          "class": "0x020000"
+        }
+      ],
+      "9": [
+        {
+          "address": "0000:07:00.0",
+          "vendor": "0x1002",
+          "device": "0x1638",
+          "class": "0x030000"
+        }
+      ],
+      "10": [
+        {
+          "address": "0000:07:00.1",
+          "vendor": "0x1002",
+          "device": "0x1637",
+          "class": "0x040300"
+        }
+      ],
+      "11": [
+        {
+          "address": "0000:07:00.2",
+          "vendor": "0x1022",
+          "device": "0x15df",
+          "class": "0x108000"
+        }
+      ],
+      "12": [
+        {
+          "address": "0000:07:00.3",
+          "vendor": "0x1022",
+          "device": "0x1639",
+          "class": "0x0c0330"
+        }
+      ],
+      "13": [
+        {
+          "address": "0000:07:00.4",
+          "vendor": "0x1022",
+          "device": "0x1639",
+          "class": "0x0c0330"
+        }
+      ],
+      "14": [
+        {
+          "address": "0000:07:00.6",
+          "vendor": "0x1022",
+          "device": "0x15e3",
+          "class": "0x040300"
+        }
+      ],
+      "15": [
+        {
+          "address": "0000:08:00.0",
+          "vendor": "0x1022",
+          "device": "0x7901",
+          "class": "0x010601"
+        }
+      ]
+    }
+  },
+  "storage": [
+    {
+      "name": "sda",
+      "model": "ADATA SU630",
+      "sectors": "937703088",
+      "rotational": "0",
+      "write_cache": "write back",
+      "fua": "0"
+    }
+  ],
+  "kvm": {
+    "device": true,
+    "module": "kvm_amd",
+    "parameters": {
+      "avic": "N",
+      "nested": "1",
+      "npt": "Y",
+      "vgif": "1",
+      "vls": "1"
+    }
+  },
+  "qemu": {
+    "path": "/home/cesarmanzocode/.cache/thalyx-tools/prefix/usr/bin/qemu-system-x86_64",
+    "version": "QEMU emulator version 11.1.1"
+  },
+  "load_average": "1.30 1.55 1.45 1/836 162574"
+}

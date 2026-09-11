@@ -17,11 +17,11 @@ use thalyx_abi::generated::{
 };
 
 use crate::api::{BODY, Ctx, begin_response, resolve};
-use crate::event;
 use crate::events::{Signal, Timer};
 use crate::obj::{NO_GRANT, ObjKind, ObjRef};
 use crate::scope::{self, Resource};
 use crate::state::{MACHINE, Machine, ThreadState, Wait};
+use crate::trace;
 use crate::ucopy::Staging;
 
 /// Creates a coalescing signal charged to the addressed scope.
@@ -68,10 +68,9 @@ pub fn create_signal(machine: &mut Machine, ctx: &Ctx) -> Result<u64, i64> {
     .ok_or(status::LIMIT_EXHAUSTED)?;
     let handle = crate::api::cap_install(machine, ctx.domain, object, grant, None)
         .ok_or(status::LIMIT_EXHAUSTED)?;
-    event!(
+    trace!(
         "event.signal_created",
-        "signal={id} scope={}",
-        machine.scopes[sponsor as usize].id
+        "signal={id} scope={}", machine.scopes[sponsor as usize].id
     );
     Ok(handle)
 }
@@ -135,7 +134,7 @@ pub fn create_timer(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> 
     .ok_or(status::LIMIT_EXHAUSTED)?;
     let handle = crate::api::cap_install(machine, ctx.domain, object, grant, None)
         .ok_or(status::LIMIT_EXHAUSTED)?;
-    event!(
+    trace!(
         "event.timer_created",
         "timer={id} signal={} bits=0x{:x} scope={}",
         machine.signals[signal.object.index as usize].id,
@@ -168,6 +167,7 @@ pub fn raise_bits(machine: &mut Machine, index: usize, generation: u32, bits: u6
     }
     machine.signals[index].bits |= bits;
     machine.signals[index].sequence = machine.signals[index].sequence.wrapping_add(1);
+    let mut woken = false;
     for thread in 0..machine.threads.len() {
         if machine.threads[thread].state != ThreadState::Blocked {
             continue;
@@ -181,7 +181,11 @@ pub fn raise_bits(machine: &mut Machine, index: usize, generation: u32, bits: u6
             machine.threads[thread].wait_deadline_ns = 0;
             machine.threads[thread].wake_status = status::OK;
             machine.threads[thread].state = ThreadState::Ready;
+            woken = true;
         }
+    }
+    if woken {
+        crate::sched::kick_idle(machine);
     }
 }
 

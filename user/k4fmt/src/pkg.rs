@@ -416,6 +416,9 @@ pub mod note {
     /// The deepest the log was seen, and the gaps found. Value: the high
     /// water mark, with the number of sequence gaps above bit 32.
     pub const AUDIT_HIGH_WATER: u64 = 0x4048;
+    /// Service notes the supervisor wrote to bring the log near full before
+    /// the scenario that loses the control plane. Value: how many.
+    pub const LOG_PREFILLED: u64 = 0x4049;
 }
 
 /// What the service asks a broker to do, and the key it must be idempotent on.

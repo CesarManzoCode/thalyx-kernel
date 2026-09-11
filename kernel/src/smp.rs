@@ -542,16 +542,25 @@ extern "C" fn ap_entry(cpu_index: u64) -> ! {
     ONLINE.fetch_or(1u64 << cpu, Ordering::AcqRel);
 
     let claimed = apic_id_of(cpu);
+    // Read back rather than assumed: a processor that came out of INIT with
+    // caching disabled and kept it runs correctly and uncached, and only the
+    // register says which.
+    let cr0 = cpu::read_cr0();
     event!(
         "smp.ap_online",
         "cpu={cpu} apic_id={apic_id} claimed_apic_id={claimed} identity_match={} \
          backend={} lapic_hz={lapic_hz} initial_count={count} idle_thread={} \
-         kstack_top=0x{stack_top:x} smep={} smap={}",
+         kstack_top=0x{stack_top:x} smep={} smap={} cr0=0x{cr0:x} caches={}",
         u8::from(apic_id == claimed),
         controller.backend().name(),
         idle_thread(cpu),
         u8::from(features.smep),
-        u8::from(features.smap)
+        u8::from(features.smap),
+        if cr0 & (cpu::CR0_CD | cpu::CR0_NW) == 0 {
+            "enabled"
+        } else {
+            "disabled"
+        }
     );
 
     sched::run_ap(cpu)
