@@ -40,8 +40,8 @@ MEMORY = "512M"
 def qemu_command(tools: tc.Toolchain, vars_copy: Path, image: Path, debug_exit: bool) -> list[str]:
     argv = [
         str(tools.qemu),
-        "-machine", "q35,accel=tcg",
-        "-cpu", CPU_MODEL,
+        "-machine", tc.machine(),
+        "-cpu", tc.cpu_model(CPU_MODEL),
         "-smp", "1",
         "-m", MEMORY,
         "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={tools.ovmf_code}",
@@ -105,8 +105,11 @@ def main() -> int:
 
     record = {
         "command": argv,
-        "cpu": CPU_MODEL,
+        "cpu": tc.cpu_model(CPU_MODEL),
+        "processors": 1,
         "memory": MEMORY,
+        "machine": "q35",
+        "accelerator": tc.accelerator(),
         "image": str(arguments.image),
         "exit_status": status,
         "timed_out": timed_out,

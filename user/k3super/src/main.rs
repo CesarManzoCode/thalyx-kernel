@@ -63,6 +63,9 @@ const CALL_ROUNDS: u64 = 96;
 const SERVICED_BEFORE_FENCE: u64 = 12;
 /// Windows the supervisor watches the shared budget over.
 const BUDGET_WINDOWS: u64 = 12;
+/// How long a fenced scope is watched before its retirement is attempted
+/// regardless. Generous: the watch ends at quiescence.
+const DRAIN_DEADLINE_NS: u64 = 30_000_000_000;
 
 /// Where the supervisor keeps its own view of the shared page.
 const SUPER_SHARED_VADDR: u64 = 0x1000_0000;
@@ -614,9 +617,16 @@ fn read_word(memory: u64) -> u64 {
 }
 
 /// Fences, watches and retires a scope, reporting what it was still holding.
+///
+/// Watched until quiescent or until a deadline, not for a count of polls. The
+/// count was sixty-four twenty-millisecond waits, which held under TCG; under
+/// KVM the spinning workers of the budget scope pay for their own diagnostic
+/// notes out of a small budget, still had rounds to run when the sixty-fourth
+/// poll came, and finished three milliseconds after the retirement was refused.
 fn drain_and_retire(scope: u64, timer: u64, signal: u64) {
     let _ = k2::scope_fence(scope);
-    for _ in 0..64 {
+    let give_up = k2::now_ns() + DRAIN_DEADLINE_NS;
+    while k2::now_ns() < give_up {
         let Ok(report_) = k2::scope_drain_status(scope) else {
             return;
         };

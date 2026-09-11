@@ -66,10 +66,16 @@ const READY_DEADLINE_NS: u64 = 20_000_000_000;
 /// One poll of the run's signals.
 const POLL_NS: u64 = 100_000_000;
 
-/// Rounds the auditor stays away in the scenario that loses the control plane.
-/// Long enough for the log to fill at the rate a publication writes receipts,
-/// short enough that the run finishes afterwards.
-const STALL_ROUNDS: u64 = 6;
+/// How long the auditor stays away in the scenario that loses the control
+/// plane after it has seen the log full, so the next admission meets the full
+/// log. The stall used to be six rounds of this loop, a count that stood in
+/// for "until the log is full" on one platform: under KVM the six rounds were
+/// over with the log at thirty-one of its fifty-six ordinary cells.
+const STALL_AFTER_FULL_NS: u64 = 500_000_000;
+
+/// The longest the auditor stays away in that scenario, full log or not, so a
+/// run whose log never fills ends and the gate says so.
+const STALL_LIMIT_NS: u64 = 30_000_000_000;
 
 /// The whole run, however it ends.
 const RUN_DEADLINE_NS: u64 = 60_000_000_000;
@@ -943,18 +949,28 @@ fn run() -> ! {
 
     let deadline = k2::now_ns() + RUN_DEADLINE_NS;
     let mut restarts = 0u64;
-    let mut rounds = 0u64;
+    // The cells ordinary receipts may use, which is what a full log means.
+    let ordinary_cells = k2::log_query(log).map_or(u32::MAX, |info| {
+        info.capacity.saturating_sub(info.reserved_cells)
+    });
+    let stall_limit = k2::now_ns() + STALL_LIMIT_NS;
+    let mut stall_over_at: Option<u64> = None;
     loop {
-        rounds += 1;
         // Scenario 5 is the one where the control plane is lost. The auditor
-        // stops reading for a while and the log fills, and a full log does not
-        // lose the receipts that matter -- it stops the kernel admitting the
-        // work they would cover. What the run then has to show is a refusal
-        // that names the reason, not a publication nobody can account for.
-        let auditing = scenario != 5 || rounds > STALL_ROUNDS;
+        // stops reading until the log is full, and a full log does not lose
+        // the receipts that matter -- it stops the kernel admitting the work
+        // they would cover. What the run then has to show is a refusal that
+        // names the reason, not a publication nobody can account for.
+        //
         // Before anything else, because everything else in this loop waits and
         // the log fills while it does.
         observe_log(log, &mut audit);
+        if stall_over_at.is_none() && audit.high_water >= ordinary_cells {
+            stall_over_at = Some(k2::now_ns() + STALL_AFTER_FULL_NS);
+        }
+        let now = k2::now_ns();
+        let auditing =
+            scenario != 5 || stall_over_at.is_some_and(|at| now >= at) || now >= stall_limit;
         if auditing {
             drain_receipts(log, &mut audit);
         }

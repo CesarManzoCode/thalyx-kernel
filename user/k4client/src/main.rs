@@ -73,6 +73,12 @@ const STAGE_BYTES: usize = (STAGE_PAGES as usize) * 4096;
 /// is a write that reached the medium only in part.
 const CONTENT_BYTES: usize = 1024;
 
+/// Times a reader re-reads the published version and forks over it before it
+/// gives up building the candidate it is then refused publishing. Each try is
+/// over the newest generation, so only a publisher that moves between every
+/// query and fork could exhaust them.
+const READER_FORK_TRIES: u32 = 8;
+
 /// Intents a broker remembers, so a repeated key is answered as one.
 const BROKER_KEYS: usize = 8;
 
@@ -930,20 +936,30 @@ fn run_reader(client: &mut Client) {
 
     // A reader may build a candidate. Publishing it is what it may not do, and
     // the refusal is about publishing rather than about reaching the service.
+    //
+    // Over the version published now, not the one read at the start. A
+    // publisher runs beside this reader, and a fork over a generation it has
+    // already moved past is refused as stale before publishing is ever
+    // reached: under TCG the reader happened to fork first, and under KVM the
+    // publisher had published twice by then and the refusal the run exists to
+    // show never came.
     let mut buffer = [0u8; CONTENT_BYTES];
     let length = content_for(777, &mut buffer);
-    let attempt = candidate(
-        client,
-        state.generation,
-        state.generation,
-        b"data",
-        &buffer[..length],
-        true,
-    );
+    let mut current = state.generation;
+    let mut attempt = None;
+    for _ in 0..READER_FORK_TRIES {
+        if let Some(now) = client.query() {
+            current = now.generation;
+        }
+        attempt = candidate(client, current, current, b"data", &buffer[..length], true);
+        if attempt.is_some() {
+            break;
+        }
+    }
     if let Some(attempt) = attempt
         && let Some(reply) = client.publish(
             1,
-            state.generation,
+            current,
             attempt.root,
             attempt.policy,
             attempt.validation,

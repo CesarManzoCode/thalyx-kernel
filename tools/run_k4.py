@@ -117,8 +117,8 @@ def qemu_command(
 ) -> list[str]:
     argv = [
         str(tools.qemu),
-        "-machine", "q35,accel=tcg",
-        "-cpu", CPU_MODEL,
+        "-machine", tc.machine(),
+        "-cpu", tc.cpu_model(CPU_MODEL),
         "-smp", str(processors),
         "-m", memory,
         "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={tools.ovmf_code}",
@@ -315,11 +315,11 @@ def main() -> int:
                 for leg, spec in sorted(cuts.items())
             },
         },
-        "cpu": CPU_MODEL,
+        "cpu": tc.cpu_model(CPU_MODEL),
         "processors": arguments.smp,
         "memory": MEMORY,
         "machine": "q35",
-        "accelerator": "tcg",
+        "accelerator": tc.accelerator(),
         "virtio": "virtio-blk-pci modern only (disable-legacy=on)",
         "medium": {
             "format": "raw",

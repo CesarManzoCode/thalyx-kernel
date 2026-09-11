@@ -58,6 +58,11 @@ const ABORT_DETAIL: u64 = 0xAB07_0001;
 /// first. The spin is what lets the supervisor run and fence in between.
 const POLL_WORK: u64 = 200;
 
+/// How long the server waits to be closed before it calls the run broken.
+/// Generous on purpose: the wait ends when the fence is observed, and the bound
+/// only decides how long a run that will never be fenced takes to say so.
+const FENCE_WAIT_NS: u64 = 30_000_000_000;
+
 fn run() -> ! {
     let endpoint = thalyx_abi::boot_handle(slot::SERVER_ENDPOINT);
     let log = thalyx_abi::boot_handle(slot::SERVER_LOG);
@@ -147,6 +152,12 @@ fn run() -> ! {
         k2::exit(3);
     }
 
+    // Bounded by time, not by a count of polls. A count is a stand-in for time
+    // that holds on one platform: under TCG four thousand polls outlasted the
+    // supervisor's fence, and under KVM they were spent in a few milliseconds,
+    // before the supervisor had run at all, and the server gave up on a fence
+    // that was still coming.
+    let deadline = k2::now_ns() + FENCE_WAIT_NS;
     let mut spins = 0u64;
     let observed;
     loop {
@@ -164,7 +175,7 @@ fn run() -> ! {
         }
         let _ = rt::burn(POLL_WORK, spins | 1);
         spins += 1;
-        if spins > 4096 {
+        if k2::now_ns() > deadline {
             k2::note(report::UNEXPECTED, u64::MAX);
             k2::exit(5);
         }

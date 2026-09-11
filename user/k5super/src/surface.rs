@@ -43,7 +43,14 @@ const POLL_NS: u64 = 20_000_000;
 /// long enough for the engine to have taken the request, bound to it, decoded
 /// the prompt and produced some tokens, and far shorter than the inference it
 /// was asked for.
-const CANCEL_AFTER_NS: u64 = 250_000_000;
+const CANCEL_AFTER_CPU_NS: u64 = 10_000_000;
+/// How long after a work says it is asking it is closed regardless, if the
+/// engine never binds to it: a run that cannot show the closing ends rather
+/// than waiting for ever, and the gate says why.
+const CANCEL_FALLBACK_NS: u64 = 60_000_000_000;
+/// How often the run's signals are looked at while that closing is awaited.
+/// Short, because four hundred tokens take a fraction of a second under KVM.
+const WATCH_POLL_NS: u64 = 1_000_000;
 /// How long a closed scope is given to drain before the run is called stuck.
 const DRAIN_DEADLINE_NS: u64 = 30_000_000_000;
 
@@ -594,18 +601,30 @@ pub fn run(system: u64, supervision: u64, plan: &Plan, shape: &Shape) -> bool {
     // not answer the other. In the `CANCEL` scenario this loop is also where
     // the closing happens, at the moment the asking work says it is asking.
     let deadline = k2::now_ns() + RUN_DEADLINE_NS;
-    let mut cancel_at: Option<(usize, u64)> = None;
+    // In the `CANCEL` scenario the asking work is closed once the engine is
+    // computing for it -- bound to its invocation and charging its scope --
+    // and not a fixed time after it says it is asking. The fixed time was a
+    // quarter of a second, which under TCG found the engine eighteen tokens in
+    // and under KVM arrived after all four hundred had been made.
+    let mut cancel_watch: Option<usize> = None;
+    let mut bound_cpu: Option<u64> = None;
+    let mut asked_at = 0u64;
     let mut cancelled = false;
     while k2::now_ns() < deadline {
+        let poll = if cancel_watch.is_some() && !cancelled {
+            WATCH_POLL_NS
+        } else {
+            POLL_NS
+        };
         // Before anything that waits, because the log fills while it does.
         audit::observe(log, &mut auditor);
         audit::drain(log, &mut auditor);
         if let Some(launcher) = launcher.as_mut() {
-            while launcher::serve(launcher, limits.cpu_window_ns, k2::now_ns() + POLL_NS) {
+            while launcher::serve(launcher, limits.cpu_window_ns, k2::now_ns() + poll) {
                 audit::drain(log, &mut auditor);
             }
         }
-        if let Ok(info) = k2::signal_wait(crash, k4bit::CRASH, k2::now_ns() + POLL_NS)
+        if let Ok(info) = k2::signal_wait(crash, k4bit::CRASH, k2::now_ns() + poll)
             && info.bits & k4bit::CRASH != 0
         {
             audit::drain(log, &mut auditor);
@@ -627,13 +646,14 @@ pub fn run(system: u64, supervision: u64, plan: &Plan, shape: &Shape) -> bool {
                 && let Ok(seen) = k2::signal_wait(
                     work.done,
                     bit::WORK_DONE | bit::WORK_ASKING,
-                    k2::now_ns() + POLL_NS,
+                    k2::now_ns() + poll,
                 )
                 && seen.bits & bit::WORK_ASKING != 0
                 && work.plan.role == work_role::ASKER
-                && cancel_at.is_none()
+                && cancel_watch.is_none()
             {
-                cancel_at = Some((index, k2::now_ns() + CANCEL_AFTER_NS));
+                cancel_watch = Some(index);
+                asked_at = k2::now_ns();
             }
             if let Ok(info) = k2::domain_query(work.domain)
                 && (info.state == domain_state::DEAD || info.state == domain_state::FAULTED)
@@ -654,9 +674,39 @@ pub fn run(system: u64, supervision: u64, plan: &Plan, shape: &Shape) -> bool {
         // scope cannot be retired until it has. That is the whole point: closure
         // is a barrier and a drain and a retirement, in that order, and the
         // engine stays where it is through all three.
-        if let Some((index, at)) = cancel_at
+        //
+        // Binding is what the kernel shows first: the engine's worker takes a
+        // parallelism slot in the asker's scope, so the scope has two threads
+        // charging it where it had one. From then on what the scope is charged
+        // is the inference. The fence waits for some of it -- past the engine
+        // reading the prompt it was lent, which a fence would otherwise refuse
+        // it, and well short of four hundred tokens on either platform.
+        let mut fence_now = None;
+        if let Some(index) = cancel_watch
             && !cancelled
-            && k2::now_ns() >= at
+            && let Some(work) = standing[index].as_ref()
+        {
+            let view = if work.scope_view != 0 {
+                work.scope_view
+            } else {
+                work.scope
+            };
+            if let Ok(info) = k2::scope_query(view) {
+                if bound_cpu.is_none() && info.parallelism_used >= 2 {
+                    bound_cpu = Some(info.cpu_total_ns);
+                }
+                if let Some(start) = bound_cpu
+                    && info.cpu_total_ns >= start + CANCEL_AFTER_CPU_NS
+                {
+                    fence_now = Some(index);
+                }
+            }
+            if k2::now_ns() >= asked_at + CANCEL_FALLBACK_NS {
+                fence_now = Some(index);
+            }
+        }
+        if let Some(index) = fence_now
+            && !cancelled
             && let Some(work) = standing[index].as_mut()
         {
             cancelled = true;

@@ -999,6 +999,10 @@ fn scheduling_summary() {
             node.dispatch_refusals,
         );
         let (charged, excess) = (node.max_charged_in_window_ns, node.max_excess_ns);
+        // Every overrun was counted; only the first few were written out as
+        // their own records. The difference is stated, so a reader of the
+        // debt records knows how many windows they stand for.
+        let debt_records = u64::from(node.debt_records);
         event!(
             "scope.accounting",
             "scope={index} id={id} label={label} budget_ns={budget} \
@@ -1006,7 +1010,9 @@ fn scheduling_summary() {
              overruns={overruns} max_overrun_ns={worst_overrun} total_ns={total} \
              debt_ns={debt} max_committed_ns={committed} max_running={peak} \
              dispatch_grants={grants} dispatch_refusals={refusals} \
-             max_charged_in_window_ns={charged} max_excess_ns={excess}"
+             max_charged_in_window_ns={charged} max_excess_ns={excess} \
+             debt_records={debt_records} debt_records_coalesced={}",
+            overruns.saturating_sub(debt_records)
         );
         drop(machine);
     }
@@ -1117,6 +1123,7 @@ fn summarize(terminal: sched::Terminal) {
 
     scheduling_summary();
     crate::device::summarize();
+    crate::diag::summary();
 
     event!(
         "k1.terminal",

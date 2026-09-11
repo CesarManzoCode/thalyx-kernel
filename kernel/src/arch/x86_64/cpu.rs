@@ -44,6 +44,10 @@ pub const CR0_TS: u64 = 1 << 3;
 pub const CR0_NE: u64 = 1 << 5;
 /// `CR0.WP`, supervisor write protection.
 pub const CR0_WP: u64 = 1 << 16;
+/// `CR0.NW`, not write-through. Set by INIT; must be clear for normal caching.
+pub const CR0_NW: u64 = 1 << 29;
+/// `CR0.CD`, cache disable. Set by INIT; must be clear for normal caching.
+pub const CR0_CD: u64 = 1 << 30;
 
 /// `CR4.OSFXSR`, enables FXSAVE/FXRSTOR and SSE.
 pub const CR4_OSFXSR: u64 = 1 << 9;

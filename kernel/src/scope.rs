@@ -17,6 +17,11 @@ use thalyx_abi::generated::scope_state;
 use crate::limits::{CPU_WINDOW_NS, MAX_SCOPES};
 use crate::obj::ScopeId;
 
+/// `scope.debt` records written per scope before the diagnostic plane counts
+/// overruns instead of writing each one. The observability contract permits
+/// coalescing and requires saying so; `scope.accounting` says so.
+pub const DEBT_RECORD_LIMIT: u32 = 16;
+
 /// Ceilings of one scope.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Limits {
@@ -188,6 +193,10 @@ pub struct Scope {
     pub overruns: u64,
     /// The largest overrun observed.
     pub max_overrun_ns: u64,
+    /// Overruns written out as their own `scope.debt` record. Every overrun is
+    /// counted in `overruns`; past [`DEBT_RECORD_LIMIT`] the plane stops writing
+    /// one line per window and the summary states how many it stands for.
+    pub debt_records: u32,
     /// Threads whose owning domain belongs to this scope.
     pub threads: u32,
     /// Threads currently charging this scope.
@@ -250,6 +259,7 @@ impl Scope {
             windows_closed: 0,
             overruns: 0,
             max_overrun_ns: 0,
+            debt_records: 0,
             threads: 0,
             parallelism_used: 0,
             invocations_pending: 0,
@@ -431,7 +441,14 @@ pub fn roll_window(table: &mut Table, now_ns: u64) {
         }
         let closing = node.cpu_window_ns;
         let overrun = node.cpu_window_ns.saturating_sub(node.limits.cpu_budget_ns);
-        if overrun != 0 {
+        // Written for the first overruns of a scope and counted after that.
+        // One line per window was a line per ten milliseconds per spinning
+        // scope, written from the timer with the machine lock held; under KVM
+        // each line cost about a millisecond of port I/O, the run lasted
+        // longer, more windows closed in debt, and the records fed on
+        // themselves until a drain that should have finished timed out.
+        let written = overrun != 0 && node.debt_records < DEBT_RECORD_LIMIT;
+        if written {
             // Carried debt that nobody can see is not a limit, it is a number.
             // The record is emitted only when a window actually closed over
             // budget, so it says something happened rather than that a window
@@ -447,6 +464,9 @@ pub fn roll_window(table: &mut Table, now_ns: u64) {
             );
         }
         let node = &mut table[index];
+        if written {
+            node.debt_records += 1;
+        }
         node.windows_closed += 1;
         if closing > node.max_window_ns {
             node.max_window_ns = closing;

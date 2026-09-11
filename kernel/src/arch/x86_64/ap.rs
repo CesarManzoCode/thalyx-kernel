@@ -131,7 +131,12 @@ global_asm!(
     "or eax, 0x900", // LME | NXE
     "wrmsr",
     "mov eax, cr0",
-    "or eax, 0x80010001", // PG | WP | PE
+    // INIT leaves CD and NW set. A processor that enabled paging with both
+    // still set would run with its caches disabled for the rest of the run,
+    // every access uncached. An emulator that ignores cache control never
+    // shows that; the first run under KVM did.
+    "and eax, 0x9fffffff", // clear CD | NW
+    "or eax, 0x80010001",  // PG | WP | PE
     "mov cr0, eax",
     ".byte 0xea",
     "thalyx_ap_patch_far64:",
@@ -146,11 +151,18 @@ global_asm!(
     "mov rax, [rbx + 0x210]", // Params::entry
     "jmp rax",
     // ---- descriptor table -------------------------------------------------
+    // Every descriptor is marked accessed in advance. A processor that loads a
+    // descriptor whose accessed bit is clear writes the descriptor to set it,
+    // and the far jump into 64-bit mode happens after paging is on, through a
+    // mapping of this page that is read and execute only. That write faults
+    // with no interrupt table the processor can use, which is a triple fault
+    // and a reset of the whole machine. Under TCG the processors came up; the
+    // first run under KVM reset before any of them reached 64-bit code.
     ".space 0x180 - (. - thalyx_ap_trampoline)",
     ".quad 0",
-    ".quad 0x00cf9a000000ffff", // 0x08: 32-bit code
-    ".quad 0x00cf92000000ffff", // 0x10: 32-bit data
-    ".quad 0x00af9a000000ffff", // 0x18: 64-bit code
+    ".quad 0x00cf9b000000ffff", // 0x08: 32-bit code, accessed
+    ".quad 0x00cf93000000ffff", // 0x10: 32-bit data, accessed
+    ".quad 0x00af9b000000ffff", // 0x18: 64-bit code, accessed
     ".space 0x1c0 - (. - thalyx_ap_trampoline)",
     ".word 31", // limit of the four descriptors above
     ".long 0",  // base, written before the processor starts

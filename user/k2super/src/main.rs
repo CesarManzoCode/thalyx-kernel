@@ -105,16 +105,23 @@ const SERVER_SIGNAL: u32 = slot::SERVER_SIGNAL;
 const CLIENT_ENDPOINT: u32 = slot::CLIENT_ENDPOINT;
 const CLIENT_BUFFER: u32 = slot::CLIENT_BUFFER;
 
-/// Work between polls while waiting for a state only another domain can reach.
-const POLL_WORK: u64 = 20_000;
+/// How long the supervisor blocks between two attempts to retire a scope that
+/// is still draining.
+const RETIRE_POLL_NS: u64 = 5_000_000;
+/// A bit of the server signal nobody raises, so waiting on it is a sleep that
+/// consumes nothing the server said.
+const IDLE_BIT: u64 = 1 << 40;
 /// Signal bit the timer raises. Distinct from the bits the server speaks on, so
 /// waiting for one cannot be satisfied by the other.
 const TIMER_BIT: u64 = 1 << 8;
 /// How far ahead the timer is armed. Longer than a scheduling quantum, so the
 /// wait is a real wait rather than a deadline that had already passed.
 const TIMER_DELAY_NS: u64 = 5_000_000;
-/// Polls before the supervisor gives up on a state that should have arrived.
-const POLL_LIMIT: u64 = 4096;
+/// How long the supervisor waits for a state that should arrive before it gives
+/// up. A time and not a count of polls: four thousand polls were a duration
+/// under TCG and a few milliseconds under KVM, which is less than the client is
+/// made to linger after it is cancelled.
+const POLL_DEADLINE_NS: u64 = 30_000_000_000;
 
 fn fail(step: u64, code: i64) -> ! {
     k2::note(report::BUILD_FAILED, step);
@@ -590,6 +597,7 @@ fn run() -> ! {
     // exactly while something is outstanding -- would be a claim about that
     // gap. The kernel writes the report and decides under one lock, so asking
     // this way makes the two agree by construction or not at all.
+    let retire_deadline = k2::now_ns() + POLL_DEADLINE_NS;
     let mut spins = 0u64;
     let final_report = loop {
         let (outcome, report) = k2::scope_retire(client_scope);
@@ -612,9 +620,15 @@ fn run() -> ! {
             }
             Err(code) => fail(29, code),
         }
-        let _ = rt::burn(POLL_WORK, spins | 1);
+        // Blocked between attempts, not spinning. Every refused retirement is
+        // a refusal record, the kernel writes at most sixty-four of those per
+        // domain before it only counts them, and a supervisor that asked as
+        // fast as it could spend the budget on this loop -- under TCG, once
+        // the client lingered its full fifty milliseconds -- and the negative
+        // controls after it were refused with nobody writing it down.
+        let _ = k2::signal_wait(signal, IDLE_BIT, k2::now_ns() + RETIRE_POLL_NS);
         spins += 1;
-        if spins > POLL_LIMIT {
+        if k2::now_ns() > retire_deadline {
             fail(30, status::DRAIN_INCOMPLETE);
         }
     };
