@@ -10,7 +10,7 @@
 /// Major interface version.
 pub const VERSION_MAJOR: u16 = 0;
 /// Minor interface version.
-pub const VERSION_MINOR: u16 = 2;
+pub const VERSION_MINOR: u16 = 3;
 
 /// Interface limits fixed by V0. Reported by the limits query entry.
 pub mod limit {
@@ -29,7 +29,7 @@ pub mod limit {
     /// `max_endpoint_queue` from the schema.
     pub const MAX_ENDPOINT_QUEUE: u64 = 8;
     /// `max_memory_pages_per_object` from the schema.
-    pub const MAX_MEMORY_PAGES_PER_OBJECT: u64 = 512;
+    pub const MAX_MEMORY_PAGES_PER_OBJECT: u64 = 4096;
     /// `cpu_window_ns` from the schema.
     pub const CPU_WINDOW_NS: u64 = 10000000;
     /// `cpu_quantum_ns` from the schema.
@@ -56,6 +56,8 @@ pub mod entry {
     pub const EXIT: u64 = 3;
     /// Monotonic nanoseconds since boot, in RDX. No handle, no descriptor, no authority: every deadline in this interface is one of these, and a program that cannot read the clock cannot state one.
     pub const CLOCK_QUERY: u64 = 4;
+    /// Set the calling thread's thread pointer: the FS base its code reaches thread-local storage and the stack guard through. RSI carries the address; zero clears it. Register state of one's own thread needs no capability, exactly as a stack pointer needs none, and names no object. Refused with INVALID_ADDRESS outside the user range. Added in K5: the C++ runtime a real inference engine links addresses its exception state and its stack guard through FS, and a thread without its own FS base cannot run it.
+    pub const THREAD_POINTER_SET: u64 = 5;
 }
 
 /// Object type codes. The high 16 bits of every operation code.

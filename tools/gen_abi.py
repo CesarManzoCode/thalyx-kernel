@@ -509,6 +509,15 @@ def generate_fixture(schema: dict, layout: Layout, names: list[str]) -> str:
     return "\n".join(out) + "\n"
 
 
+# Field names that are keywords in C++. The C header spells them differently
+# for a C++ reader and identically for a C one.
+CXX_KEYWORDS = {
+    "class", "delete", "new", "operator", "private", "protected", "public", "template",
+    "this", "throw", "try", "catch", "typename", "virtual", "friend", "namespace",
+    "using", "explicit", "export", "mutable", "bool", "true", "false",
+}
+
+
 def generate_c(schema: dict, layout: Layout) -> str:
     version = schema["version"]
     out: list[str] = []
@@ -524,6 +533,16 @@ def generate_c(schema: dict, layout: Layout) -> str:
     out.append("")
     out.append("#include <stdint.h>")
     out.append("#include <stddef.h>")
+    out.append("")
+    out.append("/* C++ spells both of these differently. The assertions below are the same")
+    out.append(" * checks in either language, and a C++ program on the native target reads")
+    out.append(" * this header too. */")
+    out.append("#if defined(__cplusplus) && !defined(_Static_assert)")
+    out.append("#define _Static_assert static_assert")
+    out.append("#endif")
+    out.append("#if defined(__cplusplus) && !defined(_Alignof)")
+    out.append("#define _Alignof alignof")
+    out.append("#endif")
     out.append("")
     out.append(f"#define THALYX_ABI_VERSION_MAJOR {version['major']}u")
     out.append(f"#define THALYX_ABI_VERSION_MINOR {version['minor']}u")
@@ -563,6 +582,48 @@ def generate_c(schema: dict, layout: Layout) -> str:
     for item in schema["boot_slots"]:
         out.append(f"#define THALYX_BOOT_SLOT_{item['name']} {item['slot']}u")
     out.append("")
+    out.append("/* One assigned operation, as the schema publishes it. The Rust side has the")
+    out.append(" * same table; a native C program needs it for the same reason the kernel")
+    out.append(" * does -- the descriptor header carries a length the kernel checks against")
+    out.append(" * R10, and a program that guessed that length would be refused. */")
+    out.append("typedef struct {")
+    out.append("    uint32_t code;")
+    out.append("    uint32_t object_type;")
+    out.append("    uint32_t rights;")
+    out.append("    uint32_t descriptor_len; /* Header included; zero when the operation carries none. */")
+    out.append("    uint32_t writes_response;")
+    out.append("    const char *name;")
+    out.append("} thalyx_op_spec_t;")
+    out.append("")
+    out.append(f"#define THALYX_OPERATION_COUNT {len(schema['operations'])}u")
+    out.append("static const thalyx_op_spec_t thalyx_operations[THALYX_OPERATION_COUNT] = {")
+    for item in schema["operations"]:
+        code = opcode(types[item["type"]], item["ordinal"])
+        request = layout[item["request"]]["size"] + 32 if item["request"] else 0
+        response = layout[item["response"]]["size"] + 32 if item["response"] else 0
+        out.append(
+            "    { 0x%08Xu, %du, 0x%08Xu, %du, %du, \"%s\" },"
+            % (
+                code,
+                types[item["type"]],
+                rights_value(schema, item["type"], item["rights"]),
+                max(request, response),
+                1 if response else 0,
+                item["name"],
+            )
+        )
+    out.append("};")
+    out.append("")
+    out.append("/* Looks up an operation code, or NULL when the number is not assigned. */")
+    out.append("static inline const thalyx_op_spec_t *thalyx_op_spec(uint32_t code) {")
+    out.append("    for (unsigned i = 0; i < THALYX_OPERATION_COUNT; i++) {")
+    out.append("        if (thalyx_operations[i].code == code) {")
+    out.append("            return &thalyx_operations[i];")
+    out.append("        }")
+    out.append("    }")
+    out.append("    return NULL;")
+    out.append("}")
+    out.append("")
     for definition in layout.structs.values():
         typedef = "thalyx_" + snake(definition["name"]) + "_t"
         if definition.get("doc"):
@@ -573,7 +634,16 @@ def generate_c(schema: dict, layout: Layout) -> str:
             declaration = c_type(field)
             suffix = f"[{count}]" if count is not None else ""
             comment = f" /* {field_doc(field)} */"
-            out.append(f"    {declaration} {field['name']}{suffix};{comment}")
+            if field["name"] in CXX_KEYWORDS:
+                # Same type, same offset; only the spelling differs, because
+                # the name is a keyword in C++ and a C++ program reads this too.
+                out.append("#ifdef __cplusplus")
+                out.append(f"    {declaration} {field['name']}_{suffix};{comment}")
+                out.append("#else")
+                out.append(f"    {declaration} {field['name']}{suffix};{comment}")
+                out.append("#endif")
+            else:
+                out.append(f"    {declaration} {field['name']}{suffix};{comment}")
         out.append(f"}} {typedef};")
         out.append(
             f"_Static_assert(sizeof({typedef}) == {definition['size']}, "
@@ -584,10 +654,19 @@ def generate_c(schema: dict, layout: Layout) -> str:
             f'"{definition["name"]} alignment");'
         )
         for field in definition["fields"]:
+            if field["name"] in CXX_KEYWORDS:
+                out.append("#ifdef __cplusplus")
+                out.append(
+                    f"_Static_assert(offsetof({typedef}, {field['name']}_) == {field['offset']}, "
+                    f'"{definition["name"]}.{field["name"]} offset");'
+                )
+                out.append("#else")
             out.append(
                 f"_Static_assert(offsetof({typedef}, {field['name']}) == {field['offset']}, "
                 f'"{definition["name"]}.{field["name"]} offset");'
             )
+            if field["name"] in CXX_KEYWORDS:
+                out.append("#endif")
         out.append("")
     out.append("#endif /* THALYX_ABI_H */")
     return "\n".join(out) + "\n"

@@ -131,6 +131,58 @@ macro_rules! entry {
     };
 }
 
+/// Defines the entry point of a domain that needs more stack than the kernel
+/// maps under one.
+///
+/// The kernel maps eight pages below `USER_STACK_TOP` for every domain, with a
+/// guard page under them, and that is enough for a program that answers a
+/// protocol and not enough for one that carries a workspace, a tree encoder and
+/// a JSON writer through the same call chain. A K5 work domain met the guard
+/// page twice while this was being written, and both times the fault was
+/// exactly legible -- which is what a guard page is for -- and both times the
+/// answer was that the program needed a stack, not that the kernel was wrong.
+///
+/// So the program brings one. `.bss` is charged to the domain's image like any
+/// other page, the switch happens before anything else runs, and the kernel's
+/// original stack is simply left unused. Nothing about the domain's accounting
+/// changes: the pages were charged when the image was loaded.
+#[macro_export]
+macro_rules! entry_on_stack {
+    ($main:path, $bytes:expr) => {
+        #[repr(align(16))]
+        struct EntryStack([u8; $bytes]);
+        static mut ENTRY_STACK: EntryStack = EntryStack([0; $bytes]);
+
+        extern "C" fn entry_body() -> ! {
+            let main: fn() -> ! = $main;
+            main()
+        }
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn _start() -> ! {
+            // SAFETY: `ENTRY_STACK` is a static, sixteen-byte aligned array of
+            // exactly `$bytes` bytes in this domain's own `.bss`, mapped
+            // writable by the kernel as part of the image. The block never
+            // returns, so the stack it leaves behind is never read again, and
+            // `entry_body` is entered with the stack pointer eight bytes below
+            // a sixteen-byte boundary, which is what a System V callee expects
+            // just after a `call`.
+            unsafe {
+                core::arch::asm!(
+                    "lea rsp, [{stack} + {size}]",
+                    "xor ebp, ebp",
+                    "call {body}",
+                    "ud2",
+                    stack = sym ENTRY_STACK,
+                    size = const $bytes,
+                    body = sym entry_body,
+                    options(noreturn),
+                );
+            }
+        }
+    };
+}
+
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     diag_note(note::SELF_CHECK, u64::MAX, 0);

@@ -11,8 +11,18 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* C++ spells both of these differently. The assertions below are the same
+ * checks in either language, and a C++ program on the native target reads
+ * this header too. */
+#if defined(__cplusplus) && !defined(_Static_assert)
+#define _Static_assert static_assert
+#endif
+#if defined(__cplusplus) && !defined(_Alignof)
+#define _Alignof alignof
+#endif
+
 #define THALYX_ABI_VERSION_MAJOR 0u
-#define THALYX_ABI_VERSION_MINOR 2u
+#define THALYX_ABI_VERSION_MINOR 3u
 #define THALYX_MAX_DESCRIPTOR_LEN 4096ull
 #define THALYX_MAX_INLINE_PAYLOAD 256ull
 #define THALYX_MAX_CAPS_PER_MESSAGE 4ull
@@ -20,7 +30,7 @@
 #define THALYX_MAX_DERIVE_DEPTH 32ull
 #define THALYX_MAX_HANDLES_PER_DOMAIN 32ull
 #define THALYX_MAX_ENDPOINT_QUEUE 8ull
-#define THALYX_MAX_MEMORY_PAGES_PER_OBJECT 512ull
+#define THALYX_MAX_MEMORY_PAGES_PER_OBJECT 4096ull
 #define THALYX_CPU_WINDOW_NS 10000000ull
 #define THALYX_CPU_QUANTUM_NS 1000000ull
 #define THALYX_PAGE_SIZE 4096ull
@@ -33,6 +43,7 @@
 #define THALYX_ENTRY_LIMITS_QUERY 2ull
 #define THALYX_ENTRY_EXIT 3ull
 #define THALYX_ENTRY_CLOCK_QUERY 4ull
+#define THALYX_ENTRY_THREAD_POINTER_SET 5ull
 
 #define THALYX_FLAG_NONBLOCKING (1ull << 0)
 
@@ -221,6 +232,92 @@
 #define THALYX_BOOT_SLOT_CONTROL_LOG 3u
 #define THALYX_BOOT_SLOT_FIRST_DEVICE 4u
 #define THALYX_BOOT_SLOT_FIRST_MODULE 8u
+
+/* One assigned operation, as the schema publishes it. The Rust side has the
+ * same table; a native C program needs it for the same reason the kernel
+ * does -- the descriptor header carries a length the kernel checks against
+ * R10, and a program that guessed that length would be refused. */
+typedef struct {
+    uint32_t code;
+    uint32_t object_type;
+    uint32_t rights;
+    uint32_t descriptor_len; /* Header included; zero when the operation carries none. */
+    uint32_t writes_response;
+    const char *name;
+} thalyx_op_spec_t;
+
+#define THALYX_OPERATION_COUNT 59u
+static const thalyx_op_spec_t thalyx_operations[THALYX_OPERATION_COUNT] = {
+    { 0x00000001u, 0u, 0x00000000u, 96u, 1u, "CAP_INSPECT" },
+    { 0x00000002u, 0u, 0x00000002u, 56u, 0u, "CAP_DERIVE" },
+    { 0x00000003u, 0u, 0x00000000u, 0u, 0u, "CAP_COPY" },
+    { 0x00000004u, 0u, 0x00000000u, 0u, 0u, "CAP_CLOSE" },
+    { 0x00000005u, 0u, 0x00000010u, 0u, 0u, "CAP_FENCE" },
+    { 0x00000006u, 0u, 0x00000010u, 96u, 1u, "CAP_DRAIN_STATUS" },
+    { 0x00010001u, 1u, 0x00000200u, 96u, 0u, "SCOPE_CREATE_CHILD" },
+    { 0x00010002u, 1u, 0x00000001u, 176u, 1u, "SCOPE_QUERY" },
+    { 0x00010003u, 1u, 0x00000200u, 80u, 0u, "SCOPE_SET_LIMITS" },
+    { 0x00010004u, 1u, 0x00000400u, 0u, 0u, "SCOPE_FENCE" },
+    { 0x00010005u, 1u, 0x00000001u, 96u, 1u, "SCOPE_DRAIN_STATUS" },
+    { 0x00010006u, 1u, 0x00000400u, 96u, 1u, "SCOPE_RETIRE" },
+    { 0x00010007u, 1u, 0x00000100u, 56u, 0u, "SCOPE_CREATE_DOMAIN" },
+    { 0x00010008u, 1u, 0x00000100u, 64u, 0u, "SCOPE_CREATE_MEMORY" },
+    { 0x00010009u, 1u, 0x00000100u, 56u, 0u, "SCOPE_CREATE_ENDPOINT" },
+    { 0x0001000Au, 1u, 0x00000100u, 0u, 0u, "SCOPE_CREATE_SIGNAL" },
+    { 0x0001000Bu, 1u, 0x00000100u, 48u, 0u, "SCOPE_CREATE_TIMER" },
+    { 0x00020001u, 2u, 0x00000100u, 64u, 0u, "DOMAIN_MAP" },
+    { 0x00020002u, 2u, 0x00000100u, 48u, 0u, "DOMAIN_UNMAP" },
+    { 0x00020003u, 2u, 0x00000100u, 56u, 0u, "DOMAIN_INSTALL_CAP" },
+    { 0x00020004u, 2u, 0x00000100u, 64u, 0u, "DOMAIN_ADD_THREAD" },
+    { 0x00020005u, 2u, 0x00000100u, 48u, 0u, "DOMAIN_SET_FAULT_CHANNEL" },
+    { 0x00020006u, 2u, 0x00000200u, 0u, 0u, "DOMAIN_ACTIVATE" },
+    { 0x00020007u, 2u, 0x00000400u, 0u, 0u, "DOMAIN_TERMINATE" },
+    { 0x00020008u, 2u, 0x00000800u, 104u, 1u, "DOMAIN_QUERY" },
+    { 0x00030001u, 3u, 0x00000001u, 88u, 1u, "MEMORY_QUERY" },
+    { 0x00030002u, 3u, 0x00000200u, 64u, 0u, "MEMORY_COPY" },
+    { 0x00030003u, 3u, 0x00001000u, 88u, 1u, "MEMORY_SEAL" },
+    { 0x00030004u, 3u, 0x00000200u, 304u, 0u, "MEMORY_WRITE" },
+    { 0x00030005u, 3u, 0x00000100u, 304u, 1u, "MEMORY_READ" },
+    { 0x00040001u, 4u, 0x00000800u, 56u, 0u, "ENDPOINT_BIND_FACET" },
+    { 0x00040002u, 4u, 0x00000200u, 344u, 1u, "ENDPOINT_CALL" },
+    { 0x00040003u, 4u, 0x00000100u, 344u, 0u, "ENDPOINT_SEND" },
+    { 0x00040004u, 4u, 0x00000400u, 408u, 1u, "ENDPOINT_RECEIVE" },
+    { 0x00040005u, 4u, 0x00000001u, 80u, 1u, "ENDPOINT_QUERY" },
+    { 0x00050001u, 5u, 0x00000100u, 352u, 0u, "INVOCATION_REPLY" },
+    { 0x00050002u, 5u, 0x00000200u, 48u, 0u, "INVOCATION_BEGIN_EFFECT" },
+    { 0x00050003u, 5u, 0x00000400u, 48u, 0u, "INVOCATION_RESOLVE" },
+    { 0x00050004u, 5u, 0x00000001u, 96u, 1u, "INVOCATION_QUERY" },
+    { 0x00050005u, 5u, 0x00000800u, 0u, 0u, "INVOCATION_BIND_WORKER" },
+    { 0x00050006u, 5u, 0x00000800u, 0u, 0u, "INVOCATION_UNBIND_WORKER" },
+    { 0x00060001u, 6u, 0x00000100u, 40u, 0u, "SIGNAL_RAISE" },
+    { 0x00060002u, 6u, 0x00000200u, 64u, 1u, "SIGNAL_WAIT" },
+    { 0x00060003u, 6u, 0x00000001u, 64u, 1u, "SIGNAL_QUERY" },
+    { 0x00070001u, 7u, 0x00000100u, 40u, 0u, "TIMER_ARM" },
+    { 0x00070002u, 7u, 0x00000100u, 0u, 0u, "TIMER_CANCEL" },
+    { 0x00070003u, 7u, 0x00000001u, 64u, 1u, "TIMER_QUERY" },
+    { 0x00080001u, 8u, 0x00000100u, 432u, 1u, "LOG_READ" },
+    { 0x00080002u, 8u, 0x00000200u, 64u, 0u, "LOG_APPEND" },
+    { 0x00080003u, 8u, 0x00000400u, 40u, 0u, "LOG_ACK" },
+    { 0x00080004u, 8u, 0x00000001u, 72u, 1u, "LOG_QUERY" },
+    { 0x00090001u, 9u, 0x00000001u, 264u, 1u, "DEVICE_QUERY" },
+    { 0x00090002u, 9u, 0x00000100u, 56u, 0u, "DEVICE_MAP_REGION" },
+    { 0x00090003u, 9u, 0x00000100u, 56u, 0u, "DEVICE_UNMAP_REGION" },
+    { 0x00090004u, 9u, 0x00000200u, 56u, 0u, "DEVICE_BIND_IRQ" },
+    { 0x00090005u, 9u, 0x00000800u, 40u, 0u, "DEVICE_SET_MASTER" },
+    { 0x00090006u, 9u, 0x00000400u, 72u, 1u, "DEVICE_DMA_MAP" },
+    { 0x00090007u, 9u, 0x00000400u, 56u, 0u, "DEVICE_DMA_UNMAP" },
+    { 0x00090008u, 9u, 0x00000800u, 264u, 1u, "DEVICE_RESET" },
+};
+
+/* Looks up an operation code, or NULL when the number is not assigned. */
+static inline const thalyx_op_spec_t *thalyx_op_spec(uint32_t code) {
+    for (unsigned i = 0; i < THALYX_OPERATION_COUNT; i++) {
+        if (thalyx_operations[i].code == code) {
+            return &thalyx_operations[i];
+        }
+    }
+    return NULL;
+}
 
 /* Common descriptor header fixed by vault/architecture/abi.md. */
 typedef struct {
@@ -944,7 +1041,11 @@ typedef struct {
     uint64_t rip; /* Schema field `rip`, little-endian `u64`. */
     uint64_t rsp; /* Schema field `rsp`, little-endian `u64`. */
     uint64_t address; /* Schema field `address`, little-endian `u64`. */
+#ifdef __cplusplus
+    uint32_t class_; /* Schema field `class`, little-endian `u32`. */
+#else
     uint32_t class; /* Schema field `class`, little-endian `u32`. */
+#endif
     uint32_t reserved0; /* Reserved, must be zero. */
 } thalyx_fault_report_t;
 _Static_assert(sizeof(thalyx_fault_report_t) == 72, "FaultReport size");
@@ -957,7 +1058,11 @@ _Static_assert(offsetof(thalyx_fault_report_t, error_code) == 32, "FaultReport.e
 _Static_assert(offsetof(thalyx_fault_report_t, rip) == 40, "FaultReport.rip offset");
 _Static_assert(offsetof(thalyx_fault_report_t, rsp) == 48, "FaultReport.rsp offset");
 _Static_assert(offsetof(thalyx_fault_report_t, address) == 56, "FaultReport.address offset");
+#ifdef __cplusplus
+_Static_assert(offsetof(thalyx_fault_report_t, class_) == 64, "FaultReport.class offset");
+#else
 _Static_assert(offsetof(thalyx_fault_report_t, class) == 64, "FaultReport.class offset");
+#endif
 _Static_assert(offsetof(thalyx_fault_report_t, reserved0) == 68, "FaultReport.reserved0 offset");
 
 /* One register region of a device the driver may be given. Offsets and lengths are the kernel's, validated against the base address register they live in. */

@@ -454,7 +454,7 @@ fn build(
     let owner_scope = machine.domains[index].owner_scope;
     let domain_generation = machine.domains[index].generation;
     let thread = &mut machine.threads[thread_index];
-    thread.state = ThreadState::Empty; // stays unschedulable until activation
+    thread.state = ThreadState::Held; // allocated, unschedulable until activation
     thread.kind = ThreadKind::User;
     thread.domain = index;
     thread.domain_generation = domain_generation;
@@ -479,6 +479,9 @@ fn build(
     thread.preemptions = 0;
     thread.syscalls = 0;
     thread.ring3_confirmed = false;
+    // A slot is reused across domains. A thread pointer left by the previous
+    // occupant would be an address in someone else's space.
+    thread.fs_base = 0;
     machine.domains[index].threads[0] = Some(thread_index);
 
     // The thread charges its owner scope from here, so it holds one of that
@@ -589,6 +592,25 @@ pub fn terminate_on_fault(frame: &TrapFrame, cr2: u64) -> ! {
         let mut machine = MACHINE.lock();
         let thread_index = machine.current();
         let domain_index = machine.threads[thread_index].domain;
+        // A thread that was stopped by authority while it was running, and
+        // whose withdrawn mappings caught up with it before the kick did. It
+        // has not done anything its program should be charged with; it leaves,
+        // and the fault is not counted against a domain already terminated.
+        if machine.threads[thread_index].state == ThreadState::Dead {
+            let name = machine.domains[domain_index].name_str();
+            event!(
+                "thread.stopped_late",
+                "cpu={} domain={domain_index} name={name} thread={thread_index} rip=0x{:x} \
+                 vector=0x{:x} cr2=0x{:x} class=stopped_by_authority action=leave \
+                 kernel=survives",
+                crate::percpu::index(),
+                record.rip,
+                record.vector,
+                record.cr2
+            );
+            drop(machine);
+            crate::sched::switch_away_from_dead();
+        }
         machine.user_faults += 1;
         machine.domains[domain_index].fault = Some(record);
         machine.domains[domain_index].faults += 1;
@@ -686,6 +708,33 @@ fn reapable(machine: &crate::state::Machine, index: usize) -> bool {
         }
     }
     true
+}
+
+/// Interrupts every other processor that is running a thread of `index`.
+///
+/// Called under the machine lock from a termination, so the set of processors
+/// standing on the domain cannot change under it. The calling processor is
+/// left out: if it is running one of the threads, it is the caller itself, and
+/// the caller leaves on its own way out.
+fn kick_running_threads(machine: &Machine, index: usize) {
+    let me = crate::percpu::index();
+    let Some(controller) = crate::arch::x86_64::lapic::current() else {
+        return;
+    };
+    for cpu in 0..crate::limits::MAX_CPUS {
+        let slot = machine.cpus[cpu];
+        if cpu == me || !slot.online || slot.current == usize::MAX {
+            continue;
+        }
+        let thread = &machine.threads[slot.current];
+        if thread.domain != index || thread.domain_generation != machine.domains[index].generation {
+            continue;
+        }
+        let apic_id = crate::smp::apic_id_of(cpu);
+        if apic_id != u32::MAX {
+            controller.send_fixed(apic_id, crate::arch::x86_64::trap::RESCHEDULE_VECTOR);
+        }
+    }
 }
 
 /// Reclaims every domain that has stopped and that no processor is still
@@ -855,7 +904,7 @@ pub fn add_thread_in(
     let thread_id = machine.next_id().unwrap_or(0);
     let generation = machine.domains[index].generation;
     let thread = &mut machine.threads[thread_index];
-    thread.state = ThreadState::Empty;
+    thread.state = ThreadState::Held;
     thread.kind = ThreadKind::User;
     thread.domain = index;
     thread.domain_generation = generation;
@@ -878,6 +927,7 @@ pub fn add_thread_in(
     thread.preemptions = 0;
     thread.syscalls = 0;
     thread.ring3_confirmed = false;
+    thread.fs_base = 0;
 
     machine.domains[index].threads[slot] = Some(thread_index);
     machine.domains[index].reserved_pages += layout::KSTACK_PAGES;
@@ -920,6 +970,13 @@ pub fn terminate_in(machine: &mut Machine, index: usize, reason: ExitReason, cod
         machine.threads[thread].wait = Wait::None;
         machine.threads[thread].wait_deadline_ns = 0;
     }
+
+    // A thread of this domain that is on another processor right now keeps
+    // executing user instructions until something brings it into the kernel.
+    // That something is sent here, so it is this and not the page fault the
+    // withdrawn mappings below would otherwise produce: the processor takes the
+    // interrupt, finds its current thread `Dead`, and leaves it.
+    kick_running_threads(machine, index);
 
     // Direct access goes away with the mappings, before the frames are touched.
     for map_index in 0..machine.maps.len() {

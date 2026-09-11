@@ -228,6 +228,7 @@ struct Plan {
     load_fpu: *const fpu::FpuState,
     kstack_top: u64,
     cr3: u64,
+    fs_base: u64,
     migrated_from: usize,
     migrations: u64,
     domain: usize,
@@ -305,6 +306,7 @@ fn plan(cpu: usize) -> Option<Plan> {
         load_fpu,
         kstack_top: machine.threads[next].kstack_top,
         cr3: machine.threads[next].cr3,
+        fs_base: machine.threads[next].fs_base,
         migrated_from,
         migrations: machine.threads[next].migrations,
         domain: machine.threads[next].domain,
@@ -352,6 +354,11 @@ fn schedule(cpu: usize) -> usize {
         if plan.cr3 != 0 && plan.cr3 != cpu::read_cr3() {
             cpu::write_cr3(plan.cr3);
         }
+        // The incoming thread's own FS base, written unconditionally: the value
+        // this processor holds is whatever the last thread here set, and a
+        // thread must never run with another's. The kernel does not use FS, so
+        // writing it before the switch changes nothing on this side.
+        cpu::wrmsr(cpu::MSR_FS_BASE, plan.fs_base);
         context::switch_context(plan.save_rsp, plan.load_rsp);
     }
 
@@ -502,6 +509,53 @@ pub fn on_tick(frame: &trap::TrapFrame) {
 /// returns, the wake status the waker left is the reason it returned.
 pub fn block_current() {
     schedule(percpu::index());
+}
+
+/// Does not return to a thread that was stopped while it was running.
+///
+/// A domain terminated by authority marks its threads `Dead` under the lock and
+/// withdraws their mappings. A thread of that domain that was on another
+/// processor at that moment keeps executing user instructions until something
+/// brings it into the kernel. Every entry from user mode ends here, so that
+/// something is the first interrupt, trap or syscall after the termination --
+/// the kick the termination sends, usually -- and not the page fault its
+/// withdrawn mappings would eventually produce. A fault that did get there
+/// first is classified the same way, in `domain::terminate_on_fault`, because a
+/// thread that was told to stop and then touched memory taken from it has not
+/// done anything the fault record should hold against its program.
+///
+/// Found by K5's `engine` stage: the language runtime was stopped by its
+/// launcher while it was still freeing its heap on a fourth processor, faulted
+/// on the arena the termination had just withdrawn, and the run counted a user
+/// fault against a domain that had already been terminated.
+pub fn leave_if_dead(frame: &trap::TrapFrame) {
+    if !frame.from_user() {
+        return;
+    }
+    let cpu = percpu::index();
+    let stopped = {
+        let machine = MACHINE.lock();
+        let current = machine.cpus[cpu].current;
+        if current == usize::MAX {
+            None
+        } else {
+            let thread = &machine.threads[current];
+            (thread.kind == ThreadKind::User && thread.state == ThreadState::Dead)
+                .then_some((current, thread.domain))
+        }
+    };
+    let Some((thread, domain)) = stopped else {
+        return;
+    };
+    let name = crate::domain::domain_name(domain);
+    event!(
+        "thread.stopped_late",
+        "cpu={cpu} domain={domain} name={name} thread={thread} rip=0x{:x} vector=0x{:x} \
+         class=stopped_by_authority action=leave kernel=survives",
+        frame.rip,
+        frame.vector
+    );
+    switch_away_from_dead()
 }
 
 /// Leaves a thread that will never run again and does not return.

@@ -14,7 +14,7 @@
   ],
   "version": {
     "major": 0,
-    "minor": 2
+    "minor": 3
   },
   "limits": {
     "max_descriptor_len": 4096,
@@ -24,7 +24,7 @@
     "max_derive_depth": 32,
     "max_handles_per_domain": 32,
     "max_endpoint_queue": 8,
-    "max_memory_pages_per_object": 512,
+    "max_memory_pages_per_object": 4096,
     "cpu_window_ns": 10000000,
     "cpu_quantum_ns": 1000000,
     "page_size": 4096,
@@ -64,6 +64,11 @@
       "name": "CLOCK_QUERY",
       "value": 4,
       "doc": "Monotonic nanoseconds since boot, in RDX. No handle, no descriptor, no authority: every deadline in this interface is one of these, and a program that cannot read the clock cannot state one."
+    },
+    {
+      "name": "THREAD_POINTER_SET",
+      "value": 5,
+      "doc": "Set the calling thread's thread pointer: the FS base its code reaches thread-local storage and the stack guard through. RSI carries the address; zero clears it. Register state of one's own thread needs no capability, exactly as a stack pointer needs none, and names no object. Refused with INVALID_ADDRESS outside the user range. Added in K5: the C++ runtime a real inference engine links addresses its exception state and its stack guard through FS, and a thread without its own FS base cannot run it."
     }
   ],
   "object_types": [

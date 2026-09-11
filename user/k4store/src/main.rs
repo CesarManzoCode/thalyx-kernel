@@ -573,6 +573,15 @@ impl Service {
 
     fn read(&mut self, request: &StoreRequest, lent: u64) -> StoreReply {
         if !self.served(&request.digest0) {
+            // Two different answers, and conflating them is the mistake this
+            // distinction exists to stop. `NOT_FOUND` says the store has
+            // looked and this object is not part of anything it serves;
+            // `UNAVAILABLE` says the store could not look, because reading the
+            // medium was refused. Answering the first when the second is true
+            // tells a caller that a version it published does not exist.
+            if self.store.closure_incomplete {
+                return refused(store_status::UNAVAILABLE);
+            }
             return refused(store_status::NOT_FOUND);
         }
         let bytes = transfer();

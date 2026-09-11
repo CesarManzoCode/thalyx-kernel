@@ -19,6 +19,9 @@ pub const MSR_LSTAR: u32 = 0xC000_0082;
 pub const MSR_FMASK: u32 = 0xC000_0084;
 /// `IA32_APIC_BASE`.
 pub const MSR_APIC_BASE: u32 = 0x1B;
+/// `IA32_FS_BASE`: base of the `FS` segment. The kernel never addresses
+/// through it; it holds the running user thread's own thread pointer.
+pub const MSR_FS_BASE: u32 = 0xC000_0100;
 /// `IA32_GS_BASE`: base of the `GS` segment at the current privilege level.
 pub const MSR_GS_BASE: u32 = 0xC000_0101;
 /// `IA32_KERNEL_GS_BASE`: the base `swapgs` exchanges with `IA32_GS_BASE`.
