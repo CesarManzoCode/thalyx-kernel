@@ -133,8 +133,9 @@ def suite(scale: float, sizes: dict) -> list[tuple[str, int, int, int]]:
     for name, param, samples, warmup in SUITE:
         key = f"{name}:{param}"
         if name not in FIXED:
-            if key in sizes:
-                samples = sizes[key]
+            # A pilot's recommendation raises a count, never lowers it: the
+            # suite's own counts are the floor a p99 needs.
+            samples = max(samples, sizes.get(key, 0))
             samples = max(10, int(samples * scale))
         out.append((name, param, min(samples, 16384), warmup))
     return out
@@ -205,7 +206,8 @@ def boot_native(tools, directory: Path, plan: bytes, timeout: float) -> dict:
     (directory / "qemu-stderr.log").write_text(err)
     return {"argv": argv, "exit_status": status, "wall_seconds": round(wall, 3),
             "image_sha256": sha256(image), "kernel_sha256": manifest["artifacts"]["kernel"]["sha256"],
-            "modules": manifest["modules"], "log": "serial.log"}
+            "modules": manifest["modules"], "log": "serial.log",
+            "log_sha256": sha256(directory / "serial.log")}
 
 
 def boot_linux(tools, directory: Path, plan: bytes, arm: str, timeout: float) -> dict:
@@ -228,7 +230,8 @@ def boot_linux(tools, directory: Path, plan: bytes, arm: str, timeout: float) ->
     (directory / "qemu-stderr.log").write_text(err)
     return {"argv": argv, "exit_status": status, "wall_seconds": round(wall, 3),
             "initrd_sha256": sha256(initrd), "kernel_sha256": sha256(LINUX / "vmlinuz"),
-            "log": "debugcon.log"}
+            "log": "debugcon.log",
+            "log_sha256": sha256(debugcon) if debugcon.exists() else None}
 
 
 def kernel_summaries(text: str) -> dict:
@@ -369,6 +372,8 @@ def main() -> int:
     (out / "results.json").write_text(json.dumps(results, indent=2, default=str) + "\n")
     (out / "sizes.json").write_text(json.dumps(
         {key: value["samples_needed"] for key, value in results["sizes"].items()}, indent=2) + "\n")
+    print(json.dumps({"rounds_recommended": max(
+        (value["rounds_needed"] for value in results["sizes"].values()), default=0)}))
     for item in results["results"]:
         line = [f"{item['bench']}:{item['param']}"]
         for arm, stats in item["backends"].items():

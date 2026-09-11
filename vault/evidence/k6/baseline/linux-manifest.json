@@ -1,0 +1,59 @@
+{
+  "note": "the Linux side of a paired comparison, run as a guest on the same virtual machine; not native evidence",
+  "bench": {
+    "path": "build/k6/linux/lbench",
+    "sha256": "b7a14d146ec79d65919cd194aee052bb7dcd62d7530bc8c028bc5734a53b598b",
+    "sources": {
+      "tests/k6/bench.c": "f79aeab0ff249157be16e5c9c37d87340a8c8d73c94044a3bd1decaa60ed29e3",
+      "tests/k6/plat_linux.c": "912bac57d9c90c5b6ab6dc9179aed7540a3544fb26a67cba0007baca2247663a"
+    },
+    "flags": [
+      "-std=gnu11",
+      "-O2",
+      "-g",
+      "-Wall",
+      "-Wextra",
+      "-Wno-unused-parameter",
+      "-m64",
+      "-mcmodel=small",
+      "-mred-zone",
+      "-msse",
+      "-msse2",
+      "-mfpmath=sse",
+      "-mno-avx",
+      "-mno-avx2",
+      "-mno-sse4.1",
+      "-mno-sse4.2",
+      "-fno-stack-protector",
+      "-fno-common",
+      "-fno-strict-aliasing",
+      "-fno-ident",
+      "-fno-pie",
+      "-no-pie",
+      "-iquote/home/cesarmanzocode/thalyx-kernel/tests/k6",
+      "-iquote/home/cesarmanzocode/thalyx-kernel/user/native/include"
+    ]
+  },
+  "engine": {
+    "path": "build/k6/linux/thalyx-engine",
+    "sha256": "7e725bec9a84196d73423a366a6a95cbf7c2a4080fbb88bd3c95fa075dadac4d",
+    "source": "engine/thalyx-engine.cpp at the pinned Thalyx revision, unchanged, linked statically from the K5 reference objects"
+  },
+  "model": {
+    "path": "build/reference/tiny.gguf",
+    "sha256": "1b726566329f3aaca2f6d89ee0ec4efc31986936628ca6d68591077c857d3267"
+  },
+  "initramfs": {
+    "path": "build/k6/linux/base.cpio",
+    "sha256": "f86820ecf0356fcb81b915e8bc73b64f305127279f0efe3c750120c0bbd2ab4d"
+  },
+  "kernel": {
+    "release": "7.2.4-arch1-2",
+    "source": "/usr/lib/modules/7.2.4-arch1-2/vmlinuz",
+    "package": "linux",
+    "sha256": "ffcb6e464b3d4c4182fac41be54e7c6ec4487eabd73a0d2133756cbb38d3a85f",
+    "path": "build/k6/linux/vmlinuz"
+  },
+  "compiler": "gcc (GCC) 16.2.1 20260810",
+  "glibc": "glibc 2.44"
+}

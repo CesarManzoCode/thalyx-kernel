@@ -13,6 +13,8 @@ status: designed
 | Publicación semántica | Log del servicio de estado con raíz, política y resultado. | Resultado durable bajo sus hipótesis de disco y TCB; no describe cada instrucción ejecutada. |
 | Diagnóstico | Trazas, contadores, muestras y logs de servicios. | Rendimiento y depuración; puede perder eventos y debe declararlo. |
 
+El plano de diagnóstico distingue, desde K6, registros de **traza** —uno por operación u objeto— y de **resumen** —qué es el kernel, qué encontró al arrancar, qué falló, qué anotó un programa y qué sumó todo al final—. Un paquete que mide pide solo los resúmenes, con una bandera en su módulo supervisor, y el resumen final dice cuántos registros de traza se retuvieron; los paquetes de las puertas K1–K5 reciben las dos clases. Es la forma concreta de «puede perder eventos y debe declararlo»: bajo KVM un registro costaba tanto como mil de las operaciones que describía, y una medida tomada con la traza puesta era una medida de la traza. [ADR-010](../decisions/ADR-010-k6-parameters-and-wake-policy.md).
+
 No se denomina «auditado» a una operación solo porque había un ring buffer al que se intentó escribir.
 
 ## Recibos de control

@@ -33,8 +33,13 @@ use crate::{event, trace};
 ///
 /// Three levels can be created by a mapping into an untouched region, plus one
 /// for the page it lands in. Reserving the worst case keeps the refusal before
-/// the first frame is taken; the difference stays reserved until the domain is
-/// reclaimed, which is conservative rather than optimistic accounting.
+/// the first frame is taken. What the mapping did not take is returned once
+/// it is installed and the real charge is known, as a domain's build returns
+/// its own surplus; until K6 the whole reserve stayed with the domain for
+/// its lifetime, and a program that mapped and unmapped in a loop -- K6's
+/// mem.map, two hundred times -- exhausted a two-thousand-page scope four
+/// pages at a time. The tables a mapping did allocate stay charged to the
+/// domain, which still holds them.
 const MAP_TABLE_RESERVE: u64 = 4;
 
 /// Builds a domain from an image object, charged to the addressed scope.
@@ -183,6 +188,7 @@ pub fn map(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u6
     }
 
     let base = machine.memories[object].base;
+    let charged_before = machine.allocator().charged(Owner::Domain(target as u16)) as u64;
     let mut installed = 0u32;
     let mut failure = None;
     for page in 0..u64::from(request.page_count) {
@@ -250,7 +256,18 @@ pub fn map(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u6
         machine.grants[memory.grant as usize].refs =
             machine.grants[memory.grant as usize].refs.saturating_add(1);
     }
-    machine.domains[target].reserved_pages += MAP_TABLE_RESERVE;
+    // The tables the mapping actually took, and the rest of the reserve back.
+    let charged_after = machine.allocator().charged(Owner::Domain(target as u16)) as u64;
+    let taken = charged_after
+        .saturating_sub(charged_before)
+        .min(MAP_TABLE_RESERVE);
+    scope::release(
+        &mut machine.scopes,
+        owner_scope,
+        Resource::MemoryPages,
+        MAP_TABLE_RESERVE - taken,
+    );
+    machine.domains[target].reserved_pages += taken;
     machine.memories[object].map_count += 1;
     if request.rights & right::MEMORY_WRITE != 0 {
         machine.memories[object].writable_maps += 1;

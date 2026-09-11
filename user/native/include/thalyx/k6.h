@@ -98,6 +98,8 @@ __attribute__((unused))
 static const char *const k6_engine_prompt[5] = {"hola hola", "hola", "adios", "adios adios", "hola hola hola hola hola hola"};
 __attribute__((unused))
 static const uint32_t k6_engine_predict[5] = {12u, 12u, 12u, 12u, 400u};
+/* A grammar under which no answer ends, for the request that is cancelled. */
+#define K6_CANCEL_GRAMMAR "root ::= \"hola \" root"
 
 /* What one boot runs, in order. The same bytes reach both backends: a module of the native package, a file of the Linux one. */
 typedef struct {

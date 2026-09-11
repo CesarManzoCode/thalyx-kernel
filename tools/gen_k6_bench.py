@@ -101,6 +101,8 @@ def generate_c(schema: dict) -> str:
     out.append(f"static const char *const k6_engine_prompt[{len(flat)}] = {{{prompts}}};")
     out.append("__attribute__((unused))")
     out.append(f"static const uint32_t k6_engine_predict[{len(flat)}] = {{{predicts}}};")
+    out.append("/* A grammar under which no answer ends, for the request that is cancelled. */")
+    out.append(f"#define K6_CANCEL_GRAMMAR {json.dumps(schema['cancel_grammar'])}")
     out.append("")
     for definition in schema["structs"]:
         fields, size, align = k5.layout(definition)
@@ -175,6 +177,8 @@ def generate_rust(schema: dict) -> str:
     out.append(f"pub const ENGINE_PROMPT: [&str; {len(flat)}] = [{prompts}];")
     out.append("/// Tokens each of those questions may be answered with.")
     out.append(f"pub const ENGINE_PREDICT: [u32; {len(flat)}] = [{predicts}];")
+    out.append("/// A grammar under which no answer ends, for the request that is cancelled.")
+    out.append(f"pub const CANCEL_GRAMMAR: &str = {json.dumps(schema['cancel_grammar'])};")
     out.append("")
     for definition in schema["structs"]:
         fields, size, align = k5.layout(definition)
@@ -226,6 +230,8 @@ def problems(schema: dict) -> list[str]:
             found.append(f"{where}: {bench['equivalence']} without the differences that make it so")
         if bench["id"] >= 1 << 16 or any(p >= 1 << 16 for p in bench["params"]):
             found.append(f"{where}: an id or parameter does not fit the 16 bits BEGIN gives it")
+    if not schema.get("cancel_grammar"):
+        found.append("no cancel_grammar for the request engine.cancel cuts short")
     _, flat = engine_questions()
     if schema["constants"].get("ENGINE_PROMPTS") != len(flat):
         found.append(f"ENGINE_PROMPTS is not the {len(flat)} prompts the K5 fixture holds")

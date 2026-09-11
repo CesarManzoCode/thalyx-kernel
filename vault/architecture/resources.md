@@ -27,7 +27,9 @@ Las métricas derivadas se etiquetan como estimaciones. El kernel no inventa ene
 
 Se elige planificación preemptiva con selección justa jerárquica entre ámbitos elegibles y round-robin entre sus hilos. Los pesos y techos los fija autoridad de recursos. Un cliente no gana CPU creando más hilos. No se introduce un predictor aprendido en el mecanismo de protección.
 
-La cuota inicial usa ventanas **fijas alineadas**, de periodo común P = 10 ms, y presupuesto Q en tiempo agregado de CPU. Q puede exceder P cuando el ámbito tiene paralelismo mayor que uno; siempre está limitado por el padre y los núcleos permitidos. El tamaño de quantum inicial es 1 ms, recortado por saldo y frontera de ventana.
+La cuota inicial usa ventanas **fijas alineadas**, de periodo común P = 10 ms, y presupuesto Q en tiempo agregado de CPU. Q puede exceder P cuando el ámbito tiene paralelismo mayor que uno; siempre está limitado por el padre y los núcleos permitidos. El tamaño de quantum inicial es 1 ms, recortado por saldo y frontera de ventana. El ámbito raíz, y el de sistema bajo él, tienen Q = P por procesador en línea desde K6; hasta entonces la implementación les daba P a secas, y una máquina de cuatro procesadores admitía el trabajo de uno. [ADR-010](../decisions/ADR-010-k6-parameters-and-wake-policy.md).
+
+Cuándo corre un hilo recién despertado es una política aparte, medida en K6: quien despierta suele estar a punto de ceder el procesador, y el despertar se delega a otro solo si no lo hace en un plazo de gracia de 10 µs. Es un parámetro V0 con su trade registrado en la misma decisión.
 
 Para cada ventana W y ámbito S, el objetivo de cobro es:
 

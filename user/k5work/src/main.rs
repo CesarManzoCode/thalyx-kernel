@@ -95,7 +95,7 @@ fn configuration() -> WorkConfig {
         uses_runtime: 0,
         uses_engine: 0,
         inferences: 0,
-        reserved0: 0,
+        hold: 0,
     })
 }
 
@@ -990,6 +990,11 @@ fn run() -> ! {
     };
 
     let done = boot_handle(work_slot::DONE);
+    if config.hold != 0 {
+        // Built to wait: the supervisor says when this work's turn comes, so
+        // what it does happens after something else and not in a race with it.
+        let _ = k2::signal_wait(done, bit::WORK_GO, k2::now_ns() + 240_000_000_000);
+    }
     let ok = match config.role {
         work_role::PUBLISHER | work_role::RIVAL if config.uses_runtime != 0 => {
             run_with_runtime(&mut store, &config)

@@ -1,0 +1,41 @@
+---
+id: ADR-010
+kind: decision
+status: accepted
+---
+# Parámetros V0 revisados con medida, y la política de despertar
+
+**Problema.** Los límites cuantitativos V0 —presupuesto del ámbito raíz, capacidad del log de control, tamaño del lote de recibos, cuanto y ventana— se fijaron como decisiones provisionales antes de medir nada, y el plano de diagnóstico se escribió cuando cada registro costaba una llamada de función en el emulador. K6 es la primera fase que mide, y la primera plataforma que mide es KVM, donde cada byte que sale por el puerto serie es una salida del invitado. Lo que se encontró no fueron ajustes finos sino cuatro parámetros que decidían el resultado de cualquier medida antes de que la medida empezara, y una política de despertar que no existía.
+
+**Evidencia.** La ejecución K6 sobre KVM, medida antes de tocar nada y después de cada cambio: [K6](../evidence/k6-comparison-hardening.md). Cada cifra de abajo está en esa nota con su ejecución.
+
+- El plano de diagnóstico escribía cuatro registros por llamada IPC a 2,7 ms cada uno bajo KVM; una sonda de 32 entradas gastó 31,5 de 58,9 segundos escribiendo 11 424 registros, y `ipc.call` leía 20 ms. Con los registros de traza retenidos, 2,6 µs.
+- El ámbito raíz admitía una ventana de ejecución por ventana en una máquina de cuatro procesadores: cuatro hilos de cómputo rendían lo que uno.
+- Un despertar solo marcaba el hilo como listo; un procesador ocioso lo descubría en su siguiente tick. `sched.wake` leía 200 µs contra un tick de 500.
+- El log de control de 64 celdas se llenaba en 166 µs de llamadas mientras el auditor dormía un tick; despertado por cada recibo, el auditor costaba tanto como el cliente y agotaba su medio presupuesto, y las admisiones se rechazaban por falta de celda.
+- Un dominio muerto y un ámbito retirado conservaban su ranura el resto del arranque: dieciséis cierres agotaban la tabla de dominios, veintidós la de ámbitos. Cada mapeo reservaba cuatro páginas de tablas que no devolvía hasta la reclamación del dominio: doscientos mapeos agotaban un ámbito de dos mil páginas.
+- Un supervisor girando sobre `SCOPE_RETIRE` dejaba sin el cerrojo de la máquina al procesador cuyo cambio de contexto la retirada esperaba, durante milisegundos, hasta que se le desalojaba por presupuesto.
+
+**Elección.**
+
+*Dos clases de registro en el plano de diagnóstico, y una bandera de paquete.* Un registro de **traza** dice que ocurrió una operación o un objeto; uno de **resumen** dice qué es el kernel, qué encontró al arrancar, que algo falló, qué anotó un programa y cuánto sumó todo al final. Las puertas K1–K5 leen las dos clases y sus paquetes no piden nada. Un paquete cuyo módulo supervisor lleva `TRACE_OFF` recibe solo los resúmenes, y `diag.summary` dice cuántos registros de traza retuvo. Es la condición que el [contrato de observabilidad](../architecture/observability.md) pone a un plano que puede perder eventos: declararlo. No cambia nada de lo que el kernel hace, solo de lo que dice, y el plano de recibos no se toca.
+
+*El presupuesto de raíz y de sistema es una ventana por procesador en línea.* El [contrato de recursos](../architecture/resources.md) ya decía que Q puede exceder P cuando hay paralelismo y que lo acotan los núcleos permitidos; la implementación decía una ventana. Ahora coinciden. Los paquetes siguen decidiendo los presupuestos de sus hijos.
+
+*Un despertar se delega solo si quien despierta no cede el procesador en un plazo de gracia.* Quien despierta a otro hilo suele estar a punto de bloquearse —un cliente que espera la respuesta, un servidor que responde, cierra la invocación y vuelve a recibir— y una ida y vuelta síncrona que se repartiera entre dos procesadores costaría una interrupción o una migración en cada sentido. Así que el despertar se anota; lo delega el procesador que lo hizo si vuelve a un hilo que sigue corriendo pasados 10 µs, con una interrupción a un procesador parado, o lo toma un procesador ocioso que lo vio envejecer ese mismo plazo mientras vigilaba, 50 µs, antes de pararse. Los 10 µs son un parámetro V0 medido: a 3, 6 y 10 µs la ida y vuelta síncrona y la latencia de despertar dieron 6,9/5,4, 3,3/8,0 y 2,7/12,0 µs. Se eligió la ida y vuelta entera; el despertar puro queda cuatro veces por encima de Linux y así se registra.
+
+*El log de control tiene 256 celdas, el lote 16 recibos, y `LOG_READ` con plazo espera un lote entero o el plazo.* ABI 0.4. Un auditor que lee sin plazo recibe lo que hay, como antes; uno que lee con plazo duerme en el kernel y despierta cuando hay dieciséis recibos o cuando el plazo vence, con lo que haya entonces. Bajo IPC saturado el auditor despierta una vez por dieciséis admisiones en vez de una por recibo, y el log absorbe medio milisegundo de ráfaga en vez de un sexto. El escenario K4 que pierde el plano de control rellena el log hasta las 56 celdas libres contra las que se escribió, para seguir mostrando lo mismo.
+
+*Las ranuras de dominios y ámbitos se reciclan bajo demanda, no al morir.* Un dominio muerto y reclamado, o un ámbito retirado, que ninguna capacidad nombra ceden su ranura cuando una creación no encuentra ninguna vacía; hasta entonces conservan su contabilidad, que el resumen final lee. Las tramas suyas en cuarentena pasan a la cuenta del kernel para que no se abonen al siguiente ocupante. Un mapeo devuelve la parte de su reserva de tablas que no tomó en cuanto está instalado, como ya hacía la construcción de un dominio.
+
+*El cerrojo de la máquina es un cerrojo de turno.* Los procesadores lo obtienen en el orden en que lo pidieron. Cuesta una operación atómica más por liberación y elimina la inanición.
+
+*Las operaciones de cierre reclaman al entrar y al salir.* `SCOPE_DRAIN_STATUS` y `SCOPE_RETIRE` reclaman dominios muertos antes de mirar; `DOMAIN_TERMINATE` después de parar. Una máquina ocupada podía tardar mucho en tener un turno ocioso, y quien pregunta si un perímetro drenó está girando exactamente sobre eso.
+
+**Alternativas descartadas.** Amortiguar los registros de traza en memoria y volcarlos al final: bajo IPC saturado son cientos de miles por segundo y el formateo solo ya deformaría la medida; y un plano que se vacía a mitad de ejecución para vaciar el búfer no es mejor que uno que retiene y declara. Despertar siempre con interrupción: dobla el coste de la ida y vuelta síncrona, medido. Un `REPLY_RECEIVE` combinado que evite el problema de raíz: es una operación nueva de la interfaz y K6 no añade interfaz. Sondear el log desde el auditor: gastaba su presupuesto en preguntar; dormir un tick: llenaba el log. Recolectar ranuras al morir: borra los resúmenes por dominio y por ámbito que las puertas K1 y K3 leen. Un presupuesto de raíz fijo mayor: seguiría sin tener que ver con la máquina.
+
+**Consecuencias.** Un paquete que mide pide `TRACE_OFF` y su evidencia son los resúmenes, las notas de programa y los contadores del kernel por nota; la puerta K6 se decide desde eso. Las puertas K1–K5 no cambian de mecanismo pero tres de sus paquetes esperaban condiciones por tiempo y ahora las esperan por condición, porque el planificador dejó de esperar un tick por despertar y esos tiempos dejaron de valer. `sched.wake` queda cuatro veces por encima de Linux por decisión, no por accidente. El presupuesto V0 del primer supervisor sigue en media ventana; K6 lo mide y no lo cambia.
+
+**Revisión.** El plazo de gracia, cuando exista una medida de latencia de despertar que importe más que la ida y vuelta síncrona, o hardware físico donde la interrupción cueste menos que bajo KVM. La capacidad del log, cuando un consumidor real muestre otra tasa de admisiones. El cerrojo único de la máquina, que es lo que impide que el IPC escale con los pares, cuando haya evidencia de que un consumidor lo necesita: K6 mide el límite y no lo mueve.
+
+**Referencias.** [Observabilidad](../architecture/observability.md), [recursos](../architecture/resources.md), [concurrencia](../architecture/concurrency.md), [ABI](../architecture/abi.md), [K6](../evidence/k6-comparison-hardening.md), [preguntas abiertas](../roadmap/open-questions.md).

@@ -217,11 +217,16 @@ pub fn kick_idle(machine: &mut Machine) {
 }
 
 /// How long a wake stays with the processor that made it before another
-/// takes it: the few microseconds a server needs to reply, close and receive.
+/// takes it: the few microseconds a server needs to reply, close and receive,
+/// with the auditor contending for the machine lock meanwhile. A V0
+/// parameter, and a trade: K6 measured the synchronous round trip against the
+/// wake-to-run latency with the idle processors' share of it at 3, 6 and 10
+/// microseconds as 6.9/5.4, 3.3/8.0 and 2.7/12.0 microseconds. Ten keeps the
+/// round trip whole.
 pub const WAKE_GRACE_NS: u64 = 10_000;
 
-fn grace_cycles() -> u64 {
-    WAKE_GRACE_NS * time::hz() / 1_000_000_000
+fn grace_cycles(grace_ns: u64) -> u64 {
+    grace_ns * time::hz() / 1_000_000_000
 }
 
 /// Bumped whenever a thread becomes runnable: what an idle processor watches
@@ -249,7 +254,7 @@ fn poll_before_halt() -> bool {
         return false;
     }
     let budget = IDLE_POLL_NS * hz / 1_000_000_000;
-    let grace = grace_cycles();
+    let grace = grace_cycles(WAKE_GRACE_NS);
     let start = cpu::rdtsc();
     // SAFETY: no lock is held; this is the idle loop, where the handler that
     // runs may switch away from this context and back.
@@ -311,7 +316,7 @@ pub fn flush_wake() {
     let me = percpu::index();
     let mut machine = MACHINE.lock();
     if !machine.cpus[me].wake_pending
-        || cpu::rdtsc().wrapping_sub(machine.cpus[me].wake_pending_at) < grace_cycles()
+        || cpu::rdtsc().wrapping_sub(machine.cpus[me].wake_pending_at) < grace_cycles(WAKE_GRACE_NS)
     {
         return;
     }

@@ -801,14 +801,13 @@ pub fn collect_retired(machine: &mut crate::state::Machine, index: usize) -> boo
         .scopes
         .iter()
         .any(|other| other.state != State::Empty && other.parent == Some(index as ScopeId));
-    if has_child
-        || machine
-            .allocator()
-            .quarantined_for(crate::mm::Owner::Scope(index as u16))
-            != 0
-    {
+    if has_child {
         return false;
     }
+    machine.allocator().reassign_quarantine(
+        crate::mm::Owner::Scope(index as u16),
+        crate::mm::Owner::Kernel,
+    );
     crate::trace!("scope.collected", "scope={index} id={id}");
     if let Some(parent) = parent {
         machine.scopes[parent as usize].children =

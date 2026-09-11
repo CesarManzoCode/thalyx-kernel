@@ -351,37 +351,51 @@ def verdict(bench: dict, ratio: float, ci: tuple, rounds: int) -> str:
 # --------------------------------------------------------- sample sizes
 
 
-def plan_sizes(runs: list[dict], precision: float = 0.01, round_precision: float = 0.02) -> dict:
-    """Samples per boot and rounds, from the variation a pilot showed.
+def plan_sizes(runs: list[dict], precision: float = 0.02, round_precision: float = 0.05) -> dict:
+    """Samples per boot and rounds, from the variation a pilot showed, per
+    backend, with the larger of the two taken.
 
     Within a boot, the median's standard error is about 1.2533 sigma/sqrt(n),
-    so n = (1.2533 cv / precision)^2 samples put it within `precision` of
-    itself. Between boots, R = (t cv_rounds / round_precision)^2 rounds; t is
-    taken as 2.3, a two-sided 95% value for the handful of rounds this is
-    about. Both are then bounded by what a boot can hold and a sprint can run,
-    and the result says when the bound, not the need, decided."""
+    with sigma estimated robustly as 1.4826 MAD -- these samples have long
+    tails, and a standard deviation drawn from them sizes the tail rather
+    than the median. n = (1.2533 cv / precision)^2 samples then put the median
+    within `precision` of itself. Between boots, R = (t cv_rounds /
+    round_precision)^2 rounds, t taken as 2.3, a two-sided 95% value for the
+    handful of rounds this is about. Both are then bounded by what a boot can
+    hold and a sprint can run, and the result says when the bound, not the
+    need, decided."""
     table = benchmarks()
+    limit = schema()["constants"]["SAMPLES_MAX"]
     out = {}
-    for bench_id, param in sorted({(e["bench"], e["param"]) for run in runs
-                                   for e in run["parsed"]["entries"]}):
-        cvs, medians = [], []
+    keys = sorted({(e["bench"], e["param"]) for run in runs for e in run["parsed"]["entries"]})
+    for bench_id, param in keys:
+        per_backend = {}
         for run in runs:
             for entry in run["parsed"]["entries"]:
-                if (entry["bench"], entry["param"]) == (bench_id, param) and len(entry["samples"]) > 5:
-                    values = entry["samples"]
-                    mean = statistics.fmean(values)
-                    if mean:
-                        cvs.append(statistics.pstdev(values) / mean)
-                    medians.append(statistics.median(values))
-        if not cvs:
+                if (entry["bench"], entry["param"]) != (bench_id, param) or len(entry["samples"]) <= 5:
+                    continue
+                values = sorted(entry["samples"])
+                median = quantile(values, 0.5)
+                mad = quantile(sorted(abs(v - median) for v in values), 0.5)
+                sigma = 1.4826 * mad
+                slot = per_backend.setdefault(run["backend"], {"cvs": [], "medians": []})
+                if median:
+                    slot["cvs"].append(sigma / median)
+                slot["medians"].append(median)
+        if not per_backend:
             continue
-        cv = max(cvs)
-        n_needed = math.ceil((1.2533 * cv / precision) ** 2)
-        rounds_cv = (statistics.pstdev(medians) / statistics.fmean(medians)) if len(medians) > 1 else math.nan
-        r_needed = math.ceil((2.3 * rounds_cv / round_precision) ** 2) if not math.isnan(rounds_cv) else None
+        cv = max((max(slot["cvs"]) for slot in per_backend.values() if slot["cvs"]), default=0.0)
+        rounds_cv = 0.0
+        for slot in per_backend.values():
+            if len(slot["medians"]) > 1 and statistics.fmean(slot["medians"]):
+                rounds_cv = max(rounds_cv,
+                                statistics.pstdev(slot["medians"]) / statistics.fmean(slot["medians"]))
+        n_needed = max(10, math.ceil((1.2533 * cv / precision) ** 2))
+        r_needed = max(3, math.ceil((2.3 * rounds_cv / round_precision) ** 2))
         out[f"{table.get(bench_id, {}).get('name', bench_id)}:{param}"] = {
             "within_boot_cv": cv, "between_boot_cv": rounds_cv,
-            "samples_needed": n_needed, "rounds_needed": r_needed,
+            "samples_needed": min(n_needed, limit), "samples_bounded": n_needed > limit,
+            "rounds_needed": r_needed,
         }
     return out
 

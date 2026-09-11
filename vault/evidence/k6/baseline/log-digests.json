@@ -1,0 +1,92 @@
+{
+  "r01-linux-nomitig": {
+    "log": "debugcon.log",
+    "sha256": "a677d6b4a5a300bfbb730a5c875d5db0aad446a06d658c74613f4dbc515b20b7",
+    "bytes": 137570
+  },
+  "r01-linux": {
+    "log": "debugcon.log",
+    "sha256": "8b7f996188a0f511eb4e7c01cca4eb9bf9b549b6a70565ae554390eb006825a9",
+    "bytes": 137524
+  },
+  "r01-native": {
+    "log": "serial.log",
+    "sha256": "058a27187305a3c5fd1538c84c3cf67f0a0442756112ffc77689d07c9b539f3c",
+    "bytes": 2305222
+  },
+  "r02-native": {
+    "log": "serial.log",
+    "sha256": "a4f02c653d0798585100396178e64872e7177bc623dc8e43f6c32430fedb42ba",
+    "bytes": 2307304
+  },
+  "r02-linux": {
+    "log": "debugcon.log",
+    "sha256": "14e812252a118b732115125f9810dde18fa1a834e5de1f9e77ba06f1abd2efe6",
+    "bytes": 137517
+  },
+  "r02-linux-nomitig": {
+    "log": "debugcon.log",
+    "sha256": "97a6cd02b86063199db613fdcf996e4324a38610c18c12e8cde697204b7d2db5",
+    "bytes": 137553
+  },
+  "r03-linux-nomitig": {
+    "log": "debugcon.log",
+    "sha256": "3571fcee1e09142a8a41069d0e6c9e8075444083d694a7e464467dd7a6dab01d",
+    "bytes": 137538
+  },
+  "r03-linux": {
+    "log": "debugcon.log",
+    "sha256": "d330d26864585cef1db83554f9a4036b3313f2b3ef470df732392e624b0b1133",
+    "bytes": 137550
+  },
+  "r03-native": {
+    "log": "serial.log",
+    "sha256": "667ef170c8a1a0d3dee4e64d45416f094e363410ce16bc1d9798dd430a888db5",
+    "bytes": 2307814
+  },
+  "r04-native": {
+    "log": "serial.log",
+    "sha256": "f32635dbdbe33ee79bb054a472984b252269908ffe9621adb55726e03bb4f380",
+    "bytes": 2307424
+  },
+  "r04-linux": {
+    "log": "debugcon.log",
+    "sha256": "2f37023bbebfe31f5eb676008d52cc06c21dc523bcf504c4a1a9c6cded7d397d",
+    "bytes": 137514
+  },
+  "r04-linux-nomitig": {
+    "log": "debugcon.log",
+    "sha256": "1502f70d87dbe351af530b8be46491a198159ea85bfb8e44c5f65d0bcca1a7be",
+    "bytes": 137541
+  },
+  "r05-linux-nomitig": {
+    "log": "debugcon.log",
+    "sha256": "3cf3ac7cb9c293217370ac0aa23dc1adb44e92ee09249767af67709090f6e1d1",
+    "bytes": 137538
+  },
+  "r05-native": {
+    "log": "serial.log",
+    "sha256": "2bd4b8092d0f805582a73ad887c2f5cdc051044ecc33244decc03b3b55beff37",
+    "bytes": 2309190
+  },
+  "r05-linux": {
+    "log": "debugcon.log",
+    "sha256": "37e58ca1f6ee5c3be8b9c9b56d8cf8b6890170a8f08bbdf0139846012a494043",
+    "bytes": 137514
+  },
+  "r06-linux": {
+    "log": "debugcon.log",
+    "sha256": "0e806df8f60f70dae0bd3b753a53962344a8f837d1f2729d6faf620f99602d6d",
+    "bytes": 137563
+  },
+  "r06-native": {
+    "log": "serial.log",
+    "sha256": "d260e48dc1bdc6c16cc0997bf7f65d5027f353dfddf7ab033d4dd2619b3d279b",
+    "bytes": 2310971
+  },
+  "r06-linux-nomitig": {
+    "log": "debugcon.log",
+    "sha256": "0980cf383f2589bdfe7afb7c42c9f08cd2be0cf7019f45f889ac87c6ce63f182",
+    "bytes": 137526
+  }
+}

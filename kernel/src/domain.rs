@@ -769,13 +769,14 @@ pub fn collect_dead(machine: &mut Machine, index: usize) -> bool {
         || domain.refs != 0
         || domain.space.is_some()
         || domain.thread_count() != 0
-        || machine
-            .allocator()
-            .quarantined_for(Owner::Domain(index as u16))
-            != 0
     {
         return false;
     }
+    // Frames of the dead domain still in quarantine wait out their
+    // invalidation on the kernel's account rather than the next occupant's.
+    machine
+        .allocator()
+        .reassign_quarantine(Owner::Domain(index as u16), Owner::Kernel);
     let domain = &machine.domains[index];
     let (generation, id, scope) = (domain.generation, domain.id, domain.owner_scope);
     let name = domain.name_str();

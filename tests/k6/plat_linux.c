@@ -49,6 +49,7 @@
 #define ENGINE "/thalyx-engine"
 #define MODEL "/tiny.gguf"
 #define PROMPT_FILE "/tmp/k6-prompt.txt"
+#define GRAMMAR_FILE "/tmp/k6-grammar.gbnf"
 
 static int out_fd = 2;
 
@@ -80,9 +81,17 @@ uint64_t plat_now_ns(void)
 
 void plat_emit(uint64_t code, uint64_t value)
 {
-    char line[64];
-    int n = snprintf(line, sizeof(line), "K6N %llx %llx\n", (unsigned long long)code,
-                     (unsigned long long)value);
+    char line[96];
+    int n;
+    if (code == K6_NOTE_BEGIN || code == K6_NOTE_END) {
+        /* When, by this guest's clock: the native records carry the kernel's
+         * time, and a plan that took longer on one side than the other should
+         * say where. */
+        n = snprintf(line, sizeof(line), "K6T at %llu\n", (unsigned long long)plat_now_ns());
+        if (n > 0) { report(line, (size_t)n); }
+    }
+    n = snprintf(line, sizeof(line), "K6N %llx %llx\n", (unsigned long long)code,
+                 (unsigned long long)value);
     if (n > 0) { report(line, (size_t)n); }
 }
 
@@ -510,14 +519,33 @@ static void engine_stop(Engine *engine, int signal)
     engine->pid = -1;
 }
 
-static int write_prompt(unsigned index)
+static int write_text_file(const char *path, const char *text)
 {
-    int fd = open(PROMPT_FILE, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (fd < 0) { return -errno; }
-    const char *prompt = k6_engine_prompt[index];
-    int ok = write_all(fd, prompt, strlen(prompt));
+    int ok = write_all(fd, text, strlen(text));
     close(fd);
     return ok == 0 ? 0 : -EIO;
+}
+
+static int write_prompt(unsigned index) { return write_text_file(PROMPT_FILE, k6_engine_prompt[index]); }
+
+/* One request frame: Thalyx's engine takes the prompt and the grammar as
+ * paths, so the grammar, when there is one, is a file too. */
+static int send_request(Engine *engine, unsigned index, const char *grammar_path)
+{
+    uint32_t predict = k6_engine_predict[index];
+    uint64_t seed = 0;
+    uint32_t path_len = (uint32_t)strlen(PROMPT_FILE);
+    uint32_t grammar_len = (uint32_t)strlen(grammar_path);
+    if (write_all(engine->to, "THQ1", 4) != 0 || write_all(engine->to, &predict, 4) != 0
+        || write_all(engine->to, &seed, 8) != 0 || write_all(engine->to, &path_len, 4) != 0
+        || write_all(engine->to, PROMPT_FILE, path_len) != 0
+        || write_all(engine->to, &grammar_len, 4) != 0
+        || (grammar_len && write_all(engine->to, grammar_path, grammar_len) != 0)) {
+        return -EPIPE;
+    }
+    return 0;
 }
 
 /* One request frame and its answer. The body of an answer is the prompt the
@@ -525,22 +553,8 @@ static int write_prompt(unsigned index)
  * which is what the host compares with the reference. */
 static int64_t ask(Engine *engine, unsigned index, uint64_t *digest, uint32_t *length)
 {
-    const char *path = PROMPT_FILE;
-    uint32_t path_len = (uint32_t)strlen(path);
-    uint8_t frame[64];
-    size_t at = 0;
-    memcpy(frame, "THQ1", 4);
-    at = 4;
-    uint32_t predict = k6_engine_predict[index];
-    uint64_t seed = 0;
-    uint32_t no_grammar = 0;
-    memcpy(frame + at, &predict, 4); at += 4;
-    memcpy(frame + at, &seed, 8); at += 8;
-    memcpy(frame + at, &path_len, 4); at += 4;
-    if (write_all(engine->to, frame, at) != 0 || write_all(engine->to, path, path_len) != 0
-        || write_all(engine->to, &no_grammar, 4) != 0) {
-        return -EPIPE;
-    }
+    int sent = send_request(engine, index, "");
+    if (sent != 0) { return sent; }
     uint8_t head[17];
     if (read_exactly(engine->from, head, sizeof(head)) != 0 || memcmp(head, "THA1", 4) != 0) {
         return -EPROTO;
@@ -616,20 +630,33 @@ static int64_t engine_infer(uint32_t index, uint32_t *out, uint32_t n)
     return (int64_t)n;
 }
 
-/* Nanoseconds the engine's main thread has run, from the scheduler's own
- * accounting: the same trigger the native side uses, which is the processor
- * time charged to the request, not a wall-clock delay. */
+/* Nanoseconds the engine has run, summed over its threads from the
+ * scheduler's own accounting: the same trigger the native side uses, which
+ * is the processor time charged to the request, not a wall-clock delay. The
+ * first version read the leader's line alone, and the engine computes on a
+ * thread of its own: the trigger never fired and each sample waited out its
+ * whole minute. */
 static uint64_t run_ns(pid_t pid)
 {
-    char path[64], buffer[128];
-    snprintf(path, sizeof(path), "/proc/%d/schedstat", (int)pid);
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) { return 0; }
-    ssize_t n = read(fd, buffer, sizeof(buffer) - 1);
-    close(fd);
-    if (n <= 0) { return 0; }
-    buffer[n] = 0;
-    return strtoull(buffer, NULL, 10);
+    char path[96], buffer[128];
+    snprintf(path, sizeof(path), "/proc/%d/task", (int)pid);
+    DIR *dir = opendir(path);
+    if (dir == NULL) { return 0; }
+    uint64_t total = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.') { continue; }
+        snprintf(path, sizeof(path), "/proc/%d/task/%s/schedstat", (int)pid, entry->d_name);
+        int fd = open(path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) { continue; }
+        ssize_t n = read(fd, buffer, sizeof(buffer) - 1);
+        close(fd);
+        if (n <= 0) { continue; }
+        buffer[n] = 0;
+        total += strtoull(buffer, NULL, 10);
+    }
+    closedir(dir);
+    return total;
 }
 
 /* The cancellation the Linux profile declares: a signal to the process. The
@@ -643,18 +670,15 @@ static int64_t engine_cancel(uint32_t *out, uint32_t n)
             int64_t status = engine_start(&resident);
             if (status != 0) { return status; }
         }
+        /* Four hundred tokens under a grammar that never accepts an end: the
+         * fixture's long prompt ends after a few tokens on this model, and a
+         * request that has already been answered cannot be cancelled. */
         int64_t status = write_prompt(K6_ENGINE_PROMPTS - 1);
+        if (status == 0) { status = write_text_file(GRAMMAR_FILE, K6_CANCEL_GRAMMAR); }
         if (status != 0) { return status; }
         uint64_t before = run_ns(resident.pid);
-        uint32_t predict = k6_engine_predict[K6_ENGINE_PROMPTS - 1];
-        uint64_t seed = 0;
-        uint32_t path_len = (uint32_t)strlen(PROMPT_FILE), no_grammar = 0;
-        if (write_all(resident.to, "THQ1", 4) != 0 || write_all(resident.to, &predict, 4) != 0
-            || write_all(resident.to, &seed, 8) != 0 || write_all(resident.to, &path_len, 4) != 0
-            || write_all(resident.to, PROMPT_FILE, path_len) != 0
-            || write_all(resident.to, &no_grammar, 4) != 0) {
-            return -EPIPE;
-        }
+        status = send_request(&resident, K6_ENGINE_PROMPTS - 1, GRAMMAR_FILE);
+        if (status != 0) { return status; }
         uint64_t deadline = plat_now_ns() + 60000000000ull;
         while (run_ns(resident.pid) < before + 10000000ull && plat_now_ns() < deadline) {
             struct timespec wait = {0, 100000};

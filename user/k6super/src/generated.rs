@@ -151,6 +151,8 @@ pub const ENGINE_PROMPT: [&str; 5] = [
 ];
 /// Tokens each of those questions may be answered with.
 pub const ENGINE_PREDICT: [u32; 5] = [12, 12, 12, 12, 400];
+/// A grammar under which no answer ends, for the request that is cancelled.
+pub const CANCEL_GRAMMAR: &str = "root ::= \"hola \" root";
 
 /// What one boot runs, in order. The same bytes reach both backends: a module of the native package, a file of the Linux one.
 #[repr(C)]

@@ -179,9 +179,18 @@ static int64_t engine_prepare(void)
 {
     if (slot(K6_SLOT_ENGINE) == 0) { return THALYX_STATUS_INVALID_HANDLE; }
     if (prompt_memory != 0) { return 0; }
-    int64_t status = create_memory(2, MEMORY_RW | THALYX_RIGHT_MEMORY_MAP, &prompt_memory);
+    uint64_t memory = 0;
+    int64_t status = create_memory(2, MEMORY_RW | THALYX_RIGHT_MEMORY_MAP, &memory);
     if (status != 0) { return status; }
-    return map_memory(prompt_memory, K6_PROMPT_VADDR, 2, MEMORY_RW);
+    status = map_memory(memory, K6_PROMPT_VADDR, 2, MEMORY_RW);
+    if (status != 0) {
+        /* Not kept: a buffer that is not mapped is not a prompt buffer, and a
+         * later entry that took it for one wrote through nothing. */
+        th_close(memory);
+        return status;
+    }
+    prompt_memory = memory;
+    return 0;
 }
 
 int64_t plat_prepare(uint32_t bench, uint32_t param)
@@ -318,16 +327,19 @@ void plat_release(uint32_t bench, uint32_t param)
  * own buffer, lent with the call and narrowed on the way; the answer comes
  * back in the same buffer, which is how a K5 work asks, and the digest of the
  * answer's bytes is what the host compares with the reference. */
-static int64_t ask_engine(unsigned index, uint64_t *digest, uint32_t *length)
+static int64_t ask_engine(unsigned index, const char *grammar, uint64_t *digest, uint32_t *length)
 {
     const char *prompt = k6_engine_prompt[index];
     uint32_t len = (uint32_t)strlen(prompt);
+    uint32_t grammar_len = grammar ? (uint32_t)strlen(grammar) : 0;
     memcpy((void *)(uintptr_t)K6_PROMPT_VADDR, prompt, len);
+    if (grammar_len) { memcpy((void *)(uintptr_t)(K6_PROMPT_VADDR + len), grammar, grammar_len); }
     k5_engine_request request;
     memset(&request, 0, sizeof(request));
     request.op = K5_ENGINE_OP_INFER;
     request.predict = k6_engine_predict[index];
     request.prompt_len = len;
+    request.grammar_len = grammar_len;
     th_payload out;
     memset(&out, 0, sizeof(out));
     memcpy(out.bytes, &request, sizeof(request));
@@ -358,7 +370,7 @@ static int64_t engine_infer(uint32_t index, uint32_t *out, uint32_t n)
         uint64_t digest = 0;
         uint32_t length = 0;
         uint64_t c0 = bench_cycles();
-        int64_t status = ask_engine(index, &digest, &length);
+        int64_t status = ask_engine(index, NULL, &digest, &length);
         uint64_t c1 = bench_cycles();
         if (status != 0) {
             if (errors++ == 0) {
@@ -474,7 +486,10 @@ static int asker(void)
     th_signal_raise(K6_SLOT_HANDOFF, K6_ASKER_ASKING_BIT);
     uint64_t digest = 0;
     uint32_t length = 0;
-    int64_t status = ask_engine(K6_ENGINE_PROMPTS - 1, &digest, &length);
+    /* Four hundred tokens under a grammar that never accepts an end: the
+     * fixture's long prompt ends after a few tokens on this model, and a
+     * request that has already been answered cannot be cancelled. */
+    int64_t status = ask_engine(K6_ENGINE_PROMPTS - 1, K6_CANCEL_GRAMMAR, &digest, &length);
     plat_emit(K6_NOTE_AUX, K6_BENCH_ENGINE_CANCEL | (1ull << 16) | ((uint64_t)(uint32_t)status << 32));
     return 0;
 }

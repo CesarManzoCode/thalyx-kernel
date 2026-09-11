@@ -40,17 +40,20 @@ const RUN_DEADLINE_NS: u64 = 240_000_000_000;
 /// How long one wait between checks is.
 const POLL_NS: u64 = 20_000_000;
 /// How much execution the engine charges the asking work after binding to
-/// it before the work's scope is closed: enough for the engine to have
-/// decoded the prompt it was lent -- one batch -- and produced a token, and
-/// short of the inference it was asked for. Under KVM the model answers the
-/// four-hundred-token request in about forty milliseconds of execution, and
-/// the two diagnostic records the engine writes between binding and decoding
-/// cost it nearly three milliseconds each on that platform, charged here; so
-/// the first token is some thirteen milliseconds in, the answer forty, and
-/// the closing has to land between them. Ten milliseconds until K6, when a
-/// scheduler that no longer waited a tick for every wake let the engine
-/// finish before a supervisor polling every millisecond had fenced.
-const CANCEL_AFTER_CPU_NS: u64 = 15_000_000;
+/// it before the work's scope is closed: past the prompt it was lent --
+/// decoded in one batch -- and short of the answer. Under KVM the model
+/// answers the request in about six milliseconds of execution, since the
+/// fixture's long prompt ends at an end-of-generation token early, and the
+/// two diagnostic records the engine writes between binding and decoding
+/// cost it nearly three milliseconds each on that platform, charged here;
+/// the six it writes after the answer are charged there too. So the compute
+/// lies between five and eleven milliseconds of the asking scope's charge,
+/// and the closing has to land inside that. Ten milliseconds until K6, when
+/// a scheduler that no longer waited a tick for every wake let the engine
+/// finish before a supervisor polling every millisecond had fenced; the
+/// asking scope's budget is a twentieth of a window now, so that the window
+/// this has to hit is hundreds of milliseconds wide.
+const CANCEL_AFTER_CPU_NS: u64 = 8_000_000;
 /// How long after a work says it is asking it is closed regardless, if the
 /// engine never binds to it: a run that cannot show the closing ends rather
 /// than waiting for ever, and the gate says why.
@@ -544,7 +547,13 @@ pub fn run(system: u64, supervision: u64, plan: &Plan, shape: &Shape) -> bool {
             uses_runtime: u32::from(shape.uses_runtime && plan_one.role != work_role::ASKER),
             uses_engine: u32::from(shape.uses_engine),
             inferences: u32::from(shape.uses_engine) * 2,
-            reserved0: 0,
+            // In the closing scenario the other work waits for the closing:
+            // what it has to show is the engine serving an unrelated work
+            // after one caller's scope was closed under it, and a work that
+            // ran alongside would as likely have finished before.
+            hold: u32::from(
+                scenario as u32 == scenario::CANCEL && plan_one.role != work_role::ASKER,
+            ),
         };
         let work_parts = WorkParts {
             name: plan_one.name,
@@ -589,7 +598,7 @@ pub fn run(system: u64, supervision: u64, plan: &Plan, shape: &Shape) -> bool {
         // the asking work says on it when it is asking. Every other work is
         // watched through its domain, and the handle is a grant in a table of
         // thirty-two.
-        let done = if plan_one.role == work_role::ASKER {
+        let done = if plan_one.role == work_role::ASKER || scenario as u32 == scenario::CANCEL {
             done
         } else {
             let _ = k2::cap_close(done);
@@ -763,6 +772,15 @@ pub fn run(system: u64, supervision: u64, plan: &Plan, shape: &Shape) -> bool {
             work.scope = 0;
             work.done = 0;
             work.finished = true;
+            // The closing is done; the held work may now have its turn.
+            for slot in standing.iter() {
+                if let Some(other) = slot.as_ref()
+                    && other.plan.role != work_role::ASKER
+                    && other.done != 0
+                {
+                    let _ = k2::signal_raise(other.done, bit::WORK_GO);
+                }
+            }
         }
 
         if all_finished {

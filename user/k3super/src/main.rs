@@ -67,6 +67,9 @@ const BUDGET_WINDOWS: u64 = 12;
 /// The most windows the supervisor waits for the writer to have run on every
 /// processor and the probe to have read its page.
 const SPREAD_WINDOWS: u64 = 200;
+
+/// The longest the supervisor waits for the callers' first call.
+const FIRST_CALL_NS: u64 = 20_000_000_000;
 /// How long a fenced scope is watched before its retirement is attempted
 /// regardless. Generous: the watch ends at quiescence.
 const DRAIN_DEADLINE_NS: u64 = 30_000_000_000;
@@ -607,9 +610,21 @@ fn run() -> ! {
     );
 
     // --- a barrier raised while calls are being admitted -------------------
+    // The first call is waited for as a condition, bounded: the callers share
+    // this supervisor's half-window of execution with the burners and the
+    // writer, and under KVM, where every diagnostic record a burner writes
+    // overruns its dispatch by milliseconds and leaves its scope in debt,
+    // their first turn can come seconds after they were built. A barrier
+    // raised before any call was admitted would have nothing to be measured
+    // against, and the gate says so.
     let mut serviced = 0u64;
     while serviced < SERVICED_BEFORE_FENCE {
-        let deadline = k2::now_ns() + 200_000_000;
+        let deadline = k2::now_ns()
+            + if serviced == 0 {
+                FIRST_CALL_NS
+            } else {
+                200_000_000
+            };
         match k2::endpoint_receive(work_endpoint, deadline, false) {
             Ok((_, invocation)) => {
                 let _ = k2::invocation_reply(invocation, serviced, b"ok");

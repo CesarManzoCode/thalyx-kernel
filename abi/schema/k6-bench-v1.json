@@ -75,6 +75,7 @@
     "SEAL_VADDR": 1946157056,
     "PROMPT_VADDR": 2013265920
   },
+  "cancel_grammar": "root ::= \"hola \" root",
   "notes": {
     "PLAN": {
       "value": 24576,
@@ -391,10 +392,11 @@
       "unit": "us",
       "statistic": "latency",
       "equivalence": "different",
-      "native": "a request for a long answer is cancelled by fencing the caller's scope; the sample is the time from the fence to the next answered request from another caller, the engine staying resident",
-      "linux": "a request for a long answer is cancelled by SIGKILL to the engine, as the Linux profile declares; the sample is the time from the signal to the next answered request, which needs the engine started and loaded again",
+      "native": "a request for four hundred tokens under a grammar that cannot end (cancel_grammar) is cancelled by fencing the caller's scope once the engine has computed ten milliseconds for it; the sample is the time from the fence to the next answered request from another caller, the engine staying resident",
+      "linux": "the same request to Thalyx's engine is cancelled by SIGKILL to the engine once it has computed ten milliseconds for it, as the Linux profile declares; the sample is the time from the signal to the next answered request, which needs the engine started and loaded again",
       "differences": [
-        "this is the declared cancellation mechanism of each profile, not the same mechanism: scope_closure_between_tokens against process_signal"
+        "this is the declared cancellation mechanism of each profile, not the same mechanism: scope_closure_between_tokens against process_signal",
+        "the fixture's own long prompt ends at an end-of-generation token after a few tokens on this model, so the request is made under a grammar that never accepts one"
       ]
     },
     {
