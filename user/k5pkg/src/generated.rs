@@ -173,6 +173,8 @@ pub mod note {
     pub const WORK_REBASED: u64 = 0x521A;
     /// A check the program asked for needs a tool this backend does not have, and the launcher refused it rather than answering with a weaker one. Value: the tool identity asked for.
     pub const PROFILE_REFUSED: u64 = 0x521B;
+    /// Whether llama.cpp can map files on this platform, as it reports itself. Value: 1 or 0. The profile declares it, and this is where the declaration is checked against the engine that runs.
+    pub const ENGINE_MMAP: u64 = 0x5513;
 }
 
 /// `HostOp` values crossing the boundary as integers.
@@ -333,6 +335,12 @@ pub mod engine_case {
     /// Tokens each answer of the `long` case may run to.
     pub const LONG_PREDICT: u32 = 400;
 }
+
+/// The profile this backend declares, as the fixture states it: the JSON
+/// the port publishes with every version, byte for byte, so what a consumer
+/// reads is what the schema says and the gate holds it against the kernel's
+/// records.
+pub const NATIVE_PROFILE_JSON: &str = "{\"audited_control\":true,\"cancellation\":\"scope_closure_between_tokens\",\"dma_isolated\":false,\"engine_compute_threads\":1,\"engine_mmap\":false,\"engine_resident\":true,\"managed_local_v1\":true,\"mutable_files\":false,\"power_cut_durability\":\"unknown\",\"type_check\":false}";
 
 /// The inline half of a host call; the bytes are in the shared region.
 #[repr(C)]

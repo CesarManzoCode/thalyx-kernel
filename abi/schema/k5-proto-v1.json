@@ -872,6 +872,10 @@
     "PROFILE_REFUSED": {
       "value": 21019,
       "doc": "A check the program asked for needs a tool this backend does not have, and the launcher refused it rather than answering with a weaker one. Value: the tool identity asked for."
+    },
+    "ENGINE_MMAP": {
+      "value": 21779,
+      "doc": "Whether llama.cpp can map files on this platform, as it reports itself. Value: 1 or 0. The profile declares it, and this is where the declaration is checked against the engine that runs."
     }
   },
   "fixtures": {
@@ -914,6 +918,53 @@
           "doc": "One inference long enough to be cancelled while it runs: about a second of generation on the emulated processor, against a closure that comes a quarter of a second in."
         }
       ]
+    },
+    "profile": {
+      "comment": [
+        "The profile each backend declares, in the vocabulary of",
+        "vault/integration/thalyx.md: features a consumer asks for and demands,",
+        "not a level. The native declaration is what the port publishes in",
+        "every version it makes and what the gate holds against the kernel's own",
+        "records; the Linux declaration is a static reading of the pinned Thalyx",
+        "revision, recorded here so the differences are written down in one",
+        "place. Nothing about Linux is executed by this repository."
+      ],
+      "features": {
+        "managed_local_v1": "immutable roots, durable CAS publication, defined grants and closure, explicit resources, no writer to the store but the service",
+        "audited_control": "control receipts captured with reserved cells for the events they cover",
+        "dma_isolated": "a device cannot write memory it was not granted; needs a programmed remapping unit",
+        "mutable_files": "the workspace is a directory tree that anything with a path may write",
+        "type_check": "a validation may compile the candidate with the real toolchain",
+        "engine_resident": "weights loaded once and kept by a service that outlives the work",
+        "engine_mmap": "the engine maps the model file rather than reading it into charged memory",
+        "engine_compute_threads": "threads one inference computes with",
+        "cancellation": "how an inference stops when the work that asked is closed",
+        "power_cut_durability": "what a published version survives"
+      },
+      "native": {
+        "managed_local_v1": true,
+        "audited_control": true,
+        "dma_isolated": false,
+        "mutable_files": false,
+        "type_check": false,
+        "engine_resident": true,
+        "engine_mmap": false,
+        "engine_compute_threads": 1,
+        "cancellation": "scope_closure_between_tokens",
+        "power_cut_durability": "unknown"
+      },
+      "linux": {
+        "managed_local_v1": false,
+        "audited_control": false,
+        "dma_isolated": "not_declared",
+        "mutable_files": true,
+        "type_check": true,
+        "engine_resident": true,
+        "engine_mmap": true,
+        "engine_compute_threads": "configurable",
+        "cancellation": "process_signal",
+        "power_cut_durability": "filesystem_rename_and_fsync"
+      }
     }
   }
 }

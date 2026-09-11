@@ -447,6 +447,10 @@ extern "C" int th_main(const th_config *config)
     th_note(K5_NOTE_ENGINE_LOADED, r.load_ns);
     th_note(K5_NOTE_ENGINE_WEIGHTS, r.weight_bytes);
     th_note(K5_NOTE_ENGINE_CONTEXT, llama_n_ctx(r.ctx));
+    // What the profile declares about this engine, asked of llama.cpp itself:
+    // on this platform there are no mapped files, and the weights this engine
+    // holds are pages it read into memory charged to its own scope.
+    th_note(K5_NOTE_ENGINE_MMAP, llama_supports_mmap() ? 1 : 0);
     th_note(K5_NOTE_ENGINE_LOG_LINES, log_lines);
     th_signal_raise(SLOT_READY, READY_BIT);
 

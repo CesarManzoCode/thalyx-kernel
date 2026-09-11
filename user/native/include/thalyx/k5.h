@@ -168,6 +168,8 @@
 #define K5_NOTE_WORK_REBASED 0x521Aull
 /* A check the program asked for needs a tool this backend does not have, and the launcher refused it rather than answering with a weaker one. Value: the tool identity asked for. */
 #define K5_NOTE_PROFILE_REFUSED 0x521Bull
+/* Whether llama.cpp can map files on this platform, as it reports itself. Value: 1 or 0. The profile declares it, and this is where the declaration is checked against the engine that runs. */
+#define K5_NOTE_ENGINE_MMAP 0x5513ull
 
 /* One Thalyx request: a verb and its arguments. */
 #define K5_HOST_OP_REQUEST 1u

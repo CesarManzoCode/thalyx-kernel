@@ -50,9 +50,13 @@ pub mod verb {
     pub const GREP: u32 = 7;
     /// The published version this work is against.
     pub const STATE: u32 = 8;
+    /// The profile this backend declares: the features a consumer may demand,
+    /// each answered as what it is and never as a fallback dressed up as the
+    /// stronger thing.
+    pub const PROFILE: u32 = 9;
 
     /// Names, in the order of the numbers above.
-    pub const NAMES: [&str; 8] = [
+    pub const NAMES: [&str; 9] = [
         "contexto",
         "leer",
         "listar",
@@ -61,6 +65,7 @@ pub mod verb {
         "cambios",
         "buscar",
         "estado",
+        "perfil",
     ];
 
     /// The number for a name, or `None`.
@@ -204,6 +209,12 @@ impl<'a> Json<'a> {
             }
         }
         self.raw(b"\"");
+    }
+
+    /// Writes a value already encoded as JSON, verbatim.
+    pub fn raw_value(&mut self, encoded: &[u8]) {
+        self.raw(encoded);
+        self.needs_comma = true;
     }
 
     /// Writes a string value.

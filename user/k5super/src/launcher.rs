@@ -124,10 +124,16 @@ fn run_tool(
     cpu_window_ns: u64,
 ) -> LaunchReply {
     if request.tool_id as u64 != TOOL_ID {
+        // A tool this launcher does not have. The answer is that, and not the
+        // tool it does have: a check answered by a weaker one would be the
+        // fallback dressed up as the stronger profile.
         k2::note(
             k5note::LAUNCH_REFUSED,
             u64::from(launch_status::NO_SUCH_TOOL),
         );
+        if candidate != 0 {
+            let _ = k2::cap_close(candidate);
+        }
         return refuse(launch_status::NO_SUCH_TOOL);
     }
     if candidate == 0 {

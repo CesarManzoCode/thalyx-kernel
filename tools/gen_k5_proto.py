@@ -151,6 +151,15 @@ def generate_rust(schema: dict) -> str:
             out.append(f"    pub const {name}_PREDICT: u32 = {case['predict']};")
         out.append("}")
         out.append("")
+    profile = schema.get("fixtures", {}).get("profile")
+    if profile:
+        native = json.dumps(profile["native"], sort_keys=True, separators=(",", ":"))
+        out.append("/// The profile this backend declares, as the fixture states it: the JSON")
+        out.append("/// the port publishes with every version, byte for byte, so what a consumer")
+        out.append("/// reads is what the schema says and the gate holds it against the kernel's")
+        out.append("/// records.")
+        out.append(f"pub const NATIVE_PROFILE_JSON: &str = {json.dumps(native)};")
+        out.append("")
     for definition in schema["structs"]:
         fields, size, align = layout(definition)
         out.extend(doc(definition.get("doc"), "", "///"))

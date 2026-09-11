@@ -5,7 +5,7 @@ status: observed
 ---
 # K5 — Port de Thalyx: qué se ejecutó y qué demuestra
 
-Esta nota se escribe mientras K5 se ejecuta, etapa por etapa, y dice en cada momento qué está demostrado y qué no. K5 es el port: la semántica de Thalyx sobre los mecanismos de este kernel en vez de sobre los de Linux. Lo más fácil de fingir en un port es que haya habido un port, así que la disciplina de esta nota es una sola:
+Esta nota se escribió mientras K5 se ejecutaba, etapa por etapa, y dice de cada una qué está demostrado y qué no; K5 está completo en su alcance, y el alcance está en [lo que no demuestra](#lo-que-estas-etapas-no-demuestran). K5 es el port: la semántica de Thalyx sobre los mecanismos de este kernel en vez de sobre los de Linux. Lo más fácil de fingir en un port es que haya habido un port, así que la disciplina de esta nota es una sola:
 
 **Construir no es ejecutar.** Un compilador cruzado que produce una imagen no demuestra nada. Lo que demuestra algo es que el kernel construyó un dominio con esa imagen, lo activó, lo planificó, le cobró recursos y registró lo que hizo. Todas las afirmaciones de abajo se deciden desde los registros del kernel, y donde una se decide desde una nota del propio programa, el criterio lo dice en su título.
 
@@ -18,6 +18,7 @@ Esta nota se escribe mientras K5 se ejecuta, etapa por etapa, y dice en cada mom
 | `work` | Programa acotado real —QuickJS de verdad— y herramienta nativa real, ejecutada en su propio dominio sobre un candidato sellado, decidiendo la publicación. | **Ejecutado** |
 | `engine` | Motor CPU residente real —llama.cpp en la etiqueta que Thalyx fija, con el `serve_one` de su propio motor— y la toolchain que esa carga necesita: C++ alojado, hilos, TLS, desenrollado, archivos administrados. Residencia y petición cobradas a ámbitos distintos por el kernel. | **Ejecutado** |
 | matriz EXP-10 | La misma imagen bajo adversidad: dos trabajos rivales contra el mismo motor y la misma versión; un trabajo cerrado mientras el motor calcula para él; y tres publicaciones que fallan —cortada después de preparar, cortada después de comprometer, escritura rechazada por el medio— cada una seguida del arranque que la recupera. | **Ejecutado** |
+| EXP-11, parte K5 | El backend nativo declara su perfil en cada versión que publica, un programa pide la comprobación que el perfil dice no tener y es rechazado en vez de contestado con menos, cada rasgo declarado se contrasta con lo que el kernel y el motor registraron, y el perfil de Linux queda escrito al lado con las diferencias. | **Ejecutado** |
 
 ## El target nativo
 
@@ -53,8 +54,8 @@ Una quinta imagen UEFI construida desde las mismas fuentes con el mismo script y
 | Ejecución | `python3 tools/run_k5_stages.py` | Las cuatro etapas, cada una con `exit_status=33` (`k1.terminal status=complete`) |
 | Referencia Linux | `python3 tools/build_reference.py` | `build/reference/thalyx-engine` y `tiny.gguf`, **ejecución del anfitrión**, etiquetada |
 | Matriz EXP-10 | `python3 tools/run_k5_cases.py` | 5 casos, 8 tramos, todos con `exit_status=33` |
-| Veredicto | `python3 tools/check_k5.py` | `K5 GATE PASSED: 44 of 44 criteria met` |
-| Autocomprobación | `python3 tools/check_k5.py --self-test` | `81 damages, each noticed by the criterion named` |
+| Veredicto | `python3 tools/check_k5.py` | `K5 GATE PASSED: 47 of 47 criteria met` |
+| Autocomprobación | `python3 tools/check_k5.py --self-test` | `87 damages, each noticed by the criterion named` |
 | Protocolos K5 | `python3 tools/check_k5_proto.py` | El Rust y el C generados coinciden con `abi/schema/k5-proto-v1.json` |
 
 Plataforma: QEMU `q35` con acelerador `tcg`, cuatro procesadores, CPU `qemu64,+smep,+smap,+pdpe1gb,+x2apic`, 1024 MiB y OVMF.
@@ -245,6 +246,17 @@ Cuatro cosas que la etapa `engine` sola no podía encontrar, porque tenía un tr
 
 Y una del checker de K4 que la regresión hizo visible: el daño «los dos corredores dicen que publicaron» reescribía el rechazo de `k4pub`, suponiendo que `k4pub` perdía; en una ejecución en la que gana, el daño no tocaba nada y el criterio «no lo notaba». Ahora reescribe el del perdedor, sea cual sea.
 
+## EXP-11, la parte K5: dos perfiles y una pregunta
+
+EXP-11 pide backends Linux y nativo con perfiles equivalentes, rechazo del perfil insuficiente, fixtures de contrato compartidos y diferencias registradas. La parte K6 —protocolos emparejados y medidas— no está aquí. La parte K5 son cuatro cosas, y las cuatro están en un solo archivo, `abi/schema/k5-proto-v1.json`, en sus `fixtures`:
+
+- **Una pregunta de una sola fuente.** Los prompts, el contexto y el número de hilos con que se pregunta al motor están en la fixture `engine`. El programa nativo los lee por el módulo Rust que el generador deriva de ella; `tools/run_reference.py` y la puerta leen el esquema. Las dos mitades de la comparación y su juez no pueden discrepar sobre la pregunta, y la respuesta es la de arriba: las mismas completaciones byte a byte.
+- **El perfil que el backend nativo declara**, en el vocabulario de [la frontera con Thalyx](../integration/thalyx.md): rasgos que un consumidor combina y exige, no un nivel. `managed_local_v1`, `audited_control` y `engine_resident` verdaderos; `dma_isolated`, `mutable_files`, `type_check` y `engine_mmap` falsos; un hilo de cómputo; cancelación por cierre de ámbito entre tokens; durabilidad frente a corte de energía **desconocida**, que es lo que K4 pudo decir. El generador lo emite como una constante JSON, el verbo `perfil` lo devuelve tal cual, y el programa lo publica en `profile.json` con la versión: la puerta decodifica el medio y exige que sea, byte a byte, lo que la fixture dice.
+- **Una negativa, no un sucedáneo.** El programa pide `validate({check: "rust"})` —`Check::Rust` de Thalyx, una toolchain real sobre el candidato— después de leer que el perfil no la tiene. El trabajo lo traduce a una identidad de herramienta que el lanzador no tiene; el lanzador contesta `NO_SUCH_TOOL` y lo anota; el trabajo responde `not_proven` con `reason: "no_such_tool"` y anota la identidad rechazada; el programa **exige** ese rechazo en una aserción y lo registra junto al perfil. Nada contesta con el parser en lugar del compilador. Después pide la comprobación que sí existe, y la publicación depende de esa y solo de esa.
+- **Cada rasgo, contra un registro que no escribió el declarante.** `dma_isolated=false` contra el `enforced_by=nothing_driver_is_trusted` que el kernel estampa en cada concesión de DMA del run; un hilo de cómputo contra los `sched.bound` del motor, todos del mismo hilo; `engine_mmap=false` contra lo que llama.cpp contesta de sí mismo (`llama_supports_mmap`, anotado por el motor antes de servir); `type_check=false` contra las identidades de herramienta que el lanzador construyó y la que rechazó; `engine_resident` contra una carga y varias peticiones; `managed_local_v1` contra las regiones de dispositivo mapeadas en un solo dominio, el driver; `audited_control` contra los recibos que el auditor drenó; `mutable_files=false` contra los tipos de objeto de la interfaz, entre los que no hay archivo.
+
+El perfil de **Linux** está en la misma fixture, derivado de [la reconstrucción de Thalyx](thalyx.md) en la revisión fijada —lectura estática; este repositorio no ejecuta Thalyx— y la puerta emite las diferencias como su propio detalle: el workspace de Linux son archivos mutables que cualquiera con un path escribe y el commit es un `rename` con `fsync`, frente a versiones inmutables con CAS y un solo escritor; Linux compila el candidato con la toolchain real y aquí no hay compilador; el motor de Linux mapea el modelo y aquí lo lee a memoria cobrada; el hilo de cómputo allí es configurable y aquí es el que se vincula a quien pregunta; la cancelación allí es una señal al proceso y aquí el cierre de un ámbito que el motor observa entre tokens; y el aislamiento de DMA allí no se declara. Los dos coinciden en un solo rasgo, el motor residente, que es exactamente lo que la comparación de completaciones ejercita. Lo que EXP-11 deja para K6 es medir: nada de esto dice cuánto cuesta.
+
 ## Lo que la etapa `smoke` corrigió
 
 Dos defectos que compilar no encuentra:
@@ -254,21 +266,22 @@ Dos defectos que compilar no encuentra:
 
 ## Qué decide la puerta, y desde dónde
 
-`tools/check_k5.py` decide **44** criterios por separado; cuatro son las regresiones K1–K4 sobre el mismo binario de kernel, y diez son la matriz EXP-10. La disciplina es la misma en todos:
+`tools/check_k5.py` decide **47** criterios por separado; cuatro son las regresiones K1–K4 sobre el mismo binario de kernel, diez son la matriz EXP-10 y tres la parte K5 de EXP-11. La disciplina es la misma en todos:
 
 - **Construir no es ejecutar.** Todo criterio sobre el lado nativo se decide desde los registros del kernel de un dominio que el kernel construyó, activó, planificó y cobró.
 - **Un invitado que imprime `PASS` no demuestra nada.** Donde un criterio lee una nota del propio programa, lo dice en su título, y el valor que lee es un número que el programa solo pudo producir haciendo el trabajo.
 
 El criterio decisivo no lo narra el invitado en absoluto: **el medio lleva una versión publicada cuyo módulo lleva la semilla de este run**, decodificada aquí por el módulo que genera el esquema de K4. El anfitrión eligió la semilla y la escribió en la imagen; un invitado que no hubiera hecho el trabajo no habría podido poner esos bytes ahí. Dos más se apoyan en la misma clase de evidencia: la herramienta leyó **exactamente** los bytes que el medio dice que la versión publicada enlaza (2913 de 2913), y el registro de validación durable nombra la identidad de herramienta que realmente corrió.
 
-`--self-test` daña la evidencia de **81** formas distintas —notas cambiadas y quitadas, sucesos del kernel quitados y añadidos, bytes del medio reescritos, respuestas de referencia reescritas, y en la matriz un tramo que no termina, una vinculación cobrada al ámbito equivocado, un rechazo que no fue por generación vieja, una barrera que no encontró obligación, una invocación cancelada resuelta como comprometida, un motor terminado, una recuperación que publica dos veces— y un criterio nombrado tiene que notar cada una.
+`--self-test` daña la evidencia de **87** formas distintas —notas cambiadas y quitadas, sucesos del kernel quitados y añadidos, bytes del medio reescritos, respuestas de referencia reescritas, y en la matriz un tramo que no termina, una vinculación cobrada al ámbito equivocado, un rechazo que no fue por generación vieja, una barrera que no encontró obligación, una invocación cancelada resuelta como comprometida, un motor terminado, una recuperación que publica dos veces, un perfil publicado que afirma una comprobación de tipos, un rechazo contestado por el parser, un kernel que aísla DMA contra un perfil que lo niega— y un criterio nombrado tiene que notar cada una.
 
 ## Lo que estas etapas **no** demuestran
 
 - **El motor es real y pequeño.** llama.cpp entero corre nativamente, pero el modelo es el de `dev/tiny-model.py`: 470 KB, lo que Thalyx usa para ejercitar su propio motor. Que las completaciones coincidan byte a byte con Linux es una afirmación sobre el motor y la aritmética; no dice nada sobre rendimiento, y una inferencia de doce tokens tarda entre 54 y 114 ms bajo TCG.
 - **Un solo hilo de cómputo.** Es una decisión de contabilidad —cada instrucción de la inferencia corre en el hilo vinculado a quien pregunta— y no una medida de lo que un motor con varios hilos costaría.
 - **La biblioteca estándar de C++ es la del anfitrión.** Se enlaza preconstruida, registrada por digest, y lo que se demuestra es que la clausura de lo que referencia está en `user/native`; no que esa biblioteca haya sido auditada.
-- **No hay comprobación de tipos.** La herramienta compila y ejecuta aserciones; `Check::Rust` de Thalyx compila un grafo de crates y nada aquí lo hace.
+- **No hay comprobación de tipos.** La herramienta compila y ejecuta aserciones; `Check::Rust` de Thalyx compila un grafo de crates y nada aquí lo hace. El perfil lo declara y pedirla se rechaza; eso es lo que EXP-11 pide de un perfil insuficiente, y no es lo mismo que tenerla.
+- **El perfil de Linux es una lectura, no una ejecución.** Sale de la reconstrucción estática de la revisión fijada; lo que se ejecuta de Linux es el motor de referencia, en el anfitrión, etiquetado como tal. Medir los dos backends es K6.
 - **No hay `cargo`, ni compilador de Rust, dentro del kernel.** La toolchain que produce estas imágenes es del anfitrión y el manifiesto lo dice; lo que se ejecuta nativamente es la imagen.
 - **Dos trabajos rivales, no más.** La matriz muestra dos principales sobre un motor; no muestra un motor bajo carga de muchos, ni mide cuánto cuesta el intercalado. Eso es K6.
 - **La cancelación se observa entre tokens.** El motor pregunta al kernel entre token y token, así que una inferencia cancelada gasta hasta un token más de la reserva de cierre; no hay interrupción de un cómputo en curso, y no se afirma ninguna.
@@ -277,9 +290,9 @@ El criterio decisivo no lo narra el invitado en absoluto: **el medio lleva una v
 ## Digests de la ejecución registrada
 
 ```text
-thalyx-k5.img (engine) 5066a02b9819aaf2854bb19db887e570dbbc17e0f62b51d80b57293f559f45ed
+thalyx-k5.img (engine) 51c9a4fbe20e52696e7503e50c92941e57da724e402bb2ad19bf843c13eab579
 kernel.elf             5637489e712df7061a226b2db9763bb5cc35a10ecdba2abacbc6c61f935a2c4e
-nengine.elf            6b12fbd48bc525d6a994f4f87a9d7b4fa85e094455889cb8b158a8b5692070a0
+nengine.elf            fcdb32fe26f14677a6ea29d71792c26779d0f045ffe6614a6961d31df737930e
 nhacer.elf             9471b0585fbfea6959103a1a8c413aedeba6ff14366cd3e3027acd17f3d9df47
 ncheck.elf             b0e0fcc69e7c85e8b4341db09763092adcfd39a11671c4f42763a5059a4736ad
 libthalyx-native.a     ea33f76f291a48349c1e608e60efbe625abedc928f8cbab7d5811b7ea92927e0

@@ -128,6 +128,13 @@ return { mark: state.mark, changed: changed.count, checks: verdict.checks_run, s
 /// `estado`: the work's own intent, which the program reads rather than
 /// carries. The publisher and the rival run this same program over different
 /// intents, which is what makes them rivals rather than two programs.
+///
+/// It also asks the backend what it is, and asks for the one check the answer
+/// says the backend cannot do -- Thalyx's `Check::Rust`, a real toolchain over
+/// the candidate. What it has to get is a refusal that names itself, and it
+/// records the declaration and the refusal in the version it publishes. That
+/// is EXP-11's demand on the native side: a profile declared, and a profile
+/// the backend lacks refused rather than approximated.
 pub const PROGRAM_ENGINE: &[u8] = br#""use strict";
 const state = thalyx.mustWork(thalyx.call("estado", []), "read the published version");
 const before = thalyx.mustWork(thalyx.call("leer", [state.target]), "read the target");
@@ -167,8 +174,25 @@ thalyx.mustWork(
   "record what the model said"
 );
 
+// What this backend is, asked rather than assumed, and the one check it says
+// it cannot do asked for anyway: the answer has to be a refusal that names
+// itself, never the weaker check dressed up as the stronger one.
+const profile = thalyx.mustWork(thalyx.call("perfil", []), "read the backend's profile");
+thalyx.assert(profile.profile.type_check === false, "the backend declares no type check", profile);
+const rust = thalyx.validate({ check: "rust" });
+thalyx.assert(rust.ok === false && rust.verdict === "not_proven" && rust.reason === "no_such_tool",
+  "a type check is refused, not faked", rust);
+thalyx.mustWork(
+  thalyx.call("escribir", ["profile.json", JSON.stringify({
+    backend: profile.backend,
+    declared: profile.profile,
+    refused: { check: "rust", verdict: rust.verdict, reason: rust.reason },
+  })]),
+  "record the profile"
+);
+
 const changed = thalyx.changed();
-thalyx.assert(changed.count === 2, "the target and the record changed", changed);
+thalyx.assert(changed.count === 3, "the target, the record and the profile changed", changed);
 
 const verdict = thalyx.mustPass(thalyx.validate({ check: "program" }), "the tool passed");
 return { mark: state.mark, changed: changed.count, checks: verdict.checks_run, served: second.served };

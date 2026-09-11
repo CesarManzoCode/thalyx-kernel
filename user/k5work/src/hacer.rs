@@ -139,6 +139,30 @@ fn field<'a>(bytes: &'a [u8], at: &mut usize) -> Option<&'a [u8]> {
     Some(out)
 }
 
+/// The tool identity a validation asks the launcher for. The launcher has one;
+/// the other is what Thalyx's `Check::Rust` would need -- a toolchain that
+/// compiles the candidate -- and asking for it here is how a program finds out
+/// this backend does not have it: by being refused, not by being answered with
+/// the parser.
+pub const TOOL_PROGRAM: u64 = 0x4B35_2001;
+pub const TOOL_RUST: u64 = 0x4B35_2002;
+
+/// Which check a program asked for, from the JSON it sent: `program` is the
+/// tool this backend carries, `rust` is the one it does not. A bounded scan,
+/// not a parser: the request is the program's and anything else in it is not
+/// consulted.
+fn check_asked(request: &[u8]) -> Option<u64> {
+    let at = crate::tree::find_bytes(request, b"\"check\":\"")? + 9;
+    let rest = &request[at..];
+    if rest.starts_with(b"program\"") {
+        Some(TOOL_PROGRAM)
+    } else if rest.starts_with(b"rust\"") {
+        Some(TOOL_RUST)
+    } else {
+        None
+    }
+}
+
 /// Assembles the candidate a tool is given, seals it, and asks the launcher to
 /// run the tool over it.
 ///
@@ -146,7 +170,7 @@ fn field<'a>(bytes: &'a [u8], at: &mut usize) -> Option<&'a [u8]> {
 /// what the tool reads is what the verdict is about. Nothing in this work can
 /// change those bytes afterwards, which is the whole reason the seal is here
 /// and not a promise in a comment.
-fn validate(driver: &mut Driver<'_>, scratch: &mut [u8]) -> Option<LaunchReply> {
+fn validate(driver: &mut Driver<'_>, tool_id: u64, scratch: &mut [u8]) -> Option<LaunchReply> {
     /// Says which step of a validation refused before answering `None`.
     ///
     /// A helper that can fail silently is a helper that will, and a validation
@@ -249,7 +273,7 @@ fn validate(driver: &mut Driver<'_>, scratch: &mut [u8]) -> Option<LaunchReply> 
 
     let request = LaunchRequest {
         op: launch_op::RUN_TOOL,
-        tool_id: 0x4B35_2001,
+        tool_id: tool_id as u32,
         candidate_len: at as u64,
         candidate_digest: driver.validated_tree,
         seed: driver.seed,
@@ -267,6 +291,11 @@ fn validate(driver: &mut Driver<'_>, scratch: &mut [u8]) -> Option<LaunchReply> 
     let reply = answer
         .ok()
         .and_then(|result| LaunchReply::read_from(&result.payload, 0))?;
+    if reply.status == launch_status::NO_SUCH_TOOL {
+        // The backend does not have the tool this check needs, and said so.
+        k2::note(note::PROFILE_REFUSED, tool_id);
+        return Some(reply);
+    }
     k2::note(note::TOOL_VERDICT, u64::from(reply.exit_code));
     k2::note(note::TOOL_COST, reply.cpu_ns);
     // What the tool read and what it read it as. A verdict that named neither
@@ -295,6 +324,14 @@ fn validation_answer(reply: Option<&LaunchReply>, out: &mut [u8]) -> (usize, u32
             which = verdict::FAILED;
             json.field_bool("ok", true);
             json.field_string("verdict", b"failed");
+        }
+        // The check needs a tool this backend does not have. Not proven, and
+        // the reason says which kind of not proven: the profile, not the
+        // candidate.
+        Some(reply) if reply.status == launch_status::NO_SUCH_TOOL => {
+            json.field_bool("ok", false);
+            json.field_string("verdict", b"not_proven");
+            json.field_string("reason", b"no_such_tool");
         }
         // A check that could not run is **never** a check that passed. The word
         // is different because the decision it supports is different.
@@ -412,7 +449,10 @@ pub fn run(driver: &mut Driver<'_>, program: &[u8], scratch: &mut [u8], answer: 
                 reply.answer_len = write_answer(written);
             }
             host_op::VALIDATE => {
-                let launched = validate(driver, scratch);
+                let launched = match check_asked(&request_bytes[..copied]) {
+                    Some(tool_id) => validate(driver, tool_id, scratch),
+                    None => None,
+                };
                 if let Some(reply) = &launched {
                     outcome.checks_run = reply.checks_run;
                     outcome.checks_failed = reply.checks_failed;

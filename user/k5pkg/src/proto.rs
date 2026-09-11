@@ -17,8 +17,8 @@ pub use crate::generated::{
     CANDIDATE_MAX, CHANNEL_ANSWER_MAX, CHANNEL_ANSWER_OFFSET, CHANNEL_PROGRAM_MAX,
     CHANNEL_PROGRAM_OFFSET, CHANNEL_REQUEST_MAX, CHANNEL_REQUEST_OFFSET, CandidateEntry,
     CandidateHeader, EngineReply, EngineRequest, HostReply, HostRequest, LaunchReply,
-    LaunchRequest, PROMPT_MAX, RunMetrics, ToolReport, engine_case, engine_op, engine_status,
-    finish, host_op, launch_op, launch_status, note, scenario, verdict,
+    LaunchRequest, NATIVE_PROFILE_JSON, PROMPT_MAX, RunMetrics, ToolReport, engine_case, engine_op,
+    engine_status, finish, host_op, launch_op, launch_status, note, scenario, verdict,
 };
 
 /// Capability slots the supervisor fills in a work domain.

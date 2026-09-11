@@ -187,6 +187,7 @@ NOTE = {
     "engine_log_lines": 0x5510,
     "engine_model_bytes": 0x5511,
     "engine_model_digest": 0x5512,
+    "engine_mmap": 0x5513,
 }
 
 # What the engine is asked, from the fixture in the schema: the native program
@@ -197,6 +198,13 @@ import run_reference  # noqa: E402
 
 ENGINE_CASES = {case["name"]: case for case in run_reference.fixture_cases()}
 ENGINE_PROMPTS = ENGINE_CASES["publisher"]["prompts"]
+
+# The profiles both backends declare, from the same fixture the native program
+# publishes its declaration from. The Linux one is a static reading of the
+# pinned Thalyx revision and nothing here executes it.
+PROFILES = json.loads((ROOT / "abi/schema/k5-proto-v1.json").read_text())["fixtures"]["profile"]
+TOOL_PROGRAM = 0x4B35_2001
+TOOL_RUST = 0x4B35_2002
 
 
 def fnv1a64(data: bytes) -> int:
@@ -1489,9 +1497,10 @@ def check_engine_vertical(runs: dict[str, Run]) -> Result:
     result.passed = (
         published == [1, 2]
         and verdicts == [0]
-        and read == [5 | (1 << 32)]
+        and read == [6 | (1 << 32)]
         and ended == FINISH["returned"]
         and b"model.json" in names
+        and b"profile.json" in names
         and done == [1 | (1 << 32)]
     )
     result.detail = (
@@ -1883,7 +1892,7 @@ def check_cut_after_prepare(runs: dict[str, Run]) -> Result:
         and mark_of(seed) not in module1
         and resumed == [2 | (2 << 8)]
         and len(runtimes2) == 1 and tools2 == [0] and served2 == [1, 2]
-        and published2 == [2] and read2 == [5 | (1 << 32)]
+        and published2 == [2] and read2 == [6 | (1 << 32)]
         and mark_of(seed) in module2
     )
     result.detail = (
@@ -1933,7 +1942,7 @@ def check_cut_after_commit(runs: dict[str, Run]) -> Result:
         and resumed == [2 | (1 << 8)]
         and recovered == [2]
         and not published2 and not runtimes2 and not bound2
-        and read2 == [5 | (1 << 32)]
+        and read2 == [6 | (1 << 32)]
         and mark_of(seed) in module2
         and roots[0] and roots[0][-1] == roots[1][-1]
     )
@@ -1985,6 +1994,130 @@ def check_io_error_commit(runs: dict[str, Run]) -> Result:
         f"cut {cut}, versions on the medium {generation1}, marked {mark_of(seed) not in module1 and 'no' or 'yes'}; "
         f"leg 2: resumed {[hex(v) for v in resumed]}, published {published2}, marked "
         f"{mark_of(seed) in module2}"
+    )
+    return result
+
+
+# --- EXP-11, the K5 part ------------------------------------------------------
+#
+# Two backends, two profiles, one question. The native backend declares its
+# profile in every version it publishes; a program asks for the one check the
+# declaration says it cannot do and has to be refused rather than answered with
+# less; and each declared feature is held against a record the kernel or the
+# engine wrote, not against the declaration's own say-so. The Linux profile is
+# recorded beside it so the differences are written down in one place.
+
+
+def check_profile_declared(runs: dict[str, Run]) -> Result:
+    """The version published carries the backend's declaration, byte for byte
+    the fixture's, and the refusal the program provoked."""
+    result = Result(
+        "profile_declared",
+        "the published version declares the backend's profile as the fixture states it, and records the refusal",
+    )
+    run = stage_run(runs, "engine")
+    if run is None or not run.medium:
+        result.detail = "no engine run"
+        return result
+    content = published_content(run, b"profile.json")
+    try:
+        record = json.loads(content) if content else None
+    except ValueError:
+        record = None
+    record = record or {}
+    declared = record.get("declared")
+    refused = record.get("refused") or {}
+    noted = note_values(run.records, "profile_refused", "k5pub")
+    launcher = note_values(run.records, "launch_refused", "supervisor")
+    staged = note_values(run.records, "validation_staged", "k5pub")
+    built = note_values(run.records, "launch_built", "supervisor")
+    result.passed = (
+        declared == PROFILES["native"]
+        and record.get("backend") == "thalyx-kernel"
+        and refused == {"check": "rust", "verdict": "not_proven", "reason": "no_such_tool"}
+        and noted == [TOOL_RUST]
+        and launcher == [1]
+        and 3 in staged and staged[-1] == 1
+        and TOOL_RUST not in built and TOOL_PROGRAM in built
+    )
+    result.detail = (
+        f"declared equals the fixture {declared == PROFILES['native']}, backend "
+        f"{record.get('backend')!r}, refusal recorded {refused}, the work noted the refused tool "
+        f"{[hex(v) for v in noted]}, the launcher refused {launcher} (NO_SUCH_TOOL), validations "
+        f"staged {staged}, tools built {[hex(v) for v in built]}"
+    )
+    result.evidence = [f"published profile.json: {content[:200].decode(errors='replace')}"] if content else []
+    return result
+
+
+def check_profile_holds(runs: dict[str, Run]) -> Result:
+    """Each feature the native backend declares, against something it did not
+    write: the kernel's device records for DMA, the kernel's bindings for the
+    compute thread, llama.cpp's own answer for mmap, the launcher's records for
+    which tools exist, the interface for what a filesystem would be."""
+    result = Result(
+        "profile_holds",
+        "every feature the native profile declares is what the kernel, the engine and the interface show",
+    )
+    run = stage_run(runs, "engine")
+    if run is None:
+        result.detail = "no engine run"
+        return result
+    native = PROFILES["native"]
+    dma = {r.get("enforced_by") for r in by_event(run.records, "device.dma_granted")}
+    dma_isolated = dma == {"nothing_driver_is_trusted"} and not native["dma_isolated"]
+    threads = {r.get("thread") for r in engine_bindings(run)}
+    compute = len(threads) == native["engine_compute_threads"] == 1
+    mmap = note_values(run.records, "engine_mmap", "nengine")
+    mmap_ok = mmap == [int(native["engine_mmap"])]
+    built = set(note_values(run.records, "launch_built", "supervisor"))
+    type_check = (TOOL_RUST not in built) == (not native["type_check"])
+    loads = note_values(run.records, "engine_loaded", "nengine")
+    served = note_values(run.records, "engine_served", "nengine")
+    resident = (len(loads) == 1 and len(served) >= 2) == native["engine_resident"]
+    drivers = {r.get("domain") for r in by_event(run.records, "device.region_mapped")}
+    disk = [r.get("domain") for r in by_event(run.records, "domain.created") if r.get("name") == "k5disk"]
+    only_driver = drivers == set(disk[:1]) and native["managed_local_v1"]
+    receipts = note_values(run.records, "audit_drained", "supervisor")
+    audited = bool(receipts) and receipts[0] > 0 and native["audited_control"]
+    interface = json.loads((ROOT / "abi/schema/v0.json").read_text())
+    object_types = {t["name"] for t in interface["object_types"]}
+    no_files = not ({"FILE", "DIRECTORY", "PATH"} & object_types) and not native["mutable_files"]
+    result.passed = bool(dma_isolated and compute and mmap_ok and type_check and resident
+                         and only_driver and audited and no_files)
+    result.detail = (
+        f"dma: the kernel enforces {sorted(dma)} (declared isolated={native['dma_isolated']}); "
+        f"compute threads bound {sorted(threads)} (declared {native['engine_compute_threads']}); "
+        f"llama.cpp says mmap {mmap} (declared {native['engine_mmap']}); tools built "
+        f"{[hex(v) for v in sorted(built)]} (declared type_check={native['type_check']}); loads "
+        f"{len(loads)} served {len(served)} (declared resident={native['engine_resident']}); device "
+        f"regions mapped only in {sorted(drivers)} = the driver {disk[:1]}; control receipts read "
+        f"{receipts}; interface object types {sorted(object_types)} hold no file"
+    )
+    return result
+
+
+def check_profiles_recorded(runs: dict[str, Run]) -> Result:
+    """The two declarations name the same features and differ where they
+    differ; the differences are the detail of this criterion, which is what
+    'diferencias registradas' means here. The Linux side is a reading, not a
+    run, and the reference beside the engine says so of itself."""
+    result = Result(
+        "profiles_recorded",
+        "both backends' profiles are declared over the same features and their differences are recorded",
+    )
+    run = stage_run(runs, "engine")
+    native, linux, features = PROFILES["native"], PROFILES["linux"], PROFILES["features"]
+    same_keys = set(native) == set(linux) == set(features)
+    differences = {k: (native[k], linux[k]) for k in features if native.get(k) != linux.get(k)}
+    same = [k for k in features if native.get(k) == linux.get(k)]
+    labelled = run is not None and run.reference is not None and \
+        "not native evidence" in run.reference.get("note", "")
+    result.passed = same_keys and bool(differences) and labelled and "engine_resident" in same
+    result.detail = (
+        f"features {len(features)}, declared by both {same_keys}; the same on both: {same}; "
+        f"different (native, linux): {differences}; the Linux run beside the engine is labelled "
+        f"host execution {labelled}"
     )
     return result
 
@@ -2041,6 +2174,9 @@ CRITERIA = [
     check_cut_after_prepare,
     check_cut_after_commit,
     check_io_error_commit,
+    check_profile_declared,
+    check_profile_holds,
+    check_profiles_recorded,
 ]
 
 
@@ -2493,6 +2629,14 @@ def append_note(
 # Damages aimed at one leg of one case. A case is keyed `case:<name>:<leg>`, so
 # these name the leg rather than a stage.
 
+def in_stage(runs: dict[str, Run], stage: str, damage) -> dict[str, Run]:
+    damaged = copy.deepcopy(runs)
+    for run in damaged.values():
+        if (run.spec.get("image_manifest") or {}).get("stage") == stage and not run.name.startswith("case:"):
+            damage(run)
+    return damaged
+
+
 def in_case(runs: dict[str, Run], case: str, leg: int, damage) -> dict[str, Run]:
     damaged = copy.deepcopy(runs)
     key = f"case:{case}:{leg}"
@@ -2723,6 +2867,41 @@ DAMAGE += [
         "the next boot never published",
         "io_error_commit",
         lambda runs: in_case(runs, "io-error-commit", 2, lambda run: note_drop(run, "published", "k5pub")),
+    ),
+]
+
+
+DAMAGE += [
+    (
+        "the published declaration claims a type check",
+        "profile_declared",
+        lambda runs: rewrite_medium(runs, b'"type_check":false', b'"type_check":true '),
+    ),
+    (
+        "the refused check answered as passed",
+        "profile_declared",
+        lambda runs: rewrite_medium(runs, b'"reason":"no_such_tool"', b'"reason":"the_parser"'),
+    ),
+    (
+        "the launcher never refused the type-check tool",
+        "profile_declared",
+        lambda runs: drop_note(runs, "launch_refused", "supervisor"),
+    ),
+    (
+        "the kernel enforcing DMA isolation the profile denies",
+        "profile_holds",
+        lambda runs: in_stage(runs, "engine", lambda run: event_set(
+            run, "device.dma_granted", "enforced_by", "remapping_unit", session="1")),
+    ),
+    (
+        "llama.cpp mapping the file the profile says it cannot",
+        "profile_holds",
+        lambda runs: damage_note_in(runs, "engine", "engine_mmap", "nengine", 1),
+    ),
+    (
+        "the type-check tool built after all",
+        "profile_holds",
+        lambda runs: append_note(runs, "launch_built", "supervisor", TOOL_RUST),
     ),
 ]
 

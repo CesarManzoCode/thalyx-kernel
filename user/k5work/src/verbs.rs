@@ -14,7 +14,7 @@
 //! error that ends the run: a program that could not write `if` would be back to
 //! asking a model what to do about every mistake it makes.
 
-use thalyx_user_k5pkg::proto::{engine_case, work_role};
+use thalyx_user_k5pkg::proto::{NATIVE_PROFILE_JSON, engine_case, work_role};
 use thalyx_user_k5pkg::thalyx::{Json, verb};
 use thalyx_user_rt::k2;
 
@@ -59,8 +59,28 @@ pub fn answer(context: &mut Context<'_>, name: Arg<'_>, args: &[Arg<'_>], out: &
         verb::CHANGED => changed(context, out),
         verb::GREP => grep(context, args, out),
         verb::CONTEXT => context_of(context, args, out),
+        verb::PROFILE => profile(out),
         _ => refuse(out, b"no_such_verb", name),
     }
+}
+
+/// What this backend is, feature by feature, as the schema's fixture states it.
+///
+/// `vault/integration/thalyx.md` says how a profile is read: the features are
+/// requirements a consumer combines and demands, not a number, and an answer
+/// never turns a fallback into the success of a stronger profile. So the
+/// declaration is one JSON the port carries verbatim -- generated from the
+/// same fixture the gate reads -- and a program that needs a feature the
+/// declaration says is absent is refused when it asks, not answered with less.
+fn profile(out: &mut [u8]) -> usize {
+    let mut json = Json::new(out);
+    json.open();
+    json.field_bool("ok", true);
+    json.key("profile");
+    json.raw_value(NATIVE_PROFILE_JSON.as_bytes());
+    json.field_string("backend", b"thalyx-kernel");
+    json.close();
+    json.finish().unwrap_or(0)
 }
 
 fn refuse(out: &mut [u8], word: &[u8], detail: &[u8]) -> usize {
