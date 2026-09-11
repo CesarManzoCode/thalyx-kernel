@@ -23,6 +23,7 @@
 #![no_main]
 
 mod audit;
+mod engine;
 mod launch;
 mod launcher;
 mod services;
@@ -80,6 +81,13 @@ pub mod note {
     pub const AUDIT_HIGH_WATER: u64 = 0x5020;
     /// Receipts the kernel had to drop.
     pub const AUDIT_LOST: u64 = 0x5021;
+    /// The engine loaded its weights and is admitting requests. Value: bytes of
+    /// the model it was given.
+    pub const ENGINE_READY: u64 = 0x5022;
+    /// The engine's scope after the run. Value: pages it held.
+    pub const ENGINE_SCOPE_PAGES: u64 = 0x5023;
+    /// The engine's scope after the run. Value: nanoseconds it was charged.
+    pub const ENGINE_SCOPE_CPU: u64 = 0x5024;
     /// The run reached its end. Value: domains that finished cleanly.
     pub const DONE: u64 = 0x50FF;
 }
@@ -275,6 +283,15 @@ fn run() -> ! {
             &surface::Shape {
                 uses_runtime: true,
                 uses_engine: false,
+            },
+        ),
+        native::stage::ENGINE => surface::run(
+            system,
+            supervision,
+            &plan,
+            &surface::Shape {
+                uses_runtime: true,
+                uses_engine: true,
             },
         ),
         _ => {

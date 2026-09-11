@@ -23,6 +23,12 @@ uint64_t th_now_ns(void)
     return r.status == THALYX_STATUS_OK ? r.aux : 0;
 }
 
+int th_set_thread_pointer(uint64_t address)
+{
+    th_result r = th_invoke(THALYX_ENTRY_THREAD_POINTER_SET, 0, address, NULL, 0, 0, 0);
+    return (int)r.status;
+}
+
 _Noreturn void th_exit(uint64_t code)
 {
     for (;;) {

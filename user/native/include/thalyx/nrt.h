@@ -20,6 +20,8 @@
 #include <stdint.h>
 #include "thalyx/sys.h"
 
+__TH_BEGIN_DECLS
+
 /* ------------------------------------------------------------------ layout */
 
 #define TH_IMAGE_BASE      0x00400000ull /* where the linker script puts the image */
@@ -67,7 +69,7 @@ enum {
  * it. A slot with nothing in it answers `NO_CAPABILITY`, which is how a program
  * discovers what it was not given. */
 uint64_t thalyx_boot_handle_of(uint32_t slot);
-_Noreturn void th_runtime_start(void);
+void th_runtime_start(void) __TH_NORETURN;
 void th_thread_body(uint64_t index);
 int  th_thread_join(unsigned index);
 int64_t th_signal_raise(uint32_t slot, uint64_t mask);
@@ -138,6 +140,24 @@ typedef struct {
 
 int64_t th_call(uint64_t facet, const th_payload *out, th_payload *in,
                 uint64_t lend, uint32_t lend_rights, uint64_t deadline_ns);
+
+/* Bytes through a capability rather than through a mapping.
+ *
+ * This is how a service reaches a buffer a caller lent it: bounded pieces, one
+ * operation each, with the kernel checking the rights of every one. A service
+ * that mapped the buffer instead would be holding authority over it after the
+ * call, which is the thing per-request lending exists to avoid. */
+int64_t th_memory_read(uint64_t memory, uint64_t offset, void *into, uint64_t len);
+int64_t th_memory_write(uint64_t memory, uint64_t offset, const void *from, uint64_t len);
+
+/* Charges this worker's execution to the scope the invocation came from.
+ *
+ * The client does not choose who pays: the scope comes from the invocation the
+ * kernel stamped. This is what makes an inference cost the work that asked for
+ * it while the weights stay charged to the service that holds them. */
+int64_t th_bind_worker(uint64_t invocation);
+int64_t th_unbind_worker(uint64_t invocation);
+int64_t th_close(uint64_t handle);
 int64_t th_receive(uint64_t endpoint, th_message *out, uint64_t deadline_ns);
 int64_t th_reply(uint64_t invocation, uint64_t result, const th_payload *body);
 
@@ -148,5 +168,31 @@ void th_log(const char *text);
 
 /* Every program's entry point after the runtime is standing. */
 int th_main(const th_config *config);
+
+/* ------------------------------------------------- the C++ runtime closure */
+
+/* Thread-local storage for thread `index`, installed through the kernel's
+ * `THREAD_POINTER_SET`. The initial thread is index zero. Answers zero, or the
+ * note value that says why the image's TLS does not fit. */
+int th_tls_install(unsigned index);
+
+/* Constructors the image carries, `.preinit_array` then `.init_array`, run once
+ * on the initial thread before `th_main`; the handlers `atexit` and
+ * `__cxa_atexit` registered, run in reverse by `exit`. */
+void th_run_constructors(void);
+void th_run_exit_handlers(void);
+
+/* The read-only files this domain has: see `stdio.h`. */
+void th_files_init(const th_config *config);
+
+/* One wake bit per thread, raised by whoever releases what it waits for. */
+void th_wake(unsigned index);
+int  th_wait_wake(uint64_t deadline_ns);
+
+/* Lets the built threads, parked since activation, start: called once by the
+ * initial thread when `.bss` is zeroed and the runtime is standing. */
+void th_threads_release(void);
+
+__TH_END_DECLS
 
 #endif /* THALYX_NRT_H */

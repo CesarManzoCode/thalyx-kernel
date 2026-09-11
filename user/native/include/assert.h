@@ -7,7 +7,10 @@
  */
 #ifndef _ASSERT_H_TH
 #define _ASSERT_H_TH
-_Noreturn void th_assert_failed(const char *expression, const char *file, int line);
+#include "thalyx/cdefs.h"
+__TH_BEGIN_DECLS
+void th_assert_failed(const char *expression, const char *file, int line) __TH_NORETURN;
+__TH_END_DECLS
 #endif
 
 #undef assert
@@ -15,4 +18,8 @@ _Noreturn void th_assert_failed(const char *expression, const char *file, int li
 #define assert(e) ((void)0)
 #else
 #define assert(e) ((e) ? (void)0 : th_assert_failed(#e, __FILE__, __LINE__))
+#endif
+
+#if !defined(__cplusplus) && !defined(static_assert)
+#define static_assert _Static_assert
 #endif

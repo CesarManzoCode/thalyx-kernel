@@ -366,11 +366,26 @@ fn start_runtime(
     reply
 }
 
+/// How long a runtime that has sent its last answer is given to leave on its
+/// own before it is stopped.
+const RUNTIME_LEAVE_NS: u64 = 2_000_000_000;
+
 fn stop_runtime(launcher: &mut Launcher) -> LaunchReply {
     let mut reply = LaunchReply::zeroed();
     if launcher.runtime_domain == 0 {
         return reply;
     }
+    // A runtime whose program has finished is still tearing its heap down when
+    // the work asks for it to be stopped. Stopping it there is stopping it in
+    // the middle of freeing memory the termination is withdrawing, so it is
+    // given a bounded moment to leave by itself -- it raises its done bit when
+    // it does -- and is stopped by authority only if it has not. Either way it
+    // is stopped: this bounds the wait, it does not make stopping optional.
+    let _ = k2::signal_wait(
+        launcher.runtime_done,
+        DONE_BIT,
+        k2::now_ns() + RUNTIME_LEAVE_NS,
+    );
     if let Ok(info) = k2::domain_query(launcher.runtime_domain) {
         reply.exit_code = info.exit_code as u32;
         if info.faults != 0 {

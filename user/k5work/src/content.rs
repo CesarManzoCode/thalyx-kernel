@@ -101,6 +101,66 @@ const verdict = thalyx.mustPass(thalyx.validate({ check: "program" }), "the tool
 return { mark: state.mark, changed: changed.count, checks: verdict.checks_run, sum: sum >>> 0 };
 "#;
 
+/// The prompts the engine-stage program sends, in order. The host reference is
+/// asked the same two, and the gate checks the published record names these.
+pub const ENGINE_PROMPTS: [&str; 2] = ["hola hola", "hola"];
+/// Tokens each answer may run to.
+pub const ENGINE_PREDICT: u32 = 12;
+
+/// The program when a resident engine is there to ask.
+///
+/// The same change as [`PROGRAM`] -- read the version, ask what a name is,
+/// mark the module, check the change, have a real tool decide -- and before
+/// validating it asks the model twice and puts what the model said into the
+/// version it publishes. Two answers from one engine are how residency is
+/// shown rather than claimed: the second one says it was the second, and that
+/// the weights were loaded once.
+pub const PROGRAM_ENGINE: &[u8] = br#""use strict";
+const state = thalyx.mustWork(thalyx.call("estado", []), "read the published version");
+const before = thalyx.mustWork(thalyx.call("leer", ["module.js"]), "read the module");
+thalyx.assert(before.text.indexOf(state.zero_mark) >= 0, "the seed version is unmarked");
+
+const context = thalyx.mustWork(thalyx.call("contexto", ["checksum"]), "ask what checksum is");
+thalyx.assert(context.uses >= 2, "checksum is used more than once", context);
+
+thalyx.mustWork(
+  thalyx.call("sustituir", ["module.js", state.zero_mark, state.mark]),
+  "replace the mark"
+);
+const after = thalyx.mustWork(thalyx.call("leer", ["module.js"]), "read it back");
+thalyx.assert(after.text.indexOf(state.mark) >= 0, "the mark is in the module");
+thalyx.assert(after.text.indexOf(state.zero_mark) < 0, "the old mark is gone");
+
+const prompts = ["hola hola", "hola"];
+const first = thalyx.model(prompts[0], 12);
+thalyx.assert(first.ok === true, "the engine answered", first);
+const second = thalyx.model(prompts[1], 12);
+thalyx.assert(second.ok === true, "the engine answered again", second);
+thalyx.assert(second.served === first.served + 1, "the same engine served both", second);
+thalyx.assert(second.load_ns === first.load_ns, "and loaded its weights once", second);
+
+const answers = [first, second].map((a, i) => ({
+  prompt: prompts[i],
+  prompt_digest: a.prompt_digest,
+  text_hex: a.text_hex,
+  generated: a.generated,
+  first_token: a.first_token,
+  first_margin_ppm: a.first_margin_ppm,
+  token_digest: a.token_digest,
+  served: a.served,
+}));
+thalyx.mustWork(
+  thalyx.call("escribir", ["model.json", JSON.stringify({ engine: "llama.cpp b10665", answers: answers })]),
+  "record what the model said"
+);
+
+const changed = thalyx.changed();
+thalyx.assert(changed.count === 2, "the module and the record changed", changed);
+
+const verdict = thalyx.mustPass(thalyx.validate({ check: "program" }), "the tool passed");
+return { mark: state.mark, changed: changed.count, checks: verdict.checks_run, served: second.served };
+"#;
+
 /// Prose that travels with the version, so a version is not only code.
 pub const NOTES: &[u8] = br#"# module.js
 

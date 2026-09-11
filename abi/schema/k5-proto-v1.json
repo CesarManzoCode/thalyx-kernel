@@ -204,6 +204,11 @@
         "name": "CANCELLED",
         "value": 5,
         "doc": "The work that asked was closed while this was running."
+      },
+      {
+        "name": "FAILED",
+        "value": 6,
+        "doc": "The request was read and could not be served; the answer bytes are the reason, as Thalyx's engine reports one."
       }
     ]
   },
@@ -521,8 +526,9 @@
           "doc": "Bytes of prompt in the lent buffer."
         },
         {
-          "name": "reserved0",
-          "type": "u32"
+          "name": "grammar_len",
+          "type": "u32",
+          "doc": "Bytes of GBNF grammar right after the prompt in the lent buffer; zero for none. Thalyx's engine takes one per request."
         },
         {
           "name": "seed",
@@ -769,6 +775,42 @@
     "ENGINE_PROMPT": {
       "value": 21769,
       "doc": "The prompt the engine actually read, as a digest of its bytes."
+    },
+    "ENGINE_LOAD_FAILED": {
+      "value": 21770,
+      "doc": "llama.cpp refused the weights. Value: a digest of the reason it gave."
+    },
+    "ENGINE_CANCELLED": {
+      "value": 21771,
+      "doc": "An inference stopped because the caller's scope was closed. Value: tokens made before it stopped."
+    },
+    "ENGINE_FAILED": {
+      "value": 21772,
+      "doc": "A request was read and could not be served. Value: a digest of the reason."
+    },
+    "ENGINE_CONTEXT": {
+      "value": 21773,
+      "doc": "The context the engine built, in tokens."
+    },
+    "ENGINE_EXCEPTION": {
+      "value": 21774,
+      "doc": "A C++ exception was thrown inside a request and caught by the engine. Value: a digest of what() said."
+    },
+    "ENGINE_ARGMAX": {
+      "value": 21775,
+      "doc": "The highest raw logit of the first decision, computed before sampling, so the sampler's choice can be checked against it."
+    },
+    "ENGINE_LOG_LINES": {
+      "value": 21776,
+      "doc": "Lines llama.cpp and ggml logged while loading. They go nowhere; the count says how many."
+    },
+    "ENGINE_MODEL_BYTES": {
+      "value": 21777,
+      "doc": "Bytes of /bulk the engine was given, before it loaded anything."
+    },
+    "ENGINE_MODEL_DIGEST": {
+      "value": 21778,
+      "doc": "FNV-1a over those bytes, computed by the engine, so the weights it loaded can be named from the host's copy."
     },
     "LAUNCH_BUILT": {
       "value": 22016,

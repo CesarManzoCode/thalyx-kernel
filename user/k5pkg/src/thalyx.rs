@@ -282,4 +282,43 @@ impl<'a> Json<'a> {
         self.key(key);
         self.boolean(value);
     }
+
+    /// A key and bytes as lower-case hexadecimal, which is how a value that is
+    /// not text -- a completion made of byte tokens, a 64-bit digest a double
+    /// cannot hold -- crosses into a language whose numbers are doubles and
+    /// whose strings are Unicode.
+    pub fn field_hex(&mut self, key: &str, value: &[u8]) {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        self.key(key);
+        self.comma();
+        self.raw(b"\"");
+        for byte in value {
+            self.raw(&[HEX[(*byte >> 4) as usize], HEX[(*byte & 0xF) as usize]]);
+        }
+        self.raw(b"\"");
+        self.needs_comma = true;
+    }
+
+    /// A key and bytes read as Latin-1: every byte above 0x7F is written as the
+    /// code point of the same value, so what a reader gets is always valid
+    /// JSON, and the exact bytes are in the hexadecimal field beside it.
+    pub fn field_latin1(&mut self, key: &str, value: &[u8]) {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        self.key(key);
+        self.comma();
+        self.raw(b"\"");
+        for byte in value {
+            match byte {
+                b'"' => self.raw(b"\\\""),
+                b'\\' => self.raw(b"\\\\"),
+                0x20..=0x7E => self.raw(&[*byte]),
+                _ => {
+                    self.raw(b"\\u00");
+                    self.raw(&[HEX[(*byte >> 4) as usize], HEX[(*byte & 0xF) as usize]]);
+                }
+            }
+        }
+        self.raw(b"\"");
+        self.needs_comma = true;
+    }
 }

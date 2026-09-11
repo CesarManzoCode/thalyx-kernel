@@ -270,6 +270,42 @@ pub fn run(system: u64, supervision: u64, plan: &Plan, shape: &Shape) -> bool {
     }
     k2::note(note::STORE_READY, 1);
 
+    // The resident engine, when the stage has one: built once, before any work
+    // exists, over the model the image carries, and kept for every work that
+    // follows. A work reaches it by a facet bound here and by nothing else.
+    let mut engine = None;
+    let mut engine_facet = 0u64;
+    if shape.uses_engine {
+        let (Some(engine_image), Some(model)) =
+            (crate::image_named("nengine"), crate::image_named("k5model"))
+        else {
+            k2::note(note::BUILD_STEP_FAILED, 140);
+            return false;
+        };
+        let Some(built) = crate::engine::build(
+            system,
+            supervision,
+            engine_image,
+            model,
+            plan.arg0,
+            limits.cpu_window_ns,
+            plan.seed,
+        ) else {
+            k2::note(note::BUILD_STEP_FAILED, 141);
+            return false;
+        };
+        let _ = k2::cap_close(engine_image);
+        let _ = k2::cap_close(model);
+        let Some((facet_handle, _)) =
+            crate::bind_facet(built.endpoint, right::INSPECT | right::ENDPOINT_CALL)
+        else {
+            k2::note(note::BUILD_STEP_FAILED, 142);
+            return false;
+        };
+        engine_facet = facet_handle;
+        engine = Some(built);
+    }
+
     // The launcher, and the two objects a run of the language runtime needs: the
     // region the work and the runtime share, and the page a tool writes its
     // report into. Both are the supervisor's, so what a tool or a runtime can
@@ -349,7 +385,7 @@ pub fn run(system: u64, supervision: u64, plan: &Plan, shape: &Shape) -> bool {
         seed: plan.seed,
         uses_runtime: u32::from(shape.uses_runtime),
         uses_engine: u32::from(shape.uses_engine),
-        inferences: 0,
+        inferences: u32::from(shape.uses_engine) * 2,
         reserved0: 0,
     };
     let work_parts = WorkParts {
@@ -361,7 +397,7 @@ pub fn run(system: u64, supervision: u64, plan: &Plan, shape: &Shape) -> bool {
         log: 0,
         supervision,
         launcher_facet,
-        engine_facet: 0,
+        engine_facet,
         host_endpoint,
         channel,
         cancel,
@@ -389,6 +425,9 @@ pub fn run(system: u64, supervision: u64, plan: &Plan, shape: &Shape) -> bool {
     }
     if host_endpoint != 0 {
         let _ = k2::cap_close(host_endpoint);
+    }
+    if engine_facet != 0 {
+        let _ = k2::cap_close(engine_facet);
     }
 
     // Wait for the work, and for the service asking to be cut.
@@ -434,6 +473,11 @@ pub fn run(system: u64, supervision: u64, plan: &Plan, shape: &Shape) -> bool {
     {
         k2::note(note::SCOPE_AFTER, info.cpu_total_ns);
         k2::note(note::SCOPE_PAGES, info.memory_pages_used);
+    }
+    // What residency cost, next to what the work cost: two scopes, two numbers,
+    // both the kernel's.
+    if let Some(engine) = engine.as_ref() {
+        crate::engine::report(engine);
     }
     let _ = store_domain;
     let _ = status::OK;

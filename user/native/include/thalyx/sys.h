@@ -17,6 +17,9 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "thalyx_abi.h"
+#include "thalyx/cdefs.h"
+
+__TH_BEGIN_DECLS
 
 typedef struct {
     int64_t  status;
@@ -42,11 +45,14 @@ static inline th_result th_invoke(uint64_t entry, uint64_t handle, uint64_t oper
     return out;
 }
 
-/* The five assigned entries. */
+/* The assigned entries. */
 uint64_t th_abi_version(void);
 int      th_limits(thalyx_limits_t *out);
 uint64_t th_now_ns(void);
-_Noreturn void th_exit(uint64_t code);
+void     th_exit(uint64_t code) __TH_NORETURN;
+/* This thread's thread pointer: where its thread-local storage and its stack
+ * guard are found through FS. Register state of the calling thread only. */
+int      th_set_thread_pointer(uint64_t address);
 
 /* Descriptor staging. Every operation that carries a body sends a
  * DescriptorHeader followed by the body; the header's `operation` field is what
@@ -73,5 +79,7 @@ th_result th_op_flags(uint64_t handle, uint32_t operation, th_desc *d,
 #define TH_NOTE_SELF_CHECK 2ull
 
 void th_note(uint64_t check, uint64_t value);
+
+__TH_END_DECLS
 
 #endif /* THALYX_SYS_H */

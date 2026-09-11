@@ -337,6 +337,14 @@ impl Domain {
 pub enum ThreadState {
     /// Free table slot.
     Empty,
+    /// Allocated to a domain that is still being built: it has a kernel stack
+    /// and an initial context, and it is not schedulable until the domain is
+    /// activated. Distinct from `Empty` because a slot that looked free while it
+    /// was held was handed out again: adding a thread to a domain under
+    /// construction reused that domain's own initial thread, overwrote its
+    /// context, and left `_start` never run. Found by K5's engine, the first
+    /// native domain built with a second thread.
+    Held,
     /// Eligible to be dispatched.
     Ready,
     /// Currently on the CPU.
@@ -444,6 +452,12 @@ pub struct Thread {
     pub syscalls: u64,
     /// Whether a frame from this thread has been observed at privilege level 3.
     pub ring3_confirmed: bool,
+    /// The thread's own FS base, written to the processor on every dispatch.
+    ///
+    /// Register state of the thread, set only through `THREAD_POINTER_SET` and
+    /// never read by the kernel for anything else: nothing in ring 0 addresses
+    /// memory through FS. Zero for every thread that never set one.
+    pub fs_base: u64,
 }
 
 impl Thread {
@@ -482,6 +496,7 @@ impl Thread {
             preempt_records: 0,
             syscalls: 0,
             ring3_confirmed: false,
+            fs_base: 0,
         }
     }
 }

@@ -7,6 +7,7 @@
  */
 
 #include <stdlib.h>
+#include <inttypes.h>
 #include <ctype.h>
 #include <string.h>
 #include <math.h>
@@ -17,9 +18,12 @@ static unsigned long long parse_unsigned(const char *s, char **end, int base, in
     *any = 0;
     if (base == 0) {
         if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) { base = 16; s += 2; }
+        else if (s[0] == '0' && (s[1] == 'b' || s[1] == 'B')) { base = 2; s += 2; }
         else if (s[0] == '0') { base = 8; }
         else { base = 10; }
     } else if (base == 16 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        s += 2;
+    } else if (base == 2 && s[0] == '0' && (s[1] == 'b' || s[1] == 'B')) {
         s += 2;
     }
     for (;; s++) {
@@ -65,9 +69,64 @@ unsigned long strtoul(const char *s, char **end, int base)
 }
 
 int atoi(const char *s) { return (int)strtoll(s, NULL, 10); }
+long atol(const char *s) { return (long)strtoll(s, NULL, 10); }
+long long atoll(const char *s) { return strtoll(s, NULL, 10); }
 int abs(int value) { return value < 0 ? -value : value; }
 long labs(long value) { return value < 0 ? -value : value; }
 long long llabs(long long value) { return value < 0 ? -value : value; }
+
+div_t div(int numerator, int denominator)
+{
+    div_t out = { numerator / denominator, numerator % denominator };
+    return out;
+}
+
+ldiv_t ldiv(long numerator, long denominator)
+{
+    ldiv_t out = { numerator / denominator, numerator % denominator };
+    return out;
+}
+
+lldiv_t lldiv(long long numerator, long long denominator)
+{
+    lldiv_t out = { numerator / denominator, numerator % denominator };
+    return out;
+}
+
+intmax_t imaxabs(intmax_t value) { return value < 0 ? -value : value; }
+
+imaxdiv_t imaxdiv(intmax_t numerator, intmax_t denominator)
+{
+    imaxdiv_t out = { numerator / denominator, numerator % denominator };
+    return out;
+}
+
+intmax_t strtoimax(const char *s, char **end, int base) { return strtoll(s, end, base); }
+uintmax_t strtoumax(const char *s, char **end, int base) { return strtoull(s, end, base); }
+
+/* The names a C23 or C++ compile against glibc gives these functions. They
+ * accept a `0b` prefix, which the parser above already does. */
+long __isoc23_strtol(const char *s, char **end, int base) __attribute__((alias("strtol")));
+unsigned long __isoc23_strtoul(const char *s, char **end, int base) __attribute__((alias("strtoul")));
+long long __isoc23_strtoll(const char *s, char **end, int base) __attribute__((alias("strtoll")));
+unsigned long long __isoc23_strtoull(const char *s, char **end, int base)
+    __attribute__((alias("strtoull")));
+intmax_t __isoc23_strtoimax(const char *s, char **end, int base) __attribute__((alias("strtoimax")));
+uintmax_t __isoc23_strtoumax(const char *s, char **end, int base) __attribute__((alias("strtoumax")));
+
+/* A linear congruential generator. It is not glibc's sequence and does not
+ * claim to be: nothing on this system draws a number whose value another
+ * implementation has to reproduce. */
+static unsigned long long rand_state = 1;
+
+int rand(void)
+{
+    unsigned long long next = rand_state * 6364136223846793005ull + 1442695040888963407ull;
+    rand_state = next;
+    return (int)((next >> 33) & 0x7FFFFFFF);
+}
+
+void srand(unsigned seed) { rand_state = seed; }
 
 double strtod(const char *s, char **end)
 {
@@ -105,6 +164,12 @@ double strtod(const char *s, char **end)
 }
 
 float strtof(const char *s, char **end) { return (float)strtod(s, end); }
+
+/* No wider than `double`: the conversion above is the only one there is, and
+ * a `long double` result would carry digits it never computed. */
+long double strtold(const char *s, char **end) { return (long double)strtod(s, end); }
+
+double atof(const char *s) { return strtod(s, NULL); }
 
 static void swap_bytes(unsigned char *a, unsigned char *b, size_t size)
 {

@@ -47,6 +47,16 @@ fn prompt_buffer() -> &'static mut [u8] {
     }
 }
 
+/// FNV-1a over bytes: the digest the engine reports over the prompt it read,
+/// computed here over the prompt this work lent, so the two can be compared.
+fn fnv(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in bytes {
+        hash = (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 /// Answers one `thalyx.model` call, into `out`.
 pub fn answer(driver: &mut Driver<'_>, prompt: &[u8], predict: u64, out: &mut [u8]) -> usize {
     if driver.engine == 0 {
@@ -63,12 +73,14 @@ pub fn answer(driver: &mut Driver<'_>, prompt: &[u8], predict: u64, out: &mut [u
 
     let width = prompt.len().min(thalyx_user_k5pkg::proto::PROMPT_MAX);
     prompt_buffer()[..width].copy_from_slice(&prompt[..width]);
+    let prompt_digest = fnv(&prompt[..width]);
+    k2::note(note::ENGINE_PROMPT, prompt_digest);
 
     let request = EngineRequest {
         op: engine_op::INFER,
         predict: predict.min(256) as u32,
         prompt_len: width as u32,
-        reserved0: 0,
+        grammar_len: 0,
         seed: driver.seed,
     };
     let lent = match k2::derive(
@@ -105,13 +117,18 @@ pub fn answer(driver: &mut Driver<'_>, prompt: &[u8], predict: u64, out: &mut [u
     match reply {
         Some(reply) if reply.status == engine_status::OK => {
             let len = (reply.answer_len as usize).min(thalyx_user_k5pkg::proto::ANSWER_MAX);
+            let completion = &prompt_buffer()[..len];
             json.field_bool("ok", true);
-            json.field_string("text", &prompt_buffer()[..len]);
+            json.field_latin1("text", completion);
+            json.field_hex("text_hex", completion);
             json.field_number("prompt_tokens", u64::from(reply.prompt_tokens));
             json.field_number("generated", u64::from(reply.generated));
             json.field_number("first_token", u64::from(reply.first_token));
             json.field_number("first_margin_ppm", u64::from(reply.first_margin_ppm));
-            json.field_number("token_digest", reply.token_digest);
+            // Digests as hexadecimal: a JavaScript number is a double and would
+            // round them, and a rounded digest is a different digest.
+            json.field_hex("token_digest", &reply.token_digest.to_be_bytes());
+            json.field_hex("prompt_digest", &prompt_digest.to_be_bytes());
             json.field_number("elapsed_ns", reply.elapsed_ns);
             // Residency, in every answer, so it is a number a caller sees
             // rather than a claim somebody made once.

@@ -165,6 +165,10 @@ pub fn handle(frame: &mut TrapFrame) {
             );
         }
     }
+
+    // Every return to ring 3 passes here. A thread whose domain was terminated
+    // by authority while it was running does not get the return.
+    sched::leave_if_dead(frame);
 }
 
 fn exception(frame: &mut TrapFrame, cr2: u64) -> ! {

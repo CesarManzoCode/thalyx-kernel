@@ -411,6 +411,79 @@ double tanh(double x)
 
 float tanhf(float x) { return (float)tanh((double)x); }
 
+/* -------------------------------------------------------- error function */
+
+/* erf by its Taylor series near zero, where it converges quickly, and by the
+ * continued fraction for erfc beyond, where the series would need hundreds of
+ * terms. Both are summed until the next term cannot change a double. ggml's
+ * exact GELU goes through `erff`; the llama architecture the reference model
+ * uses does not, but the kernel is linked whether or not it runs. */
+static double erf_series(double x)
+{
+    double x2 = x * x;
+    double term = x;
+    double sum = x;
+    for (int n = 1; n < 200; n++) {
+        term *= -x2 / n;
+        double next = term / (2 * n + 1);
+        sum += next;
+        if (fabs(next) < 1e-17 * fabs(sum)) { break; }
+    }
+    return sum * 1.12837916709551257390;          /* 2/sqrt(pi) */
+}
+
+static double erfc_fraction(double x)
+{
+    /* erfc(x) = exp(-x^2)/sqrt(pi) * 1/(x + 1/2/(x + 1/(x + 3/2/(x + ...)))),
+     * evaluated from the tail with a fixed depth that is ample for x > 2. */
+    double tail = x;
+    for (int k = 60; k >= 1; k--) {
+        tail = x + (k / 2.0) / tail;
+    }
+    return exp(-x * x) / (1.77245385090551602730 * tail);   /* sqrt(pi) */
+}
+
+double erf(double x)
+{
+    if (isnan(x)) { return x; }
+    double magnitude = fabs(x);
+    if (magnitude > 6.0) { return copysign(1.0, x); }
+    if (magnitude <= 2.0) { return erf_series(x); }
+    return copysign(1.0 - erfc_fraction(magnitude), x);
+}
+
+double erfc(double x)
+{
+    if (isnan(x)) { return x; }
+    if (x > 27.0) { return 0.0; }
+    if (x < -6.0) { return 2.0; }
+    if (fabs(x) <= 2.0) { return 1.0 - erf_series(x); }
+    return x > 0.0 ? erfc_fraction(x) : 2.0 - erfc_fraction(-x);
+}
+
+float erff(float x) { return (float)erf((double)x); }
+float erfcf(float x) { return (float)erfc((double)x); }
+
+/* ------------------------------------------------------- float forms */
+
+float roundf(float x) { return (float)round((double)x); }
+float truncf(float x) { return (float)trunc((double)x); }
+long lround(double x) { return (long)round(x); }
+long long llround(double x) { return (long long)round(x); }
+long lroundf(float x) { return (long)round((double)x); }
+long long llroundf(float x) { return (long long)round((double)x); }
+float ldexpf(float x, int exponent) { return (float)ldexp((double)x, exponent); }
+float log2f(float x) { return (float)log2((double)x); }
+float log10f(float x) { return (float)log10((double)x); }
+float log1pf(float x) { return (float)log1p((double)x); }
+float expm1f(float x) { return (float)expm1((double)x); }
+float fmaxf(float x, float y) { if (isnan(x)) { return y; } if (isnan(y)) { return x; } return x > y ? x : y; }
+float fminf(float x, float y) { if (isnan(x)) { return y; } if (isnan(y)) { return x; } return x < y ? x : y; }
+
+/* GCC turns a `sinf` and a `cosf` of the same argument into one call to this. */
+void sincos(double x, double *s, double *c) { *s = sin(x); *c = cos(x); }
+void sincosf(float x, float *s, float *c) { *s = sinf(x); *c = cosf(x); }
+
 double asinh(double x) { return copysign(log(fabs(x) + sqrt(x * x + 1.0)), x); }
 double acosh(double x) { return x < 1.0 ? NAN : log(x + sqrt(x * x - 1.0)); }
 double atanh(double x)

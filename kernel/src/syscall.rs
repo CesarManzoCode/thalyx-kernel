@@ -24,6 +24,9 @@
 use thalyx_abi::generated::{Limits, entry, status as k2status};
 use thalyx_abi::{limit, note, scaffold, status};
 
+use thalyx_boot_protocol::{USER_MAX_ADDR, USER_MIN_ADDR};
+
+use crate::arch::x86_64::cpu;
 use crate::arch::x86_64::trap::TrapFrame;
 use crate::event;
 use crate::state::{MACHINE, ThreadKind};
@@ -77,6 +80,13 @@ pub fn handle(frame: &mut TrapFrame) {
             }
             limits_query(domain, frame);
         }
+        entry::THREAD_POINTER_SET => {
+            if domain == usize::MAX {
+                frame.rax = status::INVALID_ARGUMENT as u64;
+                return;
+            }
+            thread_pointer_set(domain, thread, frame);
+        }
         entry::EXIT => {
             if domain == usize::MAX {
                 frame.rax = status::INVALID_ARGUMENT as u64;
@@ -108,6 +118,10 @@ pub fn handle(frame: &mut TrapFrame) {
             );
         }
     }
+
+    // Every return to ring 3 passes here. A thread whose domain was terminated
+    // by authority while it was inside this entry does not get the return.
+    crate::sched::leave_if_dead(frame);
 }
 
 /// Writes the effective interface limits into the caller's buffer.
@@ -181,6 +195,55 @@ fn limits_query(domain: usize, frame: &mut TrapFrame) {
             frame.rdx = 0;
         }
     }
+}
+
+/// Sets the calling thread's thread pointer.
+///
+/// The value is register state, like a stack pointer: it names no object, so it
+/// needs no capability, and it reveals nothing another domain owns. What the
+/// kernel owes it is that it stays the thread's own. It is recorded on the
+/// thread and written to the FS base on every dispatch, so a thread never runs
+/// with another thread's pointer, and nothing in ring 0 addresses memory
+/// through FS.
+///
+/// Two values are refused before anything is written. A non-canonical address
+/// would make the `WRMSR` fault in ring 0, and a kernel address is a pointer the
+/// thread could never dereference; both are `INVALID_ADDRESS`.
+///
+/// This entry exists because of K5. The C++ runtime a real inference engine
+/// links keeps its exception state and its stack guard in thread-local storage
+/// addressed through FS, and a kernel that gives threads no FS base cannot run
+/// it -- not slowly, not partly, not at all.
+fn thread_pointer_set(domain: usize, thread: usize, frame: &mut TrapFrame) {
+    let value = frame.rsi;
+    if value != 0 && !(USER_MIN_ADDR..USER_MAX_ADDR).contains(&value) {
+        frame.rax = k2status::INVALID_ADDRESS as u64;
+        frame.rdx = 0;
+        return;
+    }
+    let first = {
+        let mut machine = MACHINE.lock();
+        let first = machine.threads[thread].fs_base == 0 && value != 0;
+        machine.threads[thread].fs_base = value;
+        first
+    };
+    // The thread is running on this processor now, so the value takes effect on
+    // the return to ring 3. If it was preempted between the store above and this
+    // write, the dispatch that resumed it already wrote the stored value, and
+    // writing it again here is the same value.
+    //
+    // SAFETY: the value is zero or canonical and in the user half, checked
+    // above, so the write cannot fault; the kernel never uses FS.
+    unsafe { cpu::wrmsr(cpu::MSR_FS_BASE, value) };
+    if first {
+        let name = crate::domain::domain_name(domain);
+        event!(
+            "thread.pointer",
+            "domain={domain} name={name} thread={thread} fs_base=0x{value:x}"
+        );
+    }
+    frame.rax = k2status::OK as u64;
+    frame.rdx = 0;
 }
 
 fn diag_note(domain: usize, thread: usize, frame: &mut TrapFrame) {

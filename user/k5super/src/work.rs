@@ -156,6 +156,38 @@ pub fn build(parts: &WorkParts<'_>, config: WorkConfig) -> Option<BuiltWork> {
             0,
         )
         .ok()?;
+        // The buffer it lends the engine, charged to its own scope and mapped
+        // nowhere else. `DERIVE` and `TRANSFER` because lending is a derivation
+        // and a transfer; what the engine receives is one call's worth of it.
+        let prompt = k2::scope_create_memory(
+            parts.scope,
+            work_addr::PROMPT_PAGES,
+            right::MEMORY_READ | right::MEMORY_WRITE | right::MEMORY_MAP,
+            name16("prompt"),
+        )
+        .ok()?;
+        k2::domain_map(
+            domain,
+            prompt,
+            work_addr::PROMPT,
+            0,
+            work_addr::PROMPT_PAGES as u32,
+            right::MEMORY_READ | right::MEMORY_WRITE,
+        )
+        .ok()?;
+        k2::domain_install_cap(
+            domain,
+            prompt,
+            work_slot::PROMPT,
+            right::INSPECT
+                | right::DERIVE
+                | right::TRANSFER
+                | right::MEMORY_READ
+                | right::MEMORY_WRITE,
+            0,
+        )
+        .ok()?;
+        let _ = k2::cap_close(prompt);
     }
     if parts.host_endpoint != 0 {
         k2::domain_install_cap(

@@ -20,13 +20,10 @@
 #include <stdlib.h>
 #include <math.h>
 
+#include <errno.h>
+#include "file.h"
+
 #define TH_NOTE_TEXT 0x5006ull
-
-struct th_file { int kind; char *out; size_t size; size_t at; };
-
-static struct th_file diag_stream = { 0, NULL, 0, 0 };
-FILE *th_stdout = &diag_stream;
-FILE *th_stderr = &diag_stream;
 
 static void emit_text(const char *text, size_t len)
 {
@@ -40,29 +37,32 @@ static void emit_text(const char *text, size_t len)
     }
 }
 
-static void put(struct th_file *stream, char c)
+/* A read-only file and stdin are not written to. The stream records the
+ * error and the caller learns of it from the count, as C says it does. */
+size_t th_stream_write(struct th_file *stream, const char *text, size_t len)
 {
-    if (stream == NULL) { return; }
-    if (stream->kind == 1) {
-        if (stream->at + 1 < stream->size) { stream->out[stream->at] = c; }
-        stream->at++;
-        return;
-    }
-    char one = c;
-    emit_text(&one, 1);
-}
-
-static void put_bytes(struct th_file *stream, const char *text, size_t len)
-{
-    if (stream == NULL) { return; }
-    if (stream->kind == 1) {
+    if (stream == NULL) { return 0; }
+    if (stream->kind == TH_FILE_MEMORY) {
         for (size_t i = 0; i < len; i++) {
             if (stream->at + 1 < stream->size) { stream->out[stream->at] = text[i]; }
             stream->at++;
         }
-        return;
+        return len;
     }
-    emit_text(text, len);
+    if (stream->kind == TH_FILE_DIAG) {
+        emit_text(text, len);
+        return len;
+    }
+    stream->error = 1;
+    errno = EBADF;
+    return 0;
+}
+
+static void put(struct th_file *stream, char c) { th_stream_write(stream, &c, 1); }
+
+static void put_bytes(struct th_file *stream, const char *text, size_t len)
+{
+    th_stream_write(stream, text, len);
 }
 
 enum { FLAG_LEFT = 1, FLAG_ZERO = 2, FLAG_PLUS = 4, FLAG_SPACE = 8, FLAG_ALT = 16 };
@@ -237,9 +237,49 @@ int vfprintf(FILE *stream, const char *format, va_list args)
 
 int vsnprintf(char *out, size_t size, const char *format, va_list args)
 {
-    struct th_file sink = { 1, out, size, 0 };
+    struct th_file sink = { .kind = TH_FILE_MEMORY, .out = out, .size = size, .at = 0,
+                            .pushed = -1 };
     int written = vfprintf(&sink, format, args);
     if (out && size) { out[sink.at < size ? sink.at : size - 1] = 0; }
+    return written;
+}
+
+int vsprintf(char *out, const char *format, va_list args)
+{
+    return vsnprintf(out, (size_t)-1 / 2, format, args);
+}
+
+int sprintf(char *out, const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    int written = vsprintf(out, format, args);
+    va_end(args);
+    return written;
+}
+
+int vprintf(const char *format, va_list args) { return vfprintf(stdout, format, args); }
+
+int vasprintf(char **out, const char *format, va_list args)
+{
+    va_list again;
+    va_copy(again, args);
+    int length = vsnprintf(NULL, 0, format, args);
+    if (length < 0) { va_end(again); return -1; }
+    char *buffer = malloc((size_t)length + 1);
+    if (buffer == NULL) { va_end(again); return -1; }
+    vsnprintf(buffer, (size_t)length + 1, format, again);
+    va_end(again);
+    *out = buffer;
+    return length;
+}
+
+int asprintf(char **out, const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    int written = vasprintf(out, format, args);
+    va_end(args);
     return written;
 }
 
@@ -256,7 +296,7 @@ int printf(const char *format, ...)
 {
     va_list args;
     va_start(args, format);
-    int written = vfprintf(th_stdout, format, args);
+    int written = vfprintf(stdout, format, args);
     va_end(args);
     return written;
 }
@@ -270,15 +310,22 @@ int fprintf(FILE *stream, const char *format, ...)
     return written;
 }
 
-int fputs(const char *text, FILE *stream) { put_bytes(stream, text, strlen(text)); return 0; }
-int fputc(int c, FILE *stream) { put(stream, (char)c); return c; }
-int putchar(int c) { put(th_stdout, (char)c); return c; }
-int puts(const char *text) { fputs(text, th_stdout); put(th_stdout, '\n'); return 0; }
-size_t fwrite(const void *data, size_t size, size_t count, FILE *stream)
+int fputs(const char *text, FILE *stream)
 {
-    put_bytes(stream, data, size * count);
-    return count;
+    size_t len = strlen(text);
+    return th_stream_write(stream, text, len) == len ? 0 : EOF;
 }
-int fflush(FILE *stream) { (void)stream; return 0; }
+int fputc(int c, FILE *stream)
+{
+    char one = (char)c;
+    return th_stream_write(stream, &one, 1) == 1 ? (unsigned char)c : EOF;
+}
+int putc(int c, FILE *stream) { return fputc(c, stream); }
+int putchar(int c) { return fputc(c, stdout); }
+int puts(const char *text)
+{
+    if (fputs(text, stdout) == EOF) { return EOF; }
+    return fputc('\n', stdout) == EOF ? EOF : 0;
+}
 
 void th_log(const char *text) { emit_text(text, strlen(text)); }

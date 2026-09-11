@@ -1,130 +1,136 @@
-/* Threads, as the language runtime asks for them, and what this system answers.
+/* Threads, on a kernel where a domain's threads are built and not spawned.
  *
- * QuickJS includes `pthread.h` on every platform that is not Windows and uses
- * it for four things: a once-guard, a mutex, a condition variable, and starting
- * a worker thread. Only the first three are reachable from an embedding that
- * does not use `Atomics` or workers, and a work domain of this port is one
- * thread by construction -- its threads are built by its supervisor before it
- * is activated, and it never asks for another.
+ * `DOMAIN_ADD_THREAD` answers only for a domain that is still being built, so
+ * no running program creates a thread here. Its supervisor builds them before
+ * activation, parked on a signal, and `pthread_create` hands one of those its
+ * work. When every built thread is busy, or none was built, `pthread_create`
+ * answers `EAGAIN` at the point it was asked -- not a thread that silently
+ * never runs.
  *
- * So this is not an emulation of pthreads and does not pretend to be one. The
- * mutex and the condition variable are the correct implementations *for one
- * thread*: a lock nobody contends is a counter, and a wait nobody can be woken
- * from is a mistake, which is why `pthread_cond_wait` refuses rather than
- * returning as if it had waited. `pthread_create` refuses too: a program that
- * needed a second thread here would get an error at the point it asked for one
- * instead of a thread that silently never ran.
+ * Mutexes and condition variables block on a real `SIGNAL_WAIT`, one bit per
+ * thread, so a waiting thread spends nothing of its scope's budget while it
+ * waits. A wait on a bit that was raised before the waiter got there returns
+ * at once, because signal bits latch: a wake-up cannot be lost.
  *
- * If a workload ever needs real worker threads inside a language runtime, the
- * runtime beneath this header already has them (`thalyx/nrt.h`), and this file
- * is where they would be joined up. Nothing here should be read as a claim that
- * they are.
+ * Every type has glibc's x86-64 size. The prebuilt C++ standard library was
+ * compiled against those sizes and holds these objects inside its own, so a
+ * smaller `pthread_mutex_t` here would be a `std::mutex` two libraries
+ * disagree about the size of. All-zero is a valid unlocked mutex, condition,
+ * lock and once-guard, which is what glibc's static initialisers are, and a
+ * recursive mutex keeps its kind at the offset glibc's initialiser writes it.
  */
 #ifndef _PTHREAD_H
 #define _PTHREAD_H
 
 #include <stddef.h>
-#include <errno.h>
 #include <time.h>
+#include <sched.h>
+#include "thalyx/cdefs.h"
 
-typedef struct { int done; } pthread_once_t;
-#define PTHREAD_ONCE_INIT { 0 }
-
-typedef struct { int held; } pthread_mutex_t;
-#define PTHREAD_MUTEX_INITIALIZER { 0 }
-
-typedef struct { int unused; } pthread_cond_t;
-typedef struct { int detached; size_t stack; } pthread_attr_t;
-typedef struct { int clock; } pthread_condattr_t;
 typedef unsigned long pthread_t;
+typedef union { char __size[56]; long __align; } pthread_attr_t;
+typedef union { char __size[40]; long __align; } pthread_mutex_t;
+typedef union { char __size[4]; int __align; } pthread_mutexattr_t;
+typedef union { char __size[48]; long long __align; } pthread_cond_t;
+typedef union { char __size[4]; int __align; } pthread_condattr_t;
+typedef unsigned int pthread_key_t;
+typedef int pthread_once_t;
+typedef union { char __size[56]; long __align; } pthread_rwlock_t;
+typedef union { char __size[8]; long __align; } pthread_rwlockattr_t;
+typedef volatile int pthread_spinlock_t;
 
+#define PTHREAD_MUTEX_INITIALIZER  { { 0 } }
+#define PTHREAD_COND_INITIALIZER   { { 0 } }
+#define PTHREAD_RWLOCK_INITIALIZER { { 0 } }
+#define PTHREAD_ONCE_INIT 0
+#define PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP \
+    { { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 } }
+
+enum {
+    PTHREAD_MUTEX_TIMED_NP = 0,
+    PTHREAD_MUTEX_RECURSIVE_NP = 1,
+    PTHREAD_MUTEX_ERRORCHECK_NP = 2,
+    PTHREAD_MUTEX_ADAPTIVE_NP = 3,
+    PTHREAD_MUTEX_NORMAL = PTHREAD_MUTEX_TIMED_NP,
+    PTHREAD_MUTEX_RECURSIVE = PTHREAD_MUTEX_RECURSIVE_NP,
+    PTHREAD_MUTEX_ERRORCHECK = PTHREAD_MUTEX_ERRORCHECK_NP,
+    PTHREAD_MUTEX_DEFAULT = PTHREAD_MUTEX_NORMAL
+};
+
+#define PTHREAD_CREATE_JOINABLE 0
 #define PTHREAD_CREATE_DETACHED 1
+#define PTHREAD_CANCEL_ENABLE   0
+#define PTHREAD_CANCEL_DISABLE  1
 
-static inline int pthread_once(pthread_once_t *guard, void (*callback)(void))
-{
-    if (!guard->done) { guard->done = 1; callback(); }
-    return 0;
-}
+__TH_BEGIN_DECLS
 
-static inline int pthread_mutex_init(pthread_mutex_t *mutex, void *attributes)
-{
-    (void)attributes;
-    mutex->held = 0;
-    return 0;
-}
-static inline int pthread_mutex_destroy(pthread_mutex_t *mutex) { (void)mutex; return 0; }
-static inline int pthread_mutex_lock(pthread_mutex_t *mutex) { mutex->held++; return 0; }
-static inline int pthread_mutex_unlock(pthread_mutex_t *mutex) { mutex->held--; return 0; }
+int  pthread_create(pthread_t *thread, const pthread_attr_t *attributes,
+                    void *(*start)(void *), void *argument) __TH_NOTHROW;
+int  pthread_join(pthread_t thread, void **result);
+int  pthread_detach(pthread_t thread) __TH_NOTHROW;
+void pthread_exit(void *result) __TH_NORETURN;
+int  pthread_cancel(pthread_t thread);
+pthread_t pthread_self(void) __TH_NOTHROW __attribute__((__const__));
+int  pthread_equal(pthread_t a, pthread_t b) __TH_NOTHROW;
+int  pthread_once(pthread_once_t *guard, void (*callback)(void));
+int  pthread_setcancelstate(int state, int *old);
+int  pthread_getschedparam(pthread_t thread, int *policy, struct sched_param *param) __TH_NOTHROW;
+int  pthread_setschedparam(pthread_t thread, int policy, const struct sched_param *param) __TH_NOTHROW;
 
-static inline int pthread_cond_init(pthread_cond_t *cond, void *attributes)
-{
-    (void)attributes;
-    cond->unused = 0;
-    return 0;
-}
-static inline int pthread_cond_destroy(pthread_cond_t *cond) { (void)cond; return 0; }
-static inline int pthread_cond_signal(pthread_cond_t *cond) { (void)cond; return 0; }
-static inline int pthread_cond_broadcast(pthread_cond_t *cond) { (void)cond; return 0; }
+int pthread_attr_init(pthread_attr_t *attributes) __TH_NOTHROW;
+int pthread_attr_destroy(pthread_attr_t *attributes) __TH_NOTHROW;
+int pthread_attr_setdetachstate(pthread_attr_t *attributes, int state) __TH_NOTHROW;
+int pthread_attr_getdetachstate(const pthread_attr_t *attributes, int *state) __TH_NOTHROW;
+int pthread_attr_setstacksize(pthread_attr_t *attributes, size_t bytes) __TH_NOTHROW;
+int pthread_attr_getstacksize(const pthread_attr_t *attributes, size_t *bytes) __TH_NOTHROW;
 
-/* A wait with nobody who could signal it is a deadlock, and answering as if it
- * had waited would hide one. */
-static inline int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex)
-{
-    (void)cond; (void)mutex;
-    return ENOSYS;
-}
-static inline int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex,
-                                         const struct timespec *until)
-{
-    (void)cond; (void)mutex; (void)until;
-    return ENOSYS;
-}
+int pthread_mutexattr_init(pthread_mutexattr_t *attributes) __TH_NOTHROW;
+int pthread_mutexattr_destroy(pthread_mutexattr_t *attributes) __TH_NOTHROW;
+int pthread_mutexattr_settype(pthread_mutexattr_t *attributes, int kind) __TH_NOTHROW;
+int pthread_mutexattr_gettype(const pthread_mutexattr_t *attributes, int *kind) __TH_NOTHROW;
 
-static inline int pthread_condattr_init(pthread_condattr_t *attributes)
-{
-    attributes->clock = 0;
-    return 0;
-}
-static inline int pthread_condattr_destroy(pthread_condattr_t *attributes)
-{
-    (void)attributes;
-    return 0;
-}
-static inline int pthread_condattr_setclock(pthread_condattr_t *attributes, int clock)
-{
-    attributes->clock = clock;
-    return 0;
-}
+int pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attributes) __TH_NOTHROW;
+int pthread_mutex_destroy(pthread_mutex_t *mutex) __TH_NOTHROW;
+int pthread_mutex_lock(pthread_mutex_t *mutex) __TH_NOTHROW;
+int pthread_mutex_trylock(pthread_mutex_t *mutex) __TH_NOTHROW;
+int pthread_mutex_unlock(pthread_mutex_t *mutex) __TH_NOTHROW;
+int pthread_mutex_timedlock(pthread_mutex_t *mutex, const struct timespec *until) __TH_NOTHROW;
+int pthread_mutex_clocklock(pthread_mutex_t *mutex, clockid_t clock,
+                            const struct timespec *until) __TH_NOTHROW;
 
-static inline int pthread_attr_init(pthread_attr_t *attributes)
-{
-    attributes->detached = 0;
-    attributes->stack = 0;
-    return 0;
-}
-static inline int pthread_attr_destroy(pthread_attr_t *attributes) { (void)attributes; return 0; }
-static inline int pthread_attr_setdetachstate(pthread_attr_t *attributes, int state)
-{
-    attributes->detached = state;
-    return 0;
-}
-static inline int pthread_attr_setstacksize(pthread_attr_t *attributes, size_t bytes)
-{
-    attributes->stack = bytes;
-    return 0;
-}
+int pthread_condattr_init(pthread_condattr_t *attributes) __TH_NOTHROW;
+int pthread_condattr_destroy(pthread_condattr_t *attributes) __TH_NOTHROW;
+int pthread_condattr_setclock(pthread_condattr_t *attributes, clockid_t clock) __TH_NOTHROW;
 
-/* Refused, and said so. A domain's threads are built before it is activated. */
-static inline int pthread_create(pthread_t *thread, const pthread_attr_t *attributes,
-                                 void *(*start)(void *), void *argument)
-{
-    (void)thread; (void)attributes; (void)start; (void)argument;
-    return ENOSYS;
-}
-static inline int pthread_join(pthread_t thread, void **result)
-{
-    (void)thread; (void)result;
-    return ENOSYS;
-}
+int pthread_cond_init(pthread_cond_t *cond, const pthread_condattr_t *attributes) __TH_NOTHROW;
+int pthread_cond_destroy(pthread_cond_t *cond) __TH_NOTHROW;
+int pthread_cond_signal(pthread_cond_t *cond) __TH_NOTHROW;
+int pthread_cond_broadcast(pthread_cond_t *cond) __TH_NOTHROW;
+int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex);
+int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex,
+                           const struct timespec *until);
+int pthread_cond_clockwait(pthread_cond_t *cond, pthread_mutex_t *mutex, clockid_t clock,
+                           const struct timespec *until);
+
+int pthread_rwlock_init(pthread_rwlock_t *lock, const pthread_rwlockattr_t *attributes) __TH_NOTHROW;
+int pthread_rwlock_destroy(pthread_rwlock_t *lock) __TH_NOTHROW;
+int pthread_rwlock_rdlock(pthread_rwlock_t *lock) __TH_NOTHROW;
+int pthread_rwlock_tryrdlock(pthread_rwlock_t *lock) __TH_NOTHROW;
+int pthread_rwlock_wrlock(pthread_rwlock_t *lock) __TH_NOTHROW;
+int pthread_rwlock_trywrlock(pthread_rwlock_t *lock) __TH_NOTHROW;
+int pthread_rwlock_unlock(pthread_rwlock_t *lock) __TH_NOTHROW;
+int pthread_rwlock_timedrdlock(pthread_rwlock_t *lock, const struct timespec *until) __TH_NOTHROW;
+int pthread_rwlock_timedwrlock(pthread_rwlock_t *lock, const struct timespec *until) __TH_NOTHROW;
+int pthread_rwlock_clockrdlock(pthread_rwlock_t *lock, clockid_t clock,
+                               const struct timespec *until) __TH_NOTHROW;
+int pthread_rwlock_clockwrlock(pthread_rwlock_t *lock, clockid_t clock,
+                               const struct timespec *until) __TH_NOTHROW;
+
+int   pthread_key_create(pthread_key_t *key, void (*destructor)(void *)) __TH_NOTHROW;
+int   pthread_key_delete(pthread_key_t key) __TH_NOTHROW;
+void *pthread_getspecific(pthread_key_t key) __TH_NOTHROW;
+int   pthread_setspecific(pthread_key_t key, const void *value) __TH_NOTHROW;
+
+__TH_END_DECLS
 
 #endif

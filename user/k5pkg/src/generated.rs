@@ -133,6 +133,24 @@ pub mod note {
     pub const ENGINE_REFUSED: u64 = 0x5508;
     /// The prompt the engine actually read, as a digest of its bytes.
     pub const ENGINE_PROMPT: u64 = 0x5509;
+    /// llama.cpp refused the weights. Value: a digest of the reason it gave.
+    pub const ENGINE_LOAD_FAILED: u64 = 0x550A;
+    /// An inference stopped because the caller's scope was closed. Value: tokens made before it stopped.
+    pub const ENGINE_CANCELLED: u64 = 0x550B;
+    /// A request was read and could not be served. Value: a digest of the reason.
+    pub const ENGINE_FAILED: u64 = 0x550C;
+    /// The context the engine built, in tokens.
+    pub const ENGINE_CONTEXT: u64 = 0x550D;
+    /// A C++ exception was thrown inside a request and caught by the engine. Value: a digest of what() said.
+    pub const ENGINE_EXCEPTION: u64 = 0x550E;
+    /// The highest raw logit of the first decision, computed before sampling, so the sampler's choice can be checked against it.
+    pub const ENGINE_ARGMAX: u64 = 0x550F;
+    /// Lines llama.cpp and ggml logged while loading. They go nowhere; the count says how many.
+    pub const ENGINE_LOG_LINES: u64 = 0x5510;
+    /// Bytes of /bulk the engine was given, before it loaded anything.
+    pub const ENGINE_MODEL_BYTES: u64 = 0x5511;
+    /// FNV-1a over those bytes, computed by the engine, so the weights it loaded can be named from the host's copy.
+    pub const ENGINE_MODEL_DIGEST: u64 = 0x5512;
     /// A tool domain was built. Value: the tool identity.
     pub const LAUNCH_BUILT: u64 = 0x5600;
     /// A tool domain was retired. Value: pages its scope had held.
@@ -265,6 +283,9 @@ pub mod engine_status {
     /// The work that asked was closed while this was running.
     /// `EngineStatus::CANCELLED`.
     pub const CANCELLED: u32 = 5;
+    /// The request was read and could not be served; the answer bytes are the reason, as Thalyx's engine reports one.
+    /// `EngineStatus::FAILED`.
+    pub const FAILED: u32 = 6;
 }
 
 /// The inline half of a host call; the bytes are in the shared region.
@@ -464,7 +485,8 @@ pub struct EngineRequest {
     pub predict: u32,
     /// Bytes of prompt in the lent buffer.
     pub prompt_len: u32,
-    pub reserved0: u32,
+    /// Bytes of GBNF grammar right after the prompt in the lent buffer; zero for none. Thalyx's engine takes one per request.
+    pub grammar_len: u32,
     pub seed: u64,
 }
 

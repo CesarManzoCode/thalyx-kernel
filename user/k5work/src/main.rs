@@ -287,7 +287,14 @@ fn publish_seed(store: &mut Store, config: &WorkConfig) -> Option<u64> {
     let seed = workspace();
     seed.put(b"module.js", content::MODULE, true).ok()?;
     seed.put(b"module.test.js", content::TESTS, true).ok()?;
-    seed.put(b"program.js", content::PROGRAM, true).ok()?;
+    // The program the version carries is the one for what this run has: with a
+    // resident engine to ask, the program asks it.
+    let program = if config.uses_engine != 0 {
+        content::PROGRAM_ENGINE
+    } else {
+        content::PROGRAM
+    };
+    seed.put(b"program.js", program, true).ok()?;
     seed.put(b"notes.md", content::NOTES, true).ok()?;
 
     // The seed version is published under a validation this program asserts

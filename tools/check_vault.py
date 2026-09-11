@@ -23,7 +23,9 @@ def main():
     link_count = 0
     paths = sorted(ROOT.rglob("*.md"))
     for path in paths:
-        if ".git" in path.relative_to(ROOT).parts:
+        # The build tree is not the repository: it holds fetched third-party
+        # sources whose prose is theirs, and nothing in it is a note.
+        if path.relative_to(ROOT).parts[0] in (".git", "build"):
             continue
         content = path.read_text(encoding="utf-8")
         if "vault" == path.relative_to(ROOT).parts[0]:

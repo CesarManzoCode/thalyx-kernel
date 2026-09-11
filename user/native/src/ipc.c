@@ -91,3 +91,78 @@ int64_t th_reply(uint64_t invocation, uint64_t result, const th_payload *body)
     th_result r = th_op(invocation, THALYX_OP_INVOCATION_REPLY, &d, 0);
     return r.status;
 }
+
+int64_t th_memory_read(uint64_t memory, uint64_t offset, void *into, uint64_t len)
+{
+    uint8_t *out = into;
+    uint64_t at = 0;
+    while (at < len) {
+        uint64_t take = len - at > 256 ? 256 : len - at;
+        thalyx_memory_bytes_t request;
+        memset(&request, 0, sizeof(request));
+        request.offset = offset + at;
+        request.length = take;
+
+        th_desc d;
+        th_desc_begin(&d, THALYX_OP_MEMORY_READ);
+        th_desc_put(&d, TH_BODY, &request, sizeof(request));
+        th_result r = th_op(memory, THALYX_OP_MEMORY_READ, &d, 0);
+        if (r.status != THALYX_STATUS_OK) {
+            return r.status;
+        }
+        thalyx_memory_bytes_t answer;
+        memcpy(&answer, d.bytes + TH_BODY, sizeof(answer));
+        uint64_t got = answer.length < take ? answer.length : take;
+        memcpy(out + at, answer.bytes, (size_t) got);
+        if (got == 0) {
+            break;
+        }
+        at += got;
+    }
+    return (int64_t) at;
+}
+
+int64_t th_memory_write(uint64_t memory, uint64_t offset, const void *from, uint64_t len)
+{
+    const uint8_t *in = from;
+    uint64_t at = 0;
+    while (at < len) {
+        uint64_t take = len - at > 256 ? 256 : len - at;
+        thalyx_memory_bytes_t request;
+        memset(&request, 0, sizeof(request));
+        request.offset = offset + at;
+        request.length = take;
+        memcpy(request.bytes, in + at, (size_t) take);
+
+        th_desc d;
+        th_desc_begin(&d, THALYX_OP_MEMORY_WRITE);
+        th_desc_put(&d, TH_BODY, &request, sizeof(request));
+        th_result r = th_op(memory, THALYX_OP_MEMORY_WRITE, &d, 0);
+        if (r.status != THALYX_STATUS_OK) {
+            return r.status;
+        }
+        at += take;
+    }
+    return (int64_t) at;
+}
+
+int64_t th_bind_worker(uint64_t invocation)
+{
+    th_result r = th_op(invocation, THALYX_OP_INVOCATION_BIND_WORKER, NULL, 0);
+    return r.status;
+}
+
+int64_t th_unbind_worker(uint64_t invocation)
+{
+    /* The kernel takes the binding from the thread rather than from the
+     * request, but the operation is still addressed to an invocation
+     * capability, so the handle has to be one. */
+    th_result r = th_op(invocation, THALYX_OP_INVOCATION_UNBIND_WORKER, NULL, 0);
+    return r.status;
+}
+
+int64_t th_close(uint64_t handle)
+{
+    th_result r = th_op(handle, THALYX_OP_CAP_CLOSE, NULL, 0);
+    return r.status;
+}

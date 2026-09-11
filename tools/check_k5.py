@@ -141,7 +141,54 @@ NOTE = {
     "launch_retired": 0x5601,
     "launch_refused": 0x5602,
     "launch_not_sealed": 0x5603,
+    # the C++ runtime closure, in the native runtime
+    "tls_up": 0x5009,
+    "tls_bad": 0x500A,
+    "constructors": 0x500B,
+    "stack_smashed": 0x500C,
+    "pthread_refused": 0x500E,
+    "fortify_failed": 0x500F,
+    "no_entropy": 0x5700,
+    # the supervisor, about the engine
+    "engine_ready": 0x5022,
+    "engine_scope_pages": 0x5023,
+    "engine_scope_cpu": 0x5024,
+    # the resident engine, and the work's view of it
+    "engine_loaded": 0x5500,
+    "engine_weights": 0x5501,
+    "engine_served": 0x5502,
+    "engine_token": 0x5503,
+    "engine_margin": 0x5504,
+    "engine_digest": 0x5505,
+    "engine_bound": 0x5506,
+    "engine_elapsed": 0x5507,
+    "engine_refused": 0x5508,
+    "engine_prompt": 0x5509,
+    "engine_load_failed": 0x550A,
+    "engine_cancelled": 0x550B,
+    "engine_failed": 0x550C,
+    "engine_context": 0x550D,
+    "engine_exception": 0x550E,
+    "engine_argmax": 0x550F,
+    "engine_log_lines": 0x5510,
+    "engine_model_bytes": 0x5511,
+    "engine_model_digest": 0x5512,
 }
+
+# What the engine-stage program asks, as the stage runner and the program have
+# it; the gate checks the published record against these and against what the
+# Linux reference answered for them.
+import run_k5_stages  # noqa: E402
+
+ENGINE_PROMPTS = run_k5_stages.ENGINE_PROMPTS
+
+
+def fnv1a64(data: bytes) -> int:
+    """FNV-1a over bytes, as the engine and the work compute it."""
+    value = 0xCBF29CE484222325
+    for byte in data:
+        value = ((value ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return value
 
 # `thalyx_user_k5pkg::generated::finish`.
 FINISH = {"returned": 1, "needs_model": 2, "assertion": 3, "threw": 4,
@@ -183,6 +230,10 @@ class Run:
     exit_status: int | None
     timed_out: bool
     medium: bytes = b""
+    # What Thalyx's own engine answered on Linux for this run's prompts, when
+    # the stage has one. Host execution, and used only as the other side of a
+    # comparison.
+    reference: dict | None = None
 
 
 @dataclass
@@ -259,6 +310,7 @@ def load_runs(directory: Path) -> dict[str, Run]:
         medium = b""
         if spec.get("medium") and Path(spec["medium"]).exists():
             medium = Path(spec["medium"]).read_bytes()
+        reference_path = child / "reference.json"
         runs[child.name] = Run(
             name=child.name,
             spec=spec,
@@ -266,6 +318,7 @@ def load_runs(directory: Path) -> dict[str, Run]:
             exit_status=spec.get("exit_status"),
             timed_out=bool(spec.get("timed_out")),
             medium=medium,
+            reference=json.loads(reference_path.read_text()) if reference_path.exists() else None,
         )
     return runs
 
@@ -1041,6 +1094,353 @@ def check_work_published_bytes(runs: dict[str, Run]) -> Result:
     return result
 
 
+# --- the engine stage -------------------------------------------------------
+
+
+def published_content(run: Run, wanted: bytes) -> bytes | None:
+    """The bytes a name is bound to in the version the medium says was
+    published last, found by the digest its tree entry names."""
+    if not run.medium:
+        return None
+    store = k4gate.read_store(run.medium)
+    commits = k4gate.commits(store)
+    if not commits:
+        return None
+    objects = k4gate.objects(store)
+    manifest = objects.get(commits[-1]["root_digest"])
+    if manifest is None:
+        return None
+    body = k4gate.fmt.decode("Manifest", manifest["content"], 0)
+    tree = objects.get(bytes(body["tree_digest"]))
+    if tree is None:
+        return None
+    header = k4gate.fmt.decode("TreeHeader", tree["content"], 0)
+    at = k4gate.fmt.STRUCTS["TreeHeader"][0]
+    width = k4gate.fmt.STRUCTS["TreeEntry"][0]
+    for index in range(header["entry_count"]):
+        entry = k4gate.fmt.decode("TreeEntry", tree["content"], at + index * width)
+        if bytes(entry["name"])[: entry["name_len"]] == wanted:
+            found = objects.get(bytes(entry["digest"]))
+            return found["content"] if found else None
+    return None
+
+
+def engine_domain(run: Run) -> Record | None:
+    created = [r for r in by_event(run.records, "domain.created") if r.get("name") == "nengine"]
+    return created[0] if len(created) == 1 else None
+
+
+def scope_id(run: Run, label: str) -> str | None:
+    found = [r for r in by_event(run.records, "scope.created") if r.get("label") == label]
+    return found[-1].get("id") if found else None
+
+
+def image_module(run: Run, name: str) -> dict | None:
+    manifest = run.spec.get("image_manifest") or {}
+    for module in manifest.get("modules", []):
+        if module.get("name") == name:
+            return module
+    return None
+
+
+def reference_model(run: Run) -> bytes | None:
+    """The model file the host holds, if it is the one the image carried."""
+    import build_reference  # noqa: E402
+    import hashlib
+
+    module = image_module(run, "k5model")
+    path = ROOT / "build" / "reference" / "tiny.gguf"
+    if module is None or not path.exists():
+        return None
+    data = path.read_bytes()
+    if hashlib.sha256(data).hexdigest() != module.get("sha256"):
+        return None
+    if module.get("sha256") != build_reference.MODEL_SHA256:
+        return None
+    return data
+
+
+def check_cxx_runtime(runs: dict[str, Run]) -> Result:
+    """The C++ standard library the engine links keeps its exception state and
+    its stack guard behind FS. The kernel is what gives a thread an FS base, so
+    whether the runtime stood up is the kernel's record first."""
+    result = Result(
+        "cxx_runtime",
+        "the kernel set each engine thread's own thread pointer, its TLS held and its constructors ran",
+    )
+    run = stage_run(runs, "engine")
+    if run is None:
+        result.detail = "no engine run"
+        return result
+    pointers = [r for r in by_event(run.records, "thread.pointer") if r.get("name") == "nengine"]
+    threads = {r.get("thread") for r in pointers}
+    bases = {r.get("fs_base") for r in pointers}
+    tls = note_values(run.records, "tls_up", "nengine")
+    indexes = sorted(value >> 32 for value in tls)
+    sizes = {value & 0xFFFFFFFF for value in tls}
+    manifest = run.spec.get("image_manifest") or {}
+    linked = (((manifest.get("native") or {}).get("programs") or {}).get("nengine") or {})
+    linked_tls = (linked.get("closure") or {}).get("tls_bytes")
+    constructors = note_values(run.records, "constructors", "nengine")
+    failures = sum(
+        len(note_values(run.records, key, "nengine"))
+        for key in ("tls_bad", "stack_smashed", "fortify_failed", "no_entropy", "pthread_refused")
+    )
+    result.passed = (
+        len(threads) >= 2
+        and len(bases) == len(threads)
+        and indexes == [0, 1]
+        and sizes == {linked_tls}
+        and linked_tls is not None
+        and len(constructors) == 1
+        and constructors[0] > 0
+        and failures == 0
+    )
+    result.detail = (
+        f"threads given a pointer {sorted(threads)}, distinct bases {len(bases)}, "
+        f"TLS installed for thread indexes {indexes} of {sorted(sizes)} bytes "
+        f"(the linked image says {linked_tls}), constructors {constructors}, "
+        f"closure failures {failures}"
+    )
+    result.evidence = [line_of(r) for r in pointers][:2]
+    return result
+
+
+def check_engine_resident(runs: dict[str, Run]) -> Result:
+    """One engine, one load, two answers, and the weights it loaded are the
+    ones the host pinned: the engine names them by a digest the host can
+    recompute from its own copy."""
+    result = Result(
+        "engine_resident",
+        "the engine loaded the pinned model once and served both inferences from it (engine notes)",
+    )
+    run = stage_run(runs, "engine")
+    if run is None:
+        result.detail = "no engine run"
+        return result
+    model = reference_model(run)
+    created = [r for r in by_event(run.records, "domain.created") if r.get("name") == "nengine"]
+    terminated = [r for r in by_event(run.records, "domain.terminated") if r.get("name") == "nengine"]
+    loaded = note_values(run.records, "engine_loaded", "nengine")
+    served = note_values(run.records, "engine_served", "nengine")
+    weights = note_values(run.records, "engine_weights", "nengine")
+    model_bytes = note_values(run.records, "engine_model_bytes", "nengine")
+    model_digest = note_values(run.records, "engine_model_digest", "nengine")
+    ready = note_values(run.records, "engine_ready", "supervisor")
+    work_served = note_values(run.records, "engine_served", "k5pub")
+    result.passed = (
+        model is not None
+        and len(created) == 1
+        and not terminated
+        and len(loaded) == 1
+        and loaded[0] > 0
+        and served == [1, 2]
+        and work_served == [1, 2]
+        and model_bytes == [len(model)]
+        and model_digest == [fnv1a64(model)]
+        and ready == [len(model)]
+        and len(weights) == 1
+        and 0 < weights[0] <= len(model)
+    )
+    result.detail = (
+        f"engine domains {len(created)} (terminated {len(terminated)}), loads {len(loaded)}, "
+        f"served {served} (the work saw {work_served}), model {model_bytes} bytes digest "
+        f"{[hex(v) for v in model_digest]} against the host's "
+        f"{hex(fnv1a64(model)) if model else None} over {len(model) if model else None} bytes, "
+        f"weights resident {weights}"
+    )
+    result.evidence = [line_of(r) for r in created] + [
+        line_of(r) for r in notes(run.records, NOTE["engine_served"], "nengine")
+    ]
+    return result
+
+
+def check_inference_charged_to_caller(runs: dict[str, Run]) -> Result:
+    """Who pays is the kernel's decision, not the engine's claim. A worker bound
+    to an invocation is charged to the scope the invocation came from, and the
+    kernel writes down which account it used."""
+    result = Result(
+        "inference_charged_to_caller",
+        "the kernel charged each inference to the scope of the work that asked, not to the engine",
+    )
+    run = stage_run(runs, "engine")
+    if run is None:
+        result.detail = "no engine run"
+        return result
+    engine = engine_domain(run)
+    work_scope = scope_id(run, "work")
+    engine_scope = scope_id(run, "engine")
+    bound = [r for r in by_event(run.records, "sched.bound")
+             if engine is not None and r.get("domain") == engine.get("id")]
+    accounts = [(r.get("effective_scope"), r.get("origin_scope"), r.get("account"),
+                 r.get("recovery")) for r in bound]
+    invocations = sorted(r.number("invocation") for r in bound)
+    noted = sorted(note_values(run.records, "engine_bound", "nengine"))
+    engine_cpu = note_values(run.records, "engine_scope_cpu", "supervisor")
+    work_cpu = note_values(run.records, "scope_after", "supervisor")
+    result.passed = (
+        engine is not None
+        and work_scope is not None
+        and len(bound) == 2
+        and all(a == (work_scope, work_scope, "origin_budget", "0") for a in accounts)
+        and work_scope != engine_scope
+        and invocations == noted
+        and bool(engine_cpu) and engine_cpu[0] > 0
+        and bool(work_cpu) and work_cpu[0] > 0
+    )
+    result.detail = (
+        f"bindings {len(bound)} charged as {accounts}, work scope {work_scope}, engine scope "
+        f"{engine_scope}, invocations the kernel bound {invocations} and the engine noted {noted}, "
+        f"the engine's scope was charged {engine_cpu}ns, the work's {work_cpu}ns"
+    )
+    result.evidence = [line_of(r) for r in bound]
+    return result
+
+
+def check_engine_read_the_prompt(runs: dict[str, Run]) -> Result:
+    """The engine reached the prompt through the capability the work lent and
+    through nothing else, and what it read is what the host chose."""
+    result = Result(
+        "engine_read_the_prompt",
+        "the engine read exactly the prompts the host chose, through the buffer the work lent (notes)",
+    )
+    run = stage_run(runs, "engine")
+    if run is None:
+        result.detail = "no engine run"
+        return result
+    expected = [fnv1a64(prompt.encode()) for prompt in ENGINE_PROMPTS]
+    read = note_values(run.records, "engine_prompt", "nengine")
+    lent = note_values(run.records, "engine_prompt", "k5pub")
+    result.passed = read == expected and lent == expected
+    result.detail = (
+        f"the engine read {[hex(v) for v in read]}, the work lent {[hex(v) for v in lent]}, "
+        f"the host's prompts digest to {[hex(v) for v in expected]}"
+    )
+    result.evidence = [line_of(r) for r in notes(run.records, NOTE["engine_prompt"], "nengine")]
+    return result
+
+
+def check_engine_matches_reference(runs: dict[str, Run]) -> Result:
+    """The decisive one for the engine, and the guest does not narrate it.
+
+    The medium carries the version the work published, and in it `model.json`
+    with the completion bytes the native engine produced. The Linux reference
+    is Thalyx's own engine, unchanged, on the same model: host execution, used
+    only as the other side of this comparison. Same model, same prompt, same
+    greedy decision, same bytes -- or the port is not the same engine."""
+    result = Result(
+        "engine_matches_reference",
+        "the published record carries the completions Thalyx's own engine gives on Linux",
+    )
+    run = stage_run(runs, "engine")
+    if run is None or run.reference is None:
+        result.detail = "no engine run, or no reference answers beside it"
+        return result
+    content = published_content(run, b"model.json")
+    try:
+        record = json.loads(content) if content else None
+    except ValueError:
+        record = None
+    answers = (record or {}).get("answers", [])
+    reference = run.reference.get("answers", [])
+    native = [(a.get("prompt"), a.get("text_hex")) for a in answers]
+    linux = [(a.get("prompt"), a.get("completion_hex")) for a in reference
+             if a.get("status") == 0]
+    tokens = note_values(run.records, "engine_token", "nengine")
+    argmax = note_values(run.records, "engine_argmax", "nengine")
+    digests = note_values(run.records, "engine_digest", "nengine")
+    recorded_digests = [int(a.get("token_digest", "0"), 16) for a in answers]
+    margins = note_values(run.records, "engine_margin", "nengine")
+    result.passed = (
+        len(native) == len(ENGINE_PROMPTS)
+        and [p for p, _ in native] == ENGINE_PROMPTS
+        and native == linux
+        and all(text for _, text in native)
+        and tokens == argmax
+        and len(tokens) == len(ENGINE_PROMPTS)
+        and recorded_digests == digests
+        and all(margin > 0 for margin in margins)
+        and "not native evidence" in run.reference.get("note", "")
+    )
+    result.detail = (
+        f"native {native}, Linux reference {linux}, first tokens {tokens} "
+        f"(raw argmax {argmax}), margins {margins} ppm, "
+        f"record digests match the engine's {recorded_digests == digests}"
+    )
+    result.evidence = [f"published model.json: {content[:160].decode(errors='replace')}"] if content else []
+    return result
+
+
+def check_engine_confinement(runs: dict[str, Run]) -> Result:
+    """What the engine can reach is what was installed and mapped into it, and
+    the kernel wrote each of those down as it happened."""
+    result = Result(
+        "engine_confinement",
+        "the engine held its endpoint, its signals and its own scope, and the model read-only",
+    )
+    run = stage_run(runs, "engine")
+    if run is None:
+        result.detail = "no engine run"
+        return result
+    installed = sorted(
+        (r.number("slot"), r.get("object_type"))
+        for r in by_event(run.records, "cap.installed") if r.get("name") == "nengine"
+    )
+    wanted = [(0, "scope"), (1, "domain"), (3, "endpoint"), (5, "signal"), (6, "signal"),
+              (9, "signal")]
+    model = [r for r in by_event(run.records, "mem.sealed") if r.get("label") == "k5model"]
+    model_id = model[0].get("object") if model else None
+    bulk = [r for r in by_event(run.records, "mem.mapped")
+            if r.get("name") == "nengine" and r.get("vaddr") == "0x50000000"]
+    result.passed = (
+        installed == wanted
+        and model_id is not None
+        and len(bulk) == 1
+        and bulk[0].get("object") == model_id
+        and bulk[0].get("rights") == "0x100"
+        and bulk[0].get("writable_maps") == "0"
+    )
+    result.detail = (
+        f"capabilities installed {installed}, the model object {model_id} mapped "
+        f"{[(r.get('object'), r.get('rights'), r.get('writable_maps')) for r in bulk]}"
+    )
+    result.evidence = [line_of(r) for r in bulk]
+    return result
+
+
+def check_engine_vertical(runs: dict[str, Run]) -> Result:
+    """The whole vertical with the engine in it: a program asked the model, a
+    real tool decided, and the version published carries the answers."""
+    result = Result(
+        "engine_vertical",
+        "a program asked the engine, a real tool passed the candidate, and the version carries the answers",
+    )
+    run = stage_run(runs, "engine")
+    if run is None or not run.medium:
+        result.detail = "no engine run"
+        return result
+    published = note_values(run.records, "published", "k5pub")
+    verdicts = note_values(run.records, "tool_verdict", "k5pub")
+    read = note_values(run.records, "evidence_read", "k5pub")
+    finish = note_values(run.records, "program_finish", "k5pub")
+    ended = (finish[-1] & 0xFF) if finish else None
+    names = published_lengths(run)
+    done = note_values(run.records, "work_done", "k5pub")
+    result.passed = (
+        published == [1, 2]
+        and verdicts == [0]
+        and read == [5 | (1 << 32)]
+        and ended == FINISH["returned"]
+        and b"model.json" in names
+        and done == [1 | (1 << 32)]
+    )
+    result.detail = (
+        f"generations published {published}, tool exit {verdicts}, evidence read {[hex(v) for v in read]}, "
+        f"program ended {ended}, published names {sorted(n.decode() for n in names)}, work done {done}"
+    )
+    return result
+
+
 def check_regression(gate: dict | None, name: str, expected: int) -> Result:
     result = Result(f"regression_{name.lower()}", f"the {name} gate still passes on this kernel")
     if gate is None:
@@ -1076,6 +1476,13 @@ CRITERIA = [
     check_candidate_sealed,
     check_publication_conditioned,
     check_work_published_bytes,
+    check_cxx_runtime,
+    check_engine_resident,
+    check_inference_charged_to_caller,
+    check_engine_read_the_prompt,
+    check_engine_matches_reference,
+    check_engine_confinement,
+    check_engine_vertical,
 ]
 
 
@@ -1331,7 +1738,138 @@ DAMAGE: list[tuple[str, str, object]] = [
         "work_published_bytes",
         lambda runs: rewrite_medium(runs, b"000000005eed0003", b"00000000dead0003"),
     ),
+    (
+        "no engine thread was given a thread pointer",
+        "cxx_runtime",
+        lambda runs: drop_event(runs, "thread.pointer", "nengine"),
+    ),
+    (
+        "a thread's TLS layout check failed",
+        "cxx_runtime",
+        lambda runs: append_note(runs, "tls_bad", "nengine", 5, "engine"),
+    ),
+    (
+        "the constructors never ran",
+        "cxx_runtime",
+        lambda runs: damage_note(runs, "constructors", "nengine", 0),
+    ),
+    (
+        "the engine loaded its weights a second time",
+        "engine_resident",
+        lambda runs: append_note(runs, "engine_loaded", "nengine", 123, "engine"),
+    ),
+    (
+        "the engine's model digest is not the host's copy",
+        "engine_resident",
+        lambda runs: damage_note(runs, "engine_model_digest", "nengine", 0x1234),
+    ),
+    (
+        "both answers claim to be the first served",
+        "engine_resident",
+        lambda runs: damage_note(runs, "engine_served", "nengine", 1),
+    ),
+    (
+        "an inference was charged to the engine instead of the work",
+        "inference_charged_to_caller",
+        lambda runs: rebind_to_engine(runs),
+    ),
+    (
+        "no worker was ever bound to an invocation",
+        "inference_charged_to_caller",
+        lambda runs: drop_event_everywhere(runs, "sched.bound"),
+    ),
+    (
+        "the engine read a prompt the work did not lend",
+        "engine_read_the_prompt",
+        lambda runs: damage_note(runs, "engine_prompt", "nengine", 0xBAD),
+    ),
+    (
+        "the Linux reference answered differently",
+        "engine_matches_reference",
+        lambda runs: rewrite_reference(runs),
+    ),
+    (
+        "the sampler's first choice was not the highest logit",
+        "engine_matches_reference",
+        lambda runs: damage_note(runs, "engine_argmax", "nengine", 7),
+    ),
+    (
+        "the engine was given a capability to the state service",
+        "engine_confinement",
+        lambda runs: add_event_in(runs, "engine", "cap.installed",
+                                  {"target": "3", "name": "nengine", "slot": "2",
+                                   "object_type": "endpoint"}),
+    ),
+    (
+        "the model was mapped writable",
+        "engine_confinement",
+        lambda runs: rewrite_event_field(runs, "mem.mapped", "nengine", "vaddr", "0x50000000",
+                                         "rights", "0x300"),
+    ),
+    (
+        "the tool refused the engine-stage candidate and the run published anyway",
+        "engine_vertical",
+        lambda runs: damage_note_in(runs, "engine", "tool_verdict", "k5pub", 1),
+    ),
 ]
+
+
+def drop_event_everywhere(runs: dict[str, Run], event: str) -> dict[str, Run]:
+    damaged = copy.deepcopy(runs)
+    for run in damaged.values():
+        run.records = [record for record in run.records if record.event != event]
+    return damaged
+
+
+def rebind_to_engine(runs: dict[str, Run]) -> dict[str, Run]:
+    """Makes the kernel's record say the engine paid for the first inference."""
+    damaged = copy.deepcopy(runs)
+    for run in damaged.values():
+        engine_scope = scope_id(run, "engine")
+        for record in by_event(run.records, "sched.bound"):
+            if engine_scope is not None:
+                record.fields["effective_scope"] = engine_scope
+                break
+    return damaged
+
+
+def rewrite_reference(runs: dict[str, Run]) -> dict[str, Run]:
+    damaged = copy.deepcopy(runs)
+    for run in damaged.values():
+        if run.reference and run.reference.get("answers"):
+            answer = run.reference["answers"][0]
+            text = answer.get("completion_hex", "")
+            answer["completion_hex"] = ("00" + text[2:]) if text[:2] != "00" else ("11" + text[2:])
+    return damaged
+
+
+def add_event_in(runs: dict[str, Run], stage: str, event: str, fields: dict[str, str]) -> dict[str, Run]:
+    damaged = copy.deepcopy(runs)
+    for run in damaged.values():
+        if (run.spec.get("image_manifest") or {}).get("stage") == stage:
+            run.records.append(Record("kernel", 99996, 1, event, dict(fields)))
+    return damaged
+
+
+def rewrite_event_field(runs: dict[str, Run], event: str, name: str, key: str, value: str,
+                        field_name: str, new: str) -> dict[str, Run]:
+    damaged = copy.deepcopy(runs)
+    for run in damaged.values():
+        for record in by_event(run.records, event):
+            if record.get("name") == name and record.get(key) == value:
+                record.fields[field_name] = new
+    return damaged
+
+
+def damage_note_in(runs: dict[str, Run], stage: str, key: str, domain: str,
+                   value: int) -> dict[str, Run]:
+    damaged = copy.deepcopy(runs)
+    for run in damaged.values():
+        if (run.spec.get("image_manifest") or {}).get("stage") != stage:
+            continue
+        for record in notes(run.records, NOTE[key], domain):
+            record.fields["b"] = hex(value)
+    return damaged
 
 
 def rewrite_validation_tool(runs: dict[str, Run]) -> dict[str, Run]:

@@ -509,6 +509,15 @@ def generate_fixture(schema: dict, layout: Layout, names: list[str]) -> str:
     return "\n".join(out) + "\n"
 
 
+# Field names that are keywords in C++. The C header spells them differently
+# for a C++ reader and identically for a C one.
+CXX_KEYWORDS = {
+    "class", "delete", "new", "operator", "private", "protected", "public", "template",
+    "this", "throw", "try", "catch", "typename", "virtual", "friend", "namespace",
+    "using", "explicit", "export", "mutable", "bool", "true", "false",
+}
+
+
 def generate_c(schema: dict, layout: Layout) -> str:
     version = schema["version"]
     out: list[str] = []
@@ -524,6 +533,16 @@ def generate_c(schema: dict, layout: Layout) -> str:
     out.append("")
     out.append("#include <stdint.h>")
     out.append("#include <stddef.h>")
+    out.append("")
+    out.append("/* C++ spells both of these differently. The assertions below are the same")
+    out.append(" * checks in either language, and a C++ program on the native target reads")
+    out.append(" * this header too. */")
+    out.append("#if defined(__cplusplus) && !defined(_Static_assert)")
+    out.append("#define _Static_assert static_assert")
+    out.append("#endif")
+    out.append("#if defined(__cplusplus) && !defined(_Alignof)")
+    out.append("#define _Alignof alignof")
+    out.append("#endif")
     out.append("")
     out.append(f"#define THALYX_ABI_VERSION_MAJOR {version['major']}u")
     out.append(f"#define THALYX_ABI_VERSION_MINOR {version['minor']}u")
@@ -615,7 +634,16 @@ def generate_c(schema: dict, layout: Layout) -> str:
             declaration = c_type(field)
             suffix = f"[{count}]" if count is not None else ""
             comment = f" /* {field_doc(field)} */"
-            out.append(f"    {declaration} {field['name']}{suffix};{comment}")
+            if field["name"] in CXX_KEYWORDS:
+                # Same type, same offset; only the spelling differs, because
+                # the name is a keyword in C++ and a C++ program reads this too.
+                out.append("#ifdef __cplusplus")
+                out.append(f"    {declaration} {field['name']}_{suffix};{comment}")
+                out.append("#else")
+                out.append(f"    {declaration} {field['name']}{suffix};{comment}")
+                out.append("#endif")
+            else:
+                out.append(f"    {declaration} {field['name']}{suffix};{comment}")
         out.append(f"}} {typedef};")
         out.append(
             f"_Static_assert(sizeof({typedef}) == {definition['size']}, "
@@ -626,10 +654,19 @@ def generate_c(schema: dict, layout: Layout) -> str:
             f'"{definition["name"]} alignment");'
         )
         for field in definition["fields"]:
+            if field["name"] in CXX_KEYWORDS:
+                out.append("#ifdef __cplusplus")
+                out.append(
+                    f"_Static_assert(offsetof({typedef}, {field['name']}_) == {field['offset']}, "
+                    f'"{definition["name"]}.{field["name"]} offset");'
+                )
+                out.append("#else")
             out.append(
                 f"_Static_assert(offsetof({typedef}, {field['name']}) == {field['offset']}, "
                 f'"{definition["name"]}.{field["name"]} offset");'
             )
+            if field["name"] in CXX_KEYWORDS:
+                out.append("#endif")
         out.append("")
     out.append("#endif /* THALYX_ABI_H */")
     return "\n".join(out) + "\n"

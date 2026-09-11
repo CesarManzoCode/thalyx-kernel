@@ -13,6 +13,15 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* C++ spells both of these differently; the inference engine is C++ and
+ * reads this header. The assertions are the same checks in either. */
+#if defined(__cplusplus) && !defined(_Static_assert)
+#define _Static_assert static_assert
+#endif
+#if defined(__cplusplus) && !defined(_Alignof)
+#define _Alignof alignof
+#endif
+
 #define K5_VERSION_MAJOR 1u
 #define K5_VERSION_MINOR 0u
 
@@ -119,6 +128,24 @@
 #define K5_NOTE_ENGINE_REFUSED 0x5508ull
 /* The prompt the engine actually read, as a digest of its bytes. */
 #define K5_NOTE_ENGINE_PROMPT 0x5509ull
+/* llama.cpp refused the weights. Value: a digest of the reason it gave. */
+#define K5_NOTE_ENGINE_LOAD_FAILED 0x550Aull
+/* An inference stopped because the caller's scope was closed. Value: tokens made before it stopped. */
+#define K5_NOTE_ENGINE_CANCELLED 0x550Bull
+/* A request was read and could not be served. Value: a digest of the reason. */
+#define K5_NOTE_ENGINE_FAILED 0x550Cull
+/* The context the engine built, in tokens. */
+#define K5_NOTE_ENGINE_CONTEXT 0x550Dull
+/* A C++ exception was thrown inside a request and caught by the engine. Value: a digest of what() said. */
+#define K5_NOTE_ENGINE_EXCEPTION 0x550Eull
+/* The highest raw logit of the first decision, computed before sampling, so the sampler's choice can be checked against it. */
+#define K5_NOTE_ENGINE_ARGMAX 0x550Full
+/* Lines llama.cpp and ggml logged while loading. They go nowhere; the count says how many. */
+#define K5_NOTE_ENGINE_LOG_LINES 0x5510ull
+/* Bytes of /bulk the engine was given, before it loaded anything. */
+#define K5_NOTE_ENGINE_MODEL_BYTES 0x5511ull
+/* FNV-1a over those bytes, computed by the engine, so the weights it loaded can be named from the host's copy. */
+#define K5_NOTE_ENGINE_MODEL_DIGEST 0x5512ull
 /* A tool domain was built. Value: the tool identity. */
 #define K5_NOTE_LAUNCH_BUILT 0x5600ull
 /* A tool domain was retired. Value: pages its scope had held. */
@@ -195,6 +222,8 @@
 #define K5_ENGINE_STATUS_NO_BUFFER 4u
 /* The work that asked was closed while this was running. */
 #define K5_ENGINE_STATUS_CANCELLED 5u
+/* The request was read and could not be served; the answer bytes are the reason, as Thalyx's engine reports one. */
+#define K5_ENGINE_STATUS_FAILED 6u
 
 /* The inline half of a host call; the bytes are in the shared region. */
 typedef struct {
@@ -357,7 +386,7 @@ typedef struct {
     uint32_t op; /* EngineOp. */
     uint32_t predict; /* Tokens to generate at most. */
     uint32_t prompt_len; /* Bytes of prompt in the lent buffer. */
-    uint32_t reserved0;
+    uint32_t grammar_len; /* Bytes of GBNF grammar right after the prompt in the lent buffer; zero for none. Thalyx's engine takes one per request. */
     uint64_t seed;
 } k5_engine_request;
 _Static_assert(sizeof(k5_engine_request) == 24, "EngineRequest size");
@@ -365,7 +394,7 @@ _Static_assert(_Alignof(k5_engine_request) == 8, "EngineRequest alignment");
 _Static_assert(offsetof(k5_engine_request, op) == 0, "EngineRequest.op offset");
 _Static_assert(offsetof(k5_engine_request, predict) == 4, "EngineRequest.predict offset");
 _Static_assert(offsetof(k5_engine_request, prompt_len) == 8, "EngineRequest.prompt_len offset");
-_Static_assert(offsetof(k5_engine_request, reserved0) == 12, "EngineRequest.reserved0 offset");
+_Static_assert(offsetof(k5_engine_request, grammar_len) == 12, "EngineRequest.grammar_len offset");
 _Static_assert(offsetof(k5_engine_request, seed) == 16, "EngineRequest.seed offset");
 
 /* What the engine did. */

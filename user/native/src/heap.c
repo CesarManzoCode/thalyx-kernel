@@ -14,11 +14,20 @@
  * coalesce with each other -- they are separate objects at separate addresses,
  * even when the addresses happen to be adjacent -- so every arena ends in a
  * zero-length in-use fence that stops a forward walk.
+ *
+ * One lock guards all of it. A domain may have built threads, and a C++
+ * program allocates from all of them; a heap that assumed one thread would
+ * corrupt itself the first time two allocated at once.
+ *
+ * An aligned block is carved out of an ordinary one: the front part up to the
+ * aligned address becomes a free block of its own, so what `free` receives is
+ * always a pointer this allocator produced with a header in front of it.
  */
 
 #include "thalyx/nrt.h"
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 
 #define ALIGN      16u
 #define HEADER     16u          /* prev_size + size_flags */
@@ -45,6 +54,17 @@ static uint64_t arena_pages;
 static uint64_t heap_page_ceiling;
 static int heap_ready;
 static int heap_last_error;
+static int heap_lock;
+
+static void enter(void)
+{
+    unsigned spins = 0;
+    while (__atomic_exchange_n(&heap_lock, 1, __ATOMIC_ACQUIRE)) {
+        if (++spins < 256) { __builtin_ia32_pause(); } else { th_yield_ns(10000); spins = 0; }
+    }
+}
+
+static void leave(void) { __atomic_store_n(&heap_lock, 0, __ATOMIC_RELEASE); }
 
 static uint64_t block_size(const Block *b) { return b->size_flags & ~(uint64_t)(ALIGN - 1); }
 static int block_inuse(const Block *b) { return (b->size_flags & FLAG_INUSE) != 0; }
@@ -81,27 +101,40 @@ static void publish_free(Block *block, uint64_t size)
     bin_insert((Free *)block);
 }
 
-/* Adds one arena: one memory object, one mapping, one free block. */
+/* Adds one arena: a run of addresses backed by memory objects mapped end to
+ * end, and one free block over all of it.
+ *
+ * Usually the run is one object. An allocation larger than one object may be
+ * gets several, mapped at consecutive addresses: malloc needs contiguous
+ * addresses, not one object, and the interface's per-object limit is a bound
+ * on objects rather than on what a program may allocate. If a later object is
+ * refused, the ones already mapped stay and become the arena, so pages the
+ * scope was charged are never mapped and unusable. */
 static int grow(uint64_t want_bytes)
 {
     uint64_t pages = arena_pages;
     uint64_t need = (want_bytes + HEADER * 2 + 4095) / 4096;
     if (need > pages) { pages = need; }
-    if (pages > THALYX_MAX_MEMORY_PAGES_PER_OBJECT) { return 0; }
     if (heap_pages_held + pages > heap_page_ceiling) { return 0; }
     uint64_t at = heap_next_vaddr;
     if (at + pages * 4096 > TH_HEAP_LIMIT) { return 0; }
-    /* `MEMORY_MAP` has to be in the object's maximum rights, not only in the
-     * mapping request: the kernel takes the intersection of what the grant
-     * permits, what the object permits and what the platform can express, and
-     * an object created without it can never be mapped by anybody. */
-    heap_last_error = th_map_new(
-        at, pages,
-        THALYX_RIGHT_MEMORY_READ | THALYX_RIGHT_MEMORY_WRITE | THALYX_RIGHT_MEMORY_MAP,
-        "heap");
-    if (heap_last_error != 0) {
-        return 0;
+    uint64_t mapped = 0;
+    while (mapped < pages) {
+        uint64_t chunk = pages - mapped;
+        if (chunk > THALYX_MAX_MEMORY_PAGES_PER_OBJECT) { chunk = THALYX_MAX_MEMORY_PAGES_PER_OBJECT; }
+        /* `MEMORY_MAP` has to be in the object's maximum rights, not only in
+         * the mapping request: the kernel takes the intersection of what the
+         * grant permits, what the object permits and what the platform can
+         * express, and an object created without it can never be mapped. */
+        heap_last_error = th_map_new(
+            at + mapped * 4096, chunk,
+            THALYX_RIGHT_MEMORY_READ | THALYX_RIGHT_MEMORY_WRITE | THALYX_RIGHT_MEMORY_MAP,
+            "heap");
+        if (heap_last_error != 0) { break; }
+        mapped += chunk;
     }
+    if (mapped == 0) { return 0; }
+    pages = mapped;
     heap_next_vaddr = at + pages * 4096;
     heap_pages_held += pages;
 
@@ -147,19 +180,8 @@ static void *carve(Free *block, uint64_t want)
     return (uint8_t *)block + HEADER;
 }
 
-void *malloc(size_t n)
+static void *find_fit(uint64_t want)
 {
-    if (!heap_ready) { th_heap_init(); }
-    if (n == 0) { n = 1; }
-    uint64_t want = (n + HEADER + ALIGN - 1) & ~(uint64_t)(ALIGN - 1);
-    if (want < MIN_BLOCK) { want = MIN_BLOCK; }
-
-    for (unsigned index = bin_of(want); index < BINS; index++) {
-        for (Free *block = bins[index]; block; block = block->next) {
-            if (block_size(&block->header) >= want) { return carve(block, want); }
-        }
-    }
-    if (!grow(want)) { return NULL; }
     for (unsigned index = bin_of(want); index < BINS; index++) {
         for (Free *block = bins[index]; block; block = block->next) {
             if (block_size(&block->header) >= want) { return carve(block, want); }
@@ -168,16 +190,21 @@ void *malloc(size_t n)
     return NULL;
 }
 
-size_t malloc_usable_size(void *p)
+static void *allocate(size_t n)
 {
-    if (p == NULL) { return 0; }
-    Block *block = (Block *)((uint8_t *)p - HEADER);
-    return (size_t)(block_size(block) - HEADER);
+    if (!heap_ready) { th_heap_init(); }
+    if (n == 0) { n = 1; }
+    if (n > (size_t)1 << 40) { return NULL; }
+    uint64_t want = (n + HEADER + ALIGN - 1) & ~(uint64_t)(ALIGN - 1);
+    if (want < MIN_BLOCK) { want = MIN_BLOCK; }
+    void *found = find_fit(want);
+    if (found) { return found; }
+    if (!grow(want)) { return NULL; }
+    return find_fit(want);
 }
 
-void free(void *p)
+static void release(void *p)
 {
-    if (p == NULL) { return; }
     Block *block = (Block *)((uint8_t *)p - HEADER);
     uint64_t size = block_size(block);
     heap_in_use -= size;
@@ -198,10 +225,34 @@ void free(void *p)
     publish_free(block, size);
 }
 
+void *malloc(size_t n)
+{
+    enter();
+    void *out = allocate(n);
+    leave();
+    if (out == NULL) { errno = ENOMEM; }
+    return out;
+}
+
+size_t malloc_usable_size(void *p)
+{
+    if (p == NULL) { return 0; }
+    Block *block = (Block *)((uint8_t *)p - HEADER);
+    return (size_t)(block_size(block) - HEADER);
+}
+
+void free(void *p)
+{
+    if (p == NULL) { return; }
+    enter();
+    release(p);
+    leave();
+}
+
 void *calloc(size_t count, size_t size)
 {
     uint64_t total = (uint64_t)count * (uint64_t)size;
-    if (size != 0 && total / size != count) { return NULL; }
+    if (size != 0 && total / size != count) { errno = ENOMEM; return NULL; }
     void *out = malloc((size_t)total);
     if (out) { memset(out, 0, (size_t)total); }
     return out;
@@ -219,3 +270,51 @@ void *realloc(void *p, size_t n)
     free(p);
     return out;
 }
+
+static void *allocate_aligned(size_t alignment, size_t n)
+{
+    if (alignment <= ALIGN) { return allocate(n); }
+    uint64_t want = (n + HEADER + ALIGN - 1) & ~(uint64_t)(ALIGN - 1);
+    if (want < MIN_BLOCK) { want = MIN_BLOCK; }
+    uint8_t *p = allocate((size_t)(want + alignment + MIN_BLOCK));
+    if (p == NULL) { return NULL; }
+    uintptr_t payload = (uintptr_t)p;
+    uintptr_t aligned = (payload + alignment - 1) & ~(uintptr_t)(alignment - 1);
+    if (aligned == payload) { return p; }
+    /* The gap in front has to be a block of its own, so it has to hold one. */
+    while (aligned - payload < MIN_BLOCK) { aligned += alignment; }
+    uint64_t front = aligned - payload;
+    Block *old = (Block *)(p - HEADER);
+    uint64_t total = block_size(old);
+    Block *kept = (Block *)(aligned - HEADER);
+    kept->size_flags = (total - front) | FLAG_INUSE;
+    kept->prev_size = front;
+    Block *after = (Block *)((uint8_t *)kept + (total - front));
+    after->prev_size = total - front;
+    old->size_flags = front | FLAG_INUSE;
+    release((uint8_t *)old + HEADER);     /* the front, freed and coalesced */
+    heap_in_use += front;                 /* `release` took it off; it was never handed out */
+    heap_in_use -= front;
+    return (void *)aligned;
+}
+
+int posix_memalign(void **out, size_t alignment, size_t size)
+{
+    if (alignment < sizeof(void *) || (alignment & (alignment - 1)) != 0) { return EINVAL; }
+    enter();
+    void *p = allocate_aligned(alignment, size);
+    leave();
+    if (p == NULL) { return ENOMEM; }
+    *out = p;
+    return 0;
+}
+
+void *aligned_alloc(size_t alignment, size_t size)
+{
+    void *p = NULL;
+    int status = posix_memalign(&p, alignment < sizeof(void *) ? sizeof(void *) : alignment, size);
+    if (status != 0) { errno = status; return NULL; }
+    return p;
+}
+
+void *memalign(size_t alignment, size_t size) { return aligned_alloc(alignment, size); }

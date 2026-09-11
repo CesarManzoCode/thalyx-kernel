@@ -11,8 +11,18 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* C++ spells both of these differently. The assertions below are the same
+ * checks in either language, and a C++ program on the native target reads
+ * this header too. */
+#if defined(__cplusplus) && !defined(_Static_assert)
+#define _Static_assert static_assert
+#endif
+#if defined(__cplusplus) && !defined(_Alignof)
+#define _Alignof alignof
+#endif
+
 #define THALYX_ABI_VERSION_MAJOR 0u
-#define THALYX_ABI_VERSION_MINOR 2u
+#define THALYX_ABI_VERSION_MINOR 3u
 #define THALYX_MAX_DESCRIPTOR_LEN 4096ull
 #define THALYX_MAX_INLINE_PAYLOAD 256ull
 #define THALYX_MAX_CAPS_PER_MESSAGE 4ull
@@ -20,7 +30,7 @@
 #define THALYX_MAX_DERIVE_DEPTH 32ull
 #define THALYX_MAX_HANDLES_PER_DOMAIN 32ull
 #define THALYX_MAX_ENDPOINT_QUEUE 8ull
-#define THALYX_MAX_MEMORY_PAGES_PER_OBJECT 512ull
+#define THALYX_MAX_MEMORY_PAGES_PER_OBJECT 4096ull
 #define THALYX_CPU_WINDOW_NS 10000000ull
 #define THALYX_CPU_QUANTUM_NS 1000000ull
 #define THALYX_PAGE_SIZE 4096ull
@@ -33,6 +43,7 @@
 #define THALYX_ENTRY_LIMITS_QUERY 2ull
 #define THALYX_ENTRY_EXIT 3ull
 #define THALYX_ENTRY_CLOCK_QUERY 4ull
+#define THALYX_ENTRY_THREAD_POINTER_SET 5ull
 
 #define THALYX_FLAG_NONBLOCKING (1ull << 0)
 
@@ -1030,7 +1041,11 @@ typedef struct {
     uint64_t rip; /* Schema field `rip`, little-endian `u64`. */
     uint64_t rsp; /* Schema field `rsp`, little-endian `u64`. */
     uint64_t address; /* Schema field `address`, little-endian `u64`. */
+#ifdef __cplusplus
+    uint32_t class_; /* Schema field `class`, little-endian `u32`. */
+#else
     uint32_t class; /* Schema field `class`, little-endian `u32`. */
+#endif
     uint32_t reserved0; /* Reserved, must be zero. */
 } thalyx_fault_report_t;
 _Static_assert(sizeof(thalyx_fault_report_t) == 72, "FaultReport size");
@@ -1043,7 +1058,11 @@ _Static_assert(offsetof(thalyx_fault_report_t, error_code) == 32, "FaultReport.e
 _Static_assert(offsetof(thalyx_fault_report_t, rip) == 40, "FaultReport.rip offset");
 _Static_assert(offsetof(thalyx_fault_report_t, rsp) == 48, "FaultReport.rsp offset");
 _Static_assert(offsetof(thalyx_fault_report_t, address) == 56, "FaultReport.address offset");
+#ifdef __cplusplus
+_Static_assert(offsetof(thalyx_fault_report_t, class_) == 64, "FaultReport.class offset");
+#else
 _Static_assert(offsetof(thalyx_fault_report_t, class) == 64, "FaultReport.class offset");
+#endif
 _Static_assert(offsetof(thalyx_fault_report_t, reserved0) == 68, "FaultReport.reserved0 offset");
 
 /* One register region of a device the driver may be given. Offsets and lengths are the kernel's, validated against the base address register they live in. */

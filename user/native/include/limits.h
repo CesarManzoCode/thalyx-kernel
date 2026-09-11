@@ -18,6 +18,13 @@
 #define LLONG_MIN (-9223372036854775807LL - 1)
 #define LLONG_MAX 9223372036854775807LL
 #define ULLONG_MAX 18446744073709551615ULL
-#define PATH_MAX 256
+#define LONG_BIT 64
+#define WORD_BIT 32
+/* glibc's values. The prebuilt C++ library sizes buffers with them. */
+#define MB_LEN_MAX 16
+#define PATH_MAX 4096
+#define NAME_MAX 255
 #define SSIZE_MAX LONG_MAX
+#define PTHREAD_KEYS_MAX 64
+#define PTHREAD_STACK_MIN 16384
 #endif

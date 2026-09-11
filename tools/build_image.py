@@ -142,18 +142,37 @@ K5_NATIVE: dict[str, list[str]] = {
     "smoke": ["nsmoke"],
     "surface": [],
     "work": ["nhacer", "ncheck"],
-    "engine": ["nhacer", "ncheck"],
+    "engine": ["nhacer", "ncheck", "nengine"],
 }
 K5_STAGES = {"smoke": 1, "surface": 2, "work": 3, "engine": 4}
+
+# The model the engine stage carries: the one Thalyx's own `dev/tiny-model.py`
+# writes, produced by tools/build_reference.py and pinned there. It enters the
+# package as a module like any other, and the kernel seals it like any other.
+REFERENCE_MODEL = BUILD / "reference" / "tiny.gguf"
+
+
+def reference_model() -> Path:
+    sys.path.insert(0, str(ROOT / "tools"))
+    import build_reference  # noqa: E402
+
+    if not REFERENCE_MODEL.exists() or digest(REFERENCE_MODEL) != build_reference.MODEL_SHA256:
+        run([sys.executable, str(ROOT / "tools/build_reference.py")], cwd=ROOT)
+    if digest(REFERENCE_MODEL) != build_reference.MODEL_SHA256:
+        raise SystemExit("the reference model does not have its pinned digest")
+    return REFERENCE_MODEL
 
 # Mirrors `thalyx_user_k5pkg::native::Plan`.
 PLAN_MAGIC = 0x31304E414C50354B
 PLAN_FORMAT = "<QIIQQQQQ"
 
 
-def build_plan(stage: str, seed: int) -> bytes:
+def build_plan(stage: str, seed: int, model_bytes: int = 0) -> bytes:
+    # A sealed module is whole pages; the model is not. The host that put the
+    # model in the package says how long it is, and the supervisor checks the
+    # number against the object before the engine is told it.
     return struct.pack(
-        PLAN_FORMAT, PLAN_MAGIC, 1, K5_STAGES[stage], seed, 0, 0, 0, 0
+        PLAN_FORMAT, PLAN_MAGIC, 1, K5_STAGES[stage], seed, model_bytes, 0, 0, 0
     )
 
 
@@ -381,7 +400,8 @@ def main() -> int:
             raise SystemExit("native build failed")
         for name in native_images:
             shutil.copyfile(BUILD / "native" / f"{name}.elf", stage / f"{name}.elf")
-        (stage / "k5plan.bin").write_bytes(build_plan(arguments.stage, arguments.seed))
+        model_bytes = reference_model().stat().st_size if arguments.stage == "engine" else 0
+        (stage / "k5plan.bin").write_bytes(build_plan(arguments.stage, arguments.seed, model_bytes))
 
     entries: list[tuple[str, Path, int, int]] = []
     if phase == "k1":
@@ -402,6 +422,9 @@ def main() -> int:
             (name, stage / f"{name}.elf", MODULE_KIND_USER_ELF, 0) for name in native_images
         ]
         entries.append(("k5plan", stage / "k5plan.bin", MODULE_KIND_USER_ELF, 0))
+        if arguments.stage == "engine":
+            shutil.copyfile(reference_model(), stage / "k5model.gguf")
+            entries.append(("k5model", stage / "k5model.gguf", MODULE_KIND_USER_ELF, 0))
     else:
         instances = {"k2": K2_INSTANCES, "k3": K3_INSTANCES, "k4": K4_INSTANCES}[phase]
         entries = [(name, stage / f"{program}.elf", kind, 0) for name, program, kind in instances]

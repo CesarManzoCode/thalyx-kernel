@@ -171,6 +171,15 @@ def generate_c(schema: dict) -> str:
         "#include <stdint.h>",
         "#include <stddef.h>",
         "",
+        "/* C++ spells both of these differently; the inference engine is C++ and",
+        " * reads this header. The assertions are the same checks in either. */",
+        "#if defined(__cplusplus) && !defined(_Static_assert)",
+        "#define _Static_assert static_assert",
+        "#endif",
+        "#if defined(__cplusplus) && !defined(_Alignof)",
+        "#define _Alignof alignof",
+        "#endif",
+        "",
     ]
     version = schema["version"]
     out.append(f"#define K5_VERSION_MAJOR {version['major']}u")

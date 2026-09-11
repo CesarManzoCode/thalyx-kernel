@@ -16,16 +16,23 @@ use thalyx_boot_protocol::{PAGE_SIZE, USER_MAX_ADDR, USER_MIN_ADDR};
 pub const MAX_SEGMENTS: usize = 8;
 
 /// Largest image accepted from the boot package.
-pub const MAX_IMAGE_BYTES: u64 = 4 * 1024 * 1024;
+///
+/// Raised from four megabytes in K5's `engine` stage, together with
+/// [`MAX_IMAGE_PAGES`] and the interface's `MAX_MEMORY_PAGES_PER_OBJECT`: the
+/// resident inference engine is llama.cpp and the C++ standard library linked
+/// whole, five megabytes on file and about 1200 pages mapped. The reader's
+/// bounds are unchanged in kind -- every offset is still checked against the
+/// image length -- only in size.
+pub const MAX_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Largest total memory footprint accepted for one module's segments.
 ///
-/// Raised from 256 in K5. A native C program that carries a real language
-/// runtime does not fit in a megabyte, and the ceiling that actually binds an
-/// image is the memory object it arrives in: `MAX_MEMORY_PAGES_PER_OBJECT` is
-/// an interface limit and caps the file at two megabytes, while this number is
-/// an implementation capacity and caps the mapped footprint, `.bss` included.
-pub const MAX_IMAGE_PAGES: u64 = 768;
+/// Raised from 256 for a language runtime and from 768 for the inference
+/// engine. The ceiling that binds an image is still the memory object it
+/// arrives in: `MAX_MEMORY_PAGES_PER_OBJECT` is an interface limit and caps the
+/// file, while this number is an implementation capacity and caps the mapped
+/// footprint, `.bss` included. They are the same number, sixteen megabytes.
+pub const MAX_IMAGE_PAGES: u64 = 4096;
 
 const EI_NIDENT: usize = 16;
 const HEADER_LEN: usize = 64;

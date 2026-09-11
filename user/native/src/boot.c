@@ -1,19 +1,24 @@
 /* Standing the runtime up, and the record it stands on.
  *
- * `_start` has already moved the stack; everything a C program assumes to be
+ * `_start` has already moved the stack; everything a program assumes to be
  * true before `main` happens here. In order: zero `.bss`, check that the kernel
  * speaks the interface this image was built against, read the boot record the
- * supervisor mapped read-only, start the heap, and only then call the program.
+ * supervisor mapped read-only, give this thread its thread-local storage, start
+ * the heap, bind the files the domain was given, run the constructors the image
+ * carries, and only then call the program.
  *
  * The version check is first because it is the one failure that makes every
  * later diagnosis wrong: a program built against a different interface would
- * otherwise report a structure mismatch as a logic error.
+ * otherwise report a structure mismatch as a logic error. Thread-local storage
+ * comes before anything that could reach C++ code, because C++ code compiled
+ * with the stack protector reads FS on its first instruction.
  */
 
 #include "thalyx/nrt.h"
 #include "thalyx/image.h"
 #include <string.h>
 #include <stdlib.h>
+#include <errno.h>
 
 extern uint8_t __bss_start[];
 extern uint8_t __bss_end[];
@@ -54,6 +59,15 @@ uint64_t thalyx_boot_handle_of(uint32_t slot)
     return ((uint64_t)1u << 32) | (uint64_t)slot;
 }
 
+/* Said before leaving, so a launcher waits on a signal instead of watching the
+ * domain state change. The exit code is still the domain's. */
+static _Noreturn void leave(int code)
+{
+    th_note(TH_NOTE_EXIT, (uint64_t)(int64_t)code);
+    th_signal_raise(TH_SLOT_SIGNAL_DONE, TH_BIT_PROGRAM_DONE);
+    th_exit((uint64_t)(int64_t)code);
+}
+
 _Noreturn void th_runtime_start(void)
 {
     memset(__bss_start, 0, (size_t)(__bss_end - __bss_start));
@@ -71,26 +85,33 @@ _Noreturn void th_runtime_start(void)
         th_exit((uint64_t)-2);
     }
 
+    if (th_tls_install(0) != 0) {
+        th_exit((uint64_t)-6);
+    }
     th_heap_init();
+    th_files_init(config_page);
     th_note(TH_NOTE_RUNTIME_UP, config_page->role);
+    /* Built threads have been parked since activation; the runtime they share
+     * is standing now, so they may start. Before the constructors, because a
+     * constructor may start a thread. */
+    th_threads_release();
+    th_run_constructors();
 
-    int code = th_main(config_page);
-    th_note(TH_NOTE_EXIT, (uint64_t)(int64_t)code);
-    /* Said before leaving, so a launcher waits on a signal instead of watching
-     * the domain state change. The exit code is still the domain's. */
-    th_signal_raise(TH_SLOT_SIGNAL_DONE, TH_BIT_PROGRAM_DONE);
-    th_exit((uint64_t)(int64_t)code);
+    exit(th_main(config_page));
 }
 
 _Noreturn void exit(int code)
 {
-    th_note(TH_NOTE_EXIT, (uint64_t)(int64_t)code);
-    th_exit((uint64_t)(int64_t)code);
+    th_run_exit_handlers();
+    leave(code);
 }
+
+_Noreturn void _Exit(int code) { leave(code); }
 
 _Noreturn void abort(void)
 {
     th_note(TH_NOTE_EXIT, (uint64_t)-3);
+    th_signal_raise(TH_SLOT_SIGNAL_DONE, TH_BIT_PROGRAM_DONE);
     th_exit((uint64_t)-3);
 }
 
@@ -114,4 +135,21 @@ char *getenv(const char *name)
      * compatibility shim that lies. */
     (void)name;
     return NULL;
+}
+
+/* And none can be made: a variable that `setenv` accepted and `getenv` could
+ * not find would be two answers to one question. */
+int setenv(const char *name, const char *value, int overwrite)
+{
+    (void)name;
+    (void)value;
+    (void)overwrite;
+    errno = ENOSYS;
+    return -1;
+}
+
+int unsetenv(const char *name)
+{
+    (void)name;
+    return 0;
 }
