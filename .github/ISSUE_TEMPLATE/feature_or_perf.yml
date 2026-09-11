@@ -1,0 +1,32 @@
+name: Feature or performance proposal
+description: Propose new kernel behavior, a new mechanism, or a performance change — including anything touching K6's IPC-lock finding.
+labels: ["proposal"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        K0–K6 are functionally frozen: this repository does not accept new kernel architecture or features as a routine PR without a decision recorded first. Read [`vault/constitution.md`](../../vault/constitution.md) and [`vault/decisions/README.md`](../../vault/decisions/README.md) — your proposal may already be covered by an existing ADR or an open question ([`vault/roadmap/open-questions.md`](../../vault/roadmap/open-questions.md)).
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What you want to add or change, and why the current mechanism doesn't already cover it.
+    validations:
+      required: true
+  - type: textarea
+    id: contracts
+    attributes:
+      label: Affected contracts and decisions
+      description: Which files under vault/architecture/ or vault/decisions/ this would change, add to, or contradict. If none, say so explicitly.
+  - type: textarea
+    id: evidence
+    attributes:
+      label: How this would be validated
+      description: For a performance claim, what would be measured and against what baseline (see how K6 states equivalence before measuring, in abi/schema/k6-bench-v1.json). For new behavior, what gate criterion or self-test damage case would prove it.
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This is not solely "make it faster" without a measured bottleneck backing it — K6 already found and fixed eight, and the one it deliberately left (the machine-wide lock) is tracked as OQ-04.
+        - label: This does not assume physical-hardware behavior not yet measured (see the README's hardware limitations).

@@ -1,0 +1,36 @@
+name: Bug report
+description: A gate, tool, or documented command doesn't behave the way this repository says it does.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: check [`vault/roadmap/open-questions.md`](../../vault/roadmap/open-questions.md) and the README's "What is not demonstrated" section — a documented limitation is not a bug. For a suspected security issue, use the security advisory link instead of this form.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you ran, what you expected (quote the doc/README line if applicable), and what actually happened.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: Exact commands, from a clean clone if possible.
+      render: sh
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: TCG, KVM, or physical hardware; host OS; rustc/cargo version (`rustc --version`); QEMU version if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Gate output, kernel serial log excerpt, or command output. Paste as text, not a screenshot.
+      render: text

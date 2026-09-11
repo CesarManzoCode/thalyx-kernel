@@ -1,0 +1,80 @@
+name: CI
+
+# What this covers, and why it stops here:
+#
+# GitHub-hosted runners provide no KVM and no realistic budget to boot a
+# six-phase QEMU chain, so the K1-K6 gates (tools/check_k*.py against a real
+# boot, tools/run_gates.py) are NOT run here — they stay the authoritative
+# local reproduction path documented in README.md#validate. This workflow
+# runs the fast, deterministic, host-only checks that exist in the repository
+# already: formatting, the workspace build for the two real targets, the four
+# schema-vs-generated-code checks, and the vault/model checks. No parallel
+# validation logic is added here; every job just invokes an existing
+# tools/*.py or cargo subcommand.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Format, build, ABI/schema checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the exact channel, targets and components;
+      # rustup (preinstalled on the runner image) reads it on the first
+      # cargo/rustc invocation below, so no separate toolchain-install action
+      # is needed.
+      - name: Install pinned toolchain
+        run: rustup show
+
+      - name: Cache cargo registry and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            build/cargo
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: Build the workspace (bare-metal target)
+        run: cargo build --workspace --target x86_64-unknown-none
+
+      - name: Build the UEFI loader (UEFI target)
+        run: cargo build -p thalyx-boot-uefi --target x86_64-unknown-uefi
+
+      - name: ABI schema check (abi/schema/v0.json)
+        run: python3 tools/check_abi.py
+
+      - name: K4 store format check (abi/schema/k4-store-v1.json)
+        run: python3 tools/check_k4_format.py
+
+      - name: K5 protocol check (abi/schema/k5-proto-v1.json)
+        run: python3 tools/check_k5_proto.py
+
+      - name: K6 benchmark schema check (abi/schema/k6-bench-v1.json)
+        run: python3 tools/check_k6_bench.py
+
+  vault-and-models:
+    name: Vault links/metadata, research models
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Vault integrity check
+        run: python3 tools/check_vault.py
+
+      - name: Research models check
+        run: python3 research/models/check_models.py
