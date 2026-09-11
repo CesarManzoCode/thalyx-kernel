@@ -88,15 +88,15 @@ dependencies = [
 
 [[package]]
 name = "thalyx-abi"
-version = "0.3.1"
+version = "0.7.0"
 
 [[package]]
 name = "thalyx-boot-protocol"
-version = "0.3.1"
+version = "0.7.0"
 
 [[package]]
 name = "thalyx-boot-uefi"
-version = "0.3.1"
+version = "0.7.0"
 dependencies = [
  "thalyx-boot-protocol",
  "uefi",
@@ -104,7 +104,7 @@ dependencies = [
 
 [[package]]
 name = "thalyx-kernel"
-version = "0.3.1"
+version = "0.7.0"
 dependencies = [
  "thalyx-abi",
  "thalyx-boot-protocol",
@@ -112,7 +112,7 @@ dependencies = [
 
 [[package]]
 name = "thalyx-user-k2client"
-version = "0.3.1"
+version = "0.7.0"
 dependencies = [
  "thalyx-abi",
  "thalyx-user-rt",
@@ -120,7 +120,7 @@ dependencies = [
 
 [[package]]
 name = "thalyx-user-k2server"
-version = "0.3.1"
+version = "0.7.0"
 dependencies = [
  "thalyx-abi",
  "thalyx-user-rt",
@@ -128,7 +128,7 @@ dependencies = [
 
 [[package]]
 name = "thalyx-user-k2super"
-version = "0.3.1"
+version = "0.7.0"
 dependencies = [
  "thalyx-abi",
  "thalyx-user-rt",
@@ -136,7 +136,7 @@ dependencies = [
 
 [[package]]
 name = "thalyx-user-k3driver"
-version = "0.3.1"
+version = "0.7.0"
 dependencies = [
  "thalyx-abi",
  "thalyx-user-rt",
@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "thalyx-user-k3super"
-version = "0.3.1"
+version = "0.7.0"
 dependencies = [
  "thalyx-abi",
  "thalyx-user-rt",
@@ -152,7 +152,7 @@ dependencies = [
 
 [[package]]
 name = "thalyx-user-k3worker"
-version = "0.3.1"
+version = "0.7.0"
 dependencies = [
  "thalyx-abi",
  "thalyx-user-rt",
@@ -160,7 +160,7 @@ dependencies = [
 
 [[package]]
 name = "thalyx-user-k4client"
-version = "0.3.1"
+version = "0.7.0"
 dependencies = [
  "thalyx-abi",
  "thalyx-user-k4fmt",
@@ -169,7 +169,7 @@ dependencies = [
 
 [[package]]
 name = "thalyx-user-k4disk"
-version = "0.3.1"
+version = "0.7.0"
 dependencies = [
  "thalyx-abi",
  "thalyx-user-k4fmt",
@@ -178,11 +178,11 @@ dependencies = [
 
 [[package]]
 name = "thalyx-user-k4fmt"
-version = "0.3.1"
+version = "0.7.0"
 
 [[package]]
 name = "thalyx-user-k4store"
-version = "0.3.1"
+version = "0.7.0"
 dependencies = [
  "thalyx-abi",
  "thalyx-user-k4fmt",
@@ -191,7 +191,7 @@ dependencies = [
 
 [[package]]
 name = "thalyx-user-k4super"
-version = "0.3.1"
+version = "0.7.0"
 dependencies = [
  "thalyx-abi",
  "thalyx-user-k4fmt",
@@ -200,7 +200,7 @@ dependencies = [
 
 [[package]]
 name = "thalyx-user-k5pkg"
-version = "0.3.1"
+version = "0.7.0"
 dependencies = [
  "thalyx-abi",
  "thalyx-user-k4fmt",
@@ -209,7 +209,7 @@ dependencies = [
 
 [[package]]
 name = "thalyx-user-k5super"
-version = "0.3.1"
+version = "0.7.0"
 dependencies = [
  "thalyx-abi",
  "thalyx-user-k4fmt",
@@ -219,7 +219,7 @@ dependencies = [
 
 [[package]]
 name = "thalyx-user-k5work"
-version = "0.3.1"
+version = "0.7.0"
 dependencies = [
  "thalyx-abi",
  "thalyx-user-k4fmt",
@@ -229,7 +229,7 @@ dependencies = [
 
 [[package]]
 name = "thalyx-user-k6super"
-version = "0.3.1"
+version = "0.7.0"
 dependencies = [
  "thalyx-abi",
  "thalyx-user-k4fmt",
@@ -239,14 +239,14 @@ dependencies = [
 
 [[package]]
 name = "thalyx-user-rt"
-version = "0.3.1"
+version = "0.7.0"
 dependencies = [
  "thalyx-abi",
 ]
 
 [[package]]
 name = "thalyx-user-trespasser"
-version = "0.3.1"
+version = "0.7.0"
 dependencies = [
  "thalyx-abi",
  "thalyx-user-rt",
@@ -254,7 +254,7 @@ dependencies = [
 
 [[package]]
 name = "thalyx-user-worker"
-version = "0.3.1"
+version = "0.7.0"
 dependencies = [
  "thalyx-abi",
  "thalyx-user-rt",
@@ -262,7 +262,7 @@ dependencies = [
 
 [[package]]
 name = "thalyx-user-wxprobe"
-version = "0.3.1"
+version = "0.7.0"
 dependencies = [
  "thalyx-abi",
  "thalyx-user-rt",
