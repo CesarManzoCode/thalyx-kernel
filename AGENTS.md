@@ -10,5 +10,6 @@ Read `vault/constitution.md`, `vault/roadmap/current-state.md`, and the relevant
 - Develop on a work branch. Commit completed coherent changes. Do not open a pull request unless requested. Never rewrite shared history as routine cleanup.
 - Use primary sources and immutable source revisions for implementation claims. Record limitations and negative results.
 - Check local links and run relevant model checks with `python3 tools/check_vault.py` and `python3 research/models/check_models.py`. These validate documents and finite models, not kernel correctness.
+- CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, the workspace build, and the four schema-vs-generated checks (`check_abi.py`, `check_k4_format.py`, `check_k5_proto.py`, `check_k6_bench.py`) plus the vault/model checks above. It has no KVM and cannot run the K1–K6 gates or a K6 campaign; those stay a local reproduction step (see README).
 - Follow `vault/governance.md` for decision changes. A conflicting contract must be resolved before dependent implementation proceeds.
 - Do not add blanket permission requirements, unsupported benchmark claims, implementation status inferred from plans, or new scope disguised as a prerequisite.
