@@ -22,7 +22,7 @@
 #endif
 
 #define THALYX_ABI_VERSION_MAJOR 0u
-#define THALYX_ABI_VERSION_MINOR 3u
+#define THALYX_ABI_VERSION_MINOR 4u
 #define THALYX_MAX_DESCRIPTOR_LEN 4096ull
 #define THALYX_MAX_INLINE_PAYLOAD 256ull
 #define THALYX_MAX_CAPS_PER_MESSAGE 4ull
@@ -34,9 +34,9 @@
 #define THALYX_CPU_WINDOW_NS 10000000ull
 #define THALYX_CPU_QUANTUM_NS 1000000ull
 #define THALYX_PAGE_SIZE 4096ull
-#define THALYX_CONTROL_LOG_CAPACITY 64ull
+#define THALYX_CONTROL_LOG_CAPACITY 256ull
 #define THALYX_CONTROL_LOG_RESERVED 8ull
-#define THALYX_RECEIPT_BATCH 4ull
+#define THALYX_RECEIPT_BATCH 16ull
 
 #define THALYX_ENTRY_VERSION_QUERY 0ull
 #define THALYX_ENTRY_INVOKE 1ull
@@ -295,7 +295,7 @@ static const thalyx_op_spec_t thalyx_operations[THALYX_OPERATION_COUNT] = {
     { 0x00070001u, 7u, 0x00000100u, 40u, 0u, "TIMER_ARM" },
     { 0x00070002u, 7u, 0x00000100u, 0u, 0u, "TIMER_CANCEL" },
     { 0x00070003u, 7u, 0x00000001u, 64u, 1u, "TIMER_QUERY" },
-    { 0x00080001u, 8u, 0x00000100u, 432u, 1u, "LOG_READ" },
+    { 0x00080001u, 8u, 0x00000100u, 1584u, 1u, "LOG_READ" },
     { 0x00080002u, 8u, 0x00000200u, 64u, 0u, "LOG_APPEND" },
     { 0x00080003u, 8u, 0x00000400u, 40u, 0u, "LOG_ACK" },
     { 0x00080004u, 8u, 0x00000001u, 72u, 1u, "LOG_QUERY" },
@@ -602,7 +602,7 @@ typedef struct {
     uint32_t state; /* Schema field `state`, little-endian `u32`. */
     uint32_t threads; /* Schema field `threads`, little-endian `u32`. */
     uint32_t faults; /* Schema field `faults`, little-endian `u32`. */
-    uint32_t reserved0; /* Reserved, must be zero. */
+    uint32_t space_cpu_mask; /* Processors this domain's address space has executed on, one bit each: the set an invalidation of its translations has to reach. */
     uint64_t domain_id; /* Schema field `domain_id`, little-endian `u64`. */
     uint64_t owner_scope_id; /* Schema field `owner_scope_id`, little-endian `u64`. */
     uint64_t exit_code; /* Schema field `exit_code`, little-endian `u64`. */
@@ -616,7 +616,7 @@ _Static_assert(_Alignof(thalyx_domain_info_t) == 8, "DomainInfo alignment");
 _Static_assert(offsetof(thalyx_domain_info_t, state) == 0, "DomainInfo.state offset");
 _Static_assert(offsetof(thalyx_domain_info_t, threads) == 4, "DomainInfo.threads offset");
 _Static_assert(offsetof(thalyx_domain_info_t, faults) == 8, "DomainInfo.faults offset");
-_Static_assert(offsetof(thalyx_domain_info_t, reserved0) == 12, "DomainInfo.reserved0 offset");
+_Static_assert(offsetof(thalyx_domain_info_t, space_cpu_mask) == 12, "DomainInfo.space_cpu_mask offset");
 _Static_assert(offsetof(thalyx_domain_info_t, domain_id) == 16, "DomainInfo.domain_id offset");
 _Static_assert(offsetof(thalyx_domain_info_t, owner_scope_id) == 24, "DomainInfo.owner_scope_id offset");
 _Static_assert(offsetof(thalyx_domain_info_t, exit_code) == 32, "DomainInfo.exit_code offset");
@@ -978,9 +978,9 @@ typedef struct {
     uint32_t count; /* Schema field `count`, little-endian `u32`. */
     uint32_t lost; /* Receipts dropped since the last read. Coverage is never assumed complete. */
     uint64_t next_sequence; /* Schema field `next_sequence`, little-endian `u64`. */
-    thalyx_receipt_record_t records[4]; /* Schema field `records`, little-endian `struct:ReceiptRecord[4]`. */
+    thalyx_receipt_record_t records[16]; /* Schema field `records`, little-endian `struct:ReceiptRecord[16]`. */
 } thalyx_log_read_result_t;
-_Static_assert(sizeof(thalyx_log_read_result_t) == 400, "LogReadResult size");
+_Static_assert(sizeof(thalyx_log_read_result_t) == 1552, "LogReadResult size");
 _Static_assert(_Alignof(thalyx_log_read_result_t) == 8, "LogReadResult alignment");
 _Static_assert(offsetof(thalyx_log_read_result_t, count) == 0, "LogReadResult.count offset");
 _Static_assert(offsetof(thalyx_log_read_result_t, lost) == 4, "LogReadResult.lost offset");

@@ -20,7 +20,6 @@ use thalyx_abi::generated::{
 use thalyx_boot_protocol::PAGE_SIZE;
 
 use crate::api::{BODY, Ctx, begin_response, resolve};
-use crate::event;
 use crate::memobj::MapRecord;
 use crate::memobj::State as MemState;
 use crate::mm::Owner;
@@ -28,6 +27,7 @@ use crate::obj::{NO_GRANT, ObjKind, ObjRef};
 use crate::scope::{self, Resource};
 use crate::state::{DomainState, ExitReason, MACHINE, Machine};
 use crate::ucopy::Staging;
+use crate::{event, trace};
 
 /// Page-table pages reserved for one mapping operation.
 ///
@@ -92,7 +92,7 @@ pub fn create(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
     let handle = crate::api::cap_install(machine, ctx.domain, object, grant, None)
         .ok_or(status::LIMIT_EXHAUSTED)?;
 
-    event!(
+    trace!(
         "domain.created",
         "domain={index} name={text} id={} scope={} entry=0x{:x} segments={} image_pages={} \
          image_object={} state=building managed=1",
@@ -257,7 +257,7 @@ pub fn map(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u6
     }
     machine.scopes[owner_scope as usize].maps_pending += 1;
 
-    event!(
+    trace!(
         "mem.mapped",
         "domain={target} name={} object={} vaddr=0x{:x} pages={} rights=0x{:x} \
          writable_maps={} map_count={}",
@@ -332,7 +332,7 @@ pub fn unmap(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64
     };
 
     let ack = crate::tlb::shootdown();
-    event!(
+    trace!(
         "mem.unmapped",
         "domain={target} vaddr=0x{:x} pages={pages} active_in_space={live} \
          space_cpu_mask=0x{mask:x} space_cpus={} invalidation_generation={} \
@@ -418,7 +418,7 @@ pub fn install_cap(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> R
         Some(request.target_slot as usize),
     )
     .ok_or(status::LIMIT_EXHAUSTED)?;
-    event!(
+    trace!(
         "cap.installed",
         "target={target} name={} slot={} handle=0x{handle:x} object_type={} object={} \
          grant={} rights=0x{rights:x}",
@@ -473,7 +473,7 @@ pub fn add_thread(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Re
         crate::domain::CreateError::ScopeClosed => status::STATE_CONFLICT,
         _ => status::LIMIT_EXHAUSTED,
     })?;
-    event!(
+    trace!(
         "thread.created",
         "domain={target} name={} thread={thread} id={} entry=0x{:x} stack_top=0x{:x}",
         machine.domains[target].name_str(),
@@ -523,7 +523,7 @@ pub fn set_fault_channel(
     machine.domains[target].fault_grant = endpoint.grant;
     machine.domains[target].fault_facet = endpoint.facet;
     machine.domains[target].fault_reserved = true;
-    event!(
+    trace!(
         "domain.fault_channel",
         "domain={target} name={} endpoint={} facet={} reserved_cells={}",
         machine.domains[target].name_str(),
@@ -539,7 +539,7 @@ pub fn activate(machine: &mut Machine, ctx: &Ctx) -> Result<u64, i64> {
     let target = ctx.cap.object.index as usize;
     match crate::domain::activate_in(machine, target) {
         Ok(()) => {
-            event!(
+            trace!(
                 "domain.activated",
                 "domain={target} name={} id={} entry=0x{:x} threads={} scope={} \
                  fault_channel=1 state=runnable",
@@ -583,7 +583,7 @@ pub fn query(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<
         state: domain.state.abi(),
         threads: domain.thread_count() as u32,
         faults: domain.faults,
-        reserved0: 0,
+        space_cpu_mask: domain.cpu_mask as u32,
         domain_id: domain.id,
         owner_scope_id: machine.scopes[domain.owner_scope as usize].id,
         exit_code: domain.exit_code,

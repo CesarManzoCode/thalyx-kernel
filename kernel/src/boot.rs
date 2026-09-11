@@ -16,7 +16,6 @@ use thalyx_boot_protocol::{
 use crate::acpi;
 use crate::arch::x86_64::serial::{COM1, Uart};
 use crate::arch::x86_64::{cpu, fpu, gdt, idt, lapic, paging::AddressSpace, pic, syscall, trap};
-use crate::event;
 use crate::harness;
 use crate::k2boot;
 use crate::layout;
@@ -26,6 +25,7 @@ use crate::obj::ScopeId;
 use crate::percpu;
 use crate::state::{IDLE_THREAD, MACHINE, ThreadKind, ThreadState};
 use crate::{domain, sched, smp, time, tlb};
+use crate::{event, trace};
 
 unsafe extern "C" {
     static __thalyx_text_start: u8;
@@ -611,7 +611,7 @@ fn start_timer(lapic_phys: u64, backend: lapic::Backend) -> lapic::Calibration {
     let count = calibration.lapic_hz / sched::TICK_HZ;
     let count = u32::try_from(count.max(1)).unwrap_or(u32::MAX);
     controller.start_periodic(trap::TIMER_VECTOR, count);
-    event!(
+    trace!(
         "timer.armed",
         "cpu=0 vector=0x{:x} mode=periodic tick_hz={} lapic_hz={} initial_count={count} \
          quantum_ns={} quantum_ticks={} apic_id={} apic_version=0x{:x} \
@@ -707,6 +707,11 @@ fn create_supervisor(root: ScopeId, supervisor: &thalyx_boot_protocol::BootModul
         return 0;
     };
     report_domain(index, "supervisor");
+    // The supervisor's own construction is in the log whatever the package
+    // asked; from here on the package decides whether each operation is.
+    if supervisor.flags & module_flags::TRACE_OFF != 0 {
+        crate::diag::set_trace(false, "supervisor_module_flag");
+    }
     match domain::activate(index) {
         Ok(()) => {
             let (entry, segments, thread) = {
@@ -717,7 +722,7 @@ fn create_supervisor(root: ScopeId, supervisor: &thalyx_boot_protocol::BootModul
                     machine.domains[index].first_thread().unwrap_or(usize::MAX),
                 )
             };
-            event!(
+            trace!(
                 "domain.activated",
                 "domain={index} name=supervisor thread={thread} entry=0x{entry:x} \
                  segments={segments} state=runnable role=root_supervisor fault_channel=absent"
@@ -781,7 +786,7 @@ fn create_k1_domains(root: ScopeId) -> usize {
                                 machine.domains[index].first_thread().unwrap_or(usize::MAX),
                             )
                         };
-                        event!(
+                        trace!(
                             "domain.activated",
                             "domain={index} name={name} thread={thread} entry=0x{entry:x} \
                              segments={segments} state=runnable"
@@ -826,7 +831,7 @@ fn report_domain(index: usize, name: &str) {
         let mut machine = MACHINE.lock();
         machine.allocator().charged(Owner::Domain(index as u16))
     };
-    event!(
+    trace!(
         "domain.created",
         "domain={index} name={name} entry=0x{entry:x} cr3=0x{cr3:x} segments={segments} \
          image_pages={image_pages} \
@@ -846,7 +851,7 @@ fn report_domain(index: usize, name: &str) {
     let null_mapped = space.translate(0).is_some();
     let entry_flags = space.translate(entry).map_or(0, |(_, flags)| flags);
     drop(machine);
-    event!(
+    trace!(
         "domain.protection",
         "domain={index} name={name} entry_flags=0x{entry_flags:x} entry_user={} entry_nx={} \
          guard_page=0x{guard:x} guard_mapped={} null_page_mapped={}",
@@ -918,7 +923,7 @@ fn drain_quarantine() {
             allocator.quarantine_released(),
         )
     };
-    event!(
+    trace!(
         "mm.quarantine",
         "released_now={released} released_total={total} still_held={held} peak={peak} \
          retained_permanently={retained} condition=all_processors_invalidated"

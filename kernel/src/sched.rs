@@ -36,12 +36,14 @@
 //! instruction it did not choose, and the interrupted frame is recorded so the
 //! claim can be checked rather than believed.
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use crate::arch::x86_64::{context, cpu, fpu, gdt, trap};
-use crate::event;
 use crate::limits::MAX_CPUS;
 use crate::percpu;
 use crate::scope;
 use crate::state::{MACHINE, MAX_THREADS, Machine, ThreadKind, ThreadState, Wait, idle_thread};
+use crate::{event, trace};
 use crate::{smp, time, tlb};
 
 /// Timer interrupts per second.
@@ -184,6 +186,154 @@ fn pick_and_reserve(machine: &mut Machine, cpu: usize, now: u64) -> usize {
     idle_thread(cpu)
 }
 
+/// Notes that a thread has become runnable on this processor's account.
+///
+/// A processor with nothing to run halts until an interrupt, and until K6 the
+/// only interrupt it got was its own timer: a thread woken from another
+/// processor waited, on average, a quarter of a tick to run. K6 measured the
+/// wake-to-run latency at two hundred microseconds against a tick of five
+/// hundred, on a machine with three processors idle.
+///
+/// The wake is not delegated at once. The processor doing the waking is very
+/// often about to become free itself -- a caller blocks for its reply, a
+/// server replies, closes the invocation and goes back to receive -- and a
+/// round trip that stayed on one processor would then be split across two,
+/// with an interrupt or a migration each way: K6 measured the split round
+/// trip at twice to three times the cost of the one that stayed. So this only
+/// records that a wake happened. The wake is delegated once it has been
+/// pending for [`WAKE_GRACE_NS`] without this processor yielding: by
+/// [`flush_wake`] when the processor returns to a thread that keeps running,
+/// or by an idle processor that watched it age in [`poll_before_halt`]. A
+/// processor that yields within the grace takes the work itself, in
+/// [`schedule`]. Called under the machine lock from every place that makes a
+/// thread `Ready`.
+pub fn kick_idle(machine: &mut Machine) {
+    let me = percpu::index();
+    if !machine.cpus[me].wake_pending {
+        machine.cpus[me].wake_pending = true;
+        machine.cpus[me].wake_pending_at = cpu::rdtsc();
+    }
+    READY_EPOCH.fetch_add(1, Ordering::Release);
+}
+
+/// How long a wake stays with the processor that made it before another
+/// takes it: the few microseconds a server needs to reply, close and receive.
+pub const WAKE_GRACE_NS: u64 = 10_000;
+
+fn grace_cycles() -> u64 {
+    WAKE_GRACE_NS * time::hz() / 1_000_000_000
+}
+
+/// Bumped whenever a thread becomes runnable: what an idle processor watches
+/// before it halts, so a wake that arrives while it is still awake is taken
+/// without an interrupt.
+static READY_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// How long an idle processor watches for a wake before halting. Long enough
+/// for the pattern a round trip makes -- one side wakes the other and blocks
+/// within a few microseconds -- and short enough that an idle machine is a
+/// halted one. Under hardware virtualization a halt and the interrupt that
+/// ends it are each a trip through the host; K6 measured a round trip that
+/// paid for both at twice the cost of one that did not.
+pub const IDLE_POLL_NS: u64 = 50_000;
+
+/// Watches for a wake for [`IDLE_POLL_NS`], with interrupts enabled as a halt
+/// would have them. Whether one arrived, or the run was told to stop, in
+/// which case the caller should reconsider rather than halt. A wake that is
+/// seen is given [`WAKE_GRACE_NS`] to be taken by the processor that made it
+/// before this one goes to look.
+fn poll_before_halt() -> bool {
+    let seen = READY_EPOCH.load(Ordering::Acquire);
+    let hz = time::hz();
+    if hz == 0 {
+        return false;
+    }
+    let budget = IDLE_POLL_NS * hz / 1_000_000_000;
+    let grace = grace_cycles();
+    let start = cpu::rdtsc();
+    // SAFETY: no lock is held; this is the idle loop, where the handler that
+    // runs may switch away from this context and back.
+    unsafe {
+        cpu::with_interrupts_enabled(|| {
+            let mut woken_at = None;
+            loop {
+                if smp::shutting_down() {
+                    return true;
+                }
+                let now = cpu::rdtsc();
+                match woken_at {
+                    Some(at) => {
+                        if now.wrapping_sub(at) >= grace {
+                            return true;
+                        }
+                    }
+                    None => {
+                        if READY_EPOCH.load(Ordering::Acquire) != seen {
+                            woken_at = Some(now);
+                        } else if now.wrapping_sub(start) > budget {
+                            return false;
+                        }
+                    }
+                }
+                core::hint::spin_loop();
+            }
+        })
+    }
+}
+
+/// Sends a reschedule interrupt to one idle processor, other than this one.
+///
+/// The interrupt itself does nothing but end the halt; the processor then
+/// reconsiders what to run on its own. One that arrives at a processor already
+/// awake costs it a return.
+fn interrupt_idle(machine: &mut Machine, me: usize) -> bool {
+    let Some(controller) = crate::arch::x86_64::lapic::current() else {
+        return false;
+    };
+    for cpu in 0..MAX_CPUS {
+        let slot = machine.cpus[cpu];
+        if cpu == me || !slot.online || slot.current != idle_thread(cpu) {
+            continue;
+        }
+        let apic_id = smp::apic_id_of(cpu);
+        if apic_id != u32::MAX {
+            controller.send_fixed(apic_id, trap::RESCHEDULE_VECTOR);
+            machine.cpus[me].kicks += 1;
+            return true;
+        }
+    }
+    false
+}
+
+/// Delegates a pending wake, because this processor is returning to a thread
+/// that keeps running and will not pick the woken one up itself.
+pub fn flush_wake() {
+    let me = percpu::index();
+    let mut machine = MACHINE.lock();
+    if !machine.cpus[me].wake_pending
+        || cpu::rdtsc().wrapping_sub(machine.cpus[me].wake_pending_at) < grace_cycles()
+    {
+        return;
+    }
+    machine.cpus[me].wake_pending = false;
+    // An idle processor that was watching may have taken it already.
+    if ready_backlog(&machine, me, usize::MAX) {
+        interrupt_idle(&mut machine, me);
+    }
+}
+
+/// Whether a user thread other than `taken` is runnable and standing on no
+/// processor: what a second idle processor could run.
+fn ready_backlog(machine: &Machine, cpu: usize, taken: usize) -> bool {
+    (0..MAX_THREADS).any(|index| {
+        index != taken
+            && index >= MAX_CPUS
+            && machine.threads[index].state == ThreadState::Ready
+            && machine.threads[index].kind == ThreadKind::User
+            && !standing_elsewhere(machine, cpu, index)
+    })
+}
+
 /// Returns the reservation a thread was holding.
 fn settle(machine: &mut Machine, index: usize) {
     if !machine.threads[index].dispatched {
@@ -255,6 +405,15 @@ fn plan(cpu: usize) -> Option<Plan> {
     charge(&mut machine, current, now);
     settle(&mut machine, current);
     let next = pick_and_reserve(&mut machine, cpu, now);
+    // This processor is taking work itself, which settles a wake it owed --
+    // unless more than one thread was woken, in which case the rest is another
+    // idle processor's to take.
+    if machine.cpus[cpu].wake_pending {
+        machine.cpus[cpu].wake_pending = false;
+        if ready_backlog(&machine, cpu, next) {
+            interrupt_idle(&mut machine, cpu);
+        }
+    }
     if next == current {
         machine.threads[current].quantum_ticks =
             quantum_ticks_for(machine.threads[current].dispatch_reserved_ns);
@@ -324,7 +483,7 @@ fn schedule(cpu: usize) -> usize {
         && plan.migrated_from != cpu
         && plan.migrations <= MIGRATION_RECORD_LIMIT
     {
-        event!(
+        trace!(
             "sched.migrated",
             "thread={} domain={} from_cpu={} to_cpu={cpu} migrations={} \
              fp_state=saved_and_restored",
@@ -403,6 +562,9 @@ fn expire_waits(machine: &mut Machine, now: u64) -> u32 {
         machine.threads[index].state = ThreadState::Ready;
         woken += 1;
     }
+    if woken != 0 {
+        kick_idle(machine);
+    }
     woken
 }
 
@@ -449,6 +611,7 @@ pub fn on_tick(frame: &trap::TrapFrame) {
     };
 
     if !expired && !starved {
+        flush_wake();
         return;
     }
     if !user {
@@ -478,6 +641,7 @@ pub fn on_tick(frame: &trap::TrapFrame) {
 
     let next = schedule(cpu);
     if next == current {
+        flush_wake();
         return;
     }
 
@@ -488,7 +652,7 @@ pub fn on_tick(frame: &trap::TrapFrame) {
         machine.cpus[cpu].preemptions += 1;
     }
     if let Some((domain, scope_id, used)) = record {
-        event!(
+        trace!(
             "sched.preempt",
             "cpu={cpu} domain={domain} thread={current} next={next} rip=0x{:x} cs=0x{:x} \
              cpl={} trigger=timer vector=0x{:x} voluntary=0 effective_scope={scope_id} \
@@ -655,7 +819,7 @@ pub fn run_ap(cpu: usize) -> ! {
         if smp::shutting_down() {
             smp::park(cpu);
         }
-        if idle_turn(cpu).is_some() {
+        if idle_turn(cpu).is_some() || poll_before_halt() {
             continue;
         }
         // SAFETY: no lock is held, and the handler that runs may switch away
@@ -702,6 +866,9 @@ pub fn run_until_idle() -> Terminal {
         };
 
         if busy {
+            if poll_before_halt() {
+                continue;
+            }
             // SAFETY: no lock is held.
             unsafe { cpu::wait_for_interrupt() };
             continue;
@@ -713,6 +880,9 @@ pub fn run_until_idle() -> Terminal {
             return Terminal::Deadlock;
         }
         let _ = blocked;
+        if poll_before_halt() {
+            continue;
+        }
         // Something can still happen, but not here and not now. Let the timer
         // in: this and the application processors' idle loops are the only
         // points where interrupts are enabled outside user mode, and no lock is

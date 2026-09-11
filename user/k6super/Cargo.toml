@@ -1,0 +1,21 @@
+[package]
+name = "thalyx-user-k6super"
+description = "K6 supervisor: builds the native half of the paired benchmarks and audits it"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "k6super"
+path = "src/main.rs"
+
+[dependencies]
+thalyx-abi.workspace = true
+thalyx-user-rt.workspace = true
+thalyx-user-k4fmt.workspace = true
+thalyx-user-k5pkg.workspace = true
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

@@ -10,7 +10,7 @@
 /// Major interface version.
 pub const VERSION_MAJOR: u16 = 0;
 /// Minor interface version.
-pub const VERSION_MINOR: u16 = 3;
+pub const VERSION_MINOR: u16 = 4;
 
 /// Interface limits fixed by V0. Reported by the limits query entry.
 pub mod limit {
@@ -37,11 +37,11 @@ pub mod limit {
     /// `page_size` from the schema.
     pub const PAGE_SIZE: u64 = 4096;
     /// `control_log_capacity` from the schema.
-    pub const CONTROL_LOG_CAPACITY: u64 = 64;
+    pub const CONTROL_LOG_CAPACITY: u64 = 256;
     /// `control_log_reserved` from the schema.
     pub const CONTROL_LOG_RESERVED: u64 = 8;
     /// `receipt_batch` from the schema.
-    pub const RECEIPT_BATCH: u64 = 4;
+    pub const RECEIPT_BATCH: u64 = 16;
 }
 
 /// Kernel entry identifiers carried in RAX.
@@ -266,7 +266,7 @@ pub mod op {
     pub const TIMER_CANCEL: u32 = 0x00070002;
     /// Report the armed deadline and fire count.
     pub const TIMER_QUERY: u32 = 0x00070003;
-    /// Read a bounded batch of receipts and the loss count.
+    /// Read a bounded batch of receipts and the loss count. With a deadline, waits until a full batch is there or the deadline passes, and answers with what there is; without one, answers at once.
     pub const LOG_READ: u32 = 0x00080001;
     /// Append a receipt. Origin and time come from the kernel, never from the payload.
     pub const LOG_APPEND: u32 = 0x00080002;
@@ -519,7 +519,7 @@ pub mod op_sizes {
     /// Descriptor bytes for `op::TIMER_QUERY`; zero when it takes none.
     pub const TIMER_QUERY: u32 = 64;
     /// Descriptor bytes for `op::LOG_READ`; zero when it takes none.
-    pub const LOG_READ: u32 = 432;
+    pub const LOG_READ: u32 = 1584;
     /// Descriptor bytes for `op::LOG_APPEND`; zero when it takes none.
     pub const LOG_APPEND: u32 = 64;
     /// Descriptor bytes for `op::LOG_ACK`; zero when it takes none.
@@ -947,7 +947,7 @@ pub const OPERATIONS: [OpSpec; 59] = [
         code: 0x00080001,
         object_type: 8,
         rights: 0x00000100,
-        descriptor_len: 432,
+        descriptor_len: 1584,
         writes_response: true,
         name: "LOG_READ",
     },
@@ -1894,8 +1894,8 @@ pub struct DomainInfo {
     pub threads: u32,
     /// Schema field `faults`, little-endian `u32`.
     pub faults: u32,
-    /// Reserved, must be zero.
-    pub reserved0: u32,
+    /// Processors this domain's address space has executed on, one bit each: the set an invalidation of its translations has to reach.
+    pub space_cpu_mask: u32,
     /// Schema field `domain_id`, little-endian `u64`.
     pub domain_id: u64,
     /// Schema field `owner_scope_id`, little-endian `u64`.
@@ -1917,7 +1917,7 @@ const _: () = assert!(core::mem::align_of::<DomainInfo>() == 8);
 const _: () = assert!(core::mem::offset_of!(DomainInfo, state) == 0);
 const _: () = assert!(core::mem::offset_of!(DomainInfo, threads) == 4);
 const _: () = assert!(core::mem::offset_of!(DomainInfo, faults) == 8);
-const _: () = assert!(core::mem::offset_of!(DomainInfo, reserved0) == 12);
+const _: () = assert!(core::mem::offset_of!(DomainInfo, space_cpu_mask) == 12);
 const _: () = assert!(core::mem::offset_of!(DomainInfo, domain_id) == 16);
 const _: () = assert!(core::mem::offset_of!(DomainInfo, owner_scope_id) == 24);
 const _: () = assert!(core::mem::offset_of!(DomainInfo, exit_code) == 32);
@@ -2766,11 +2766,11 @@ pub struct LogReadResult {
     pub lost: u32,
     /// Schema field `next_sequence`, little-endian `u64`.
     pub next_sequence: u64,
-    /// Schema field `records`, little-endian `struct:ReceiptRecord[4]`.
-    pub records: [ReceiptRecord; 4],
+    /// Schema field `records`, little-endian `struct:ReceiptRecord[16]`.
+    pub records: [ReceiptRecord; 16],
 }
 
-const _: () = assert!(core::mem::size_of::<LogReadResult>() == 400);
+const _: () = assert!(core::mem::size_of::<LogReadResult>() == 1552);
 const _: () = assert!(core::mem::align_of::<LogReadResult>() == 8);
 const _: () = assert!(core::mem::offset_of!(LogReadResult, count) == 0);
 const _: () = assert!(core::mem::offset_of!(LogReadResult, lost) == 4);
@@ -2779,9 +2779,9 @@ const _: () = assert!(core::mem::offset_of!(LogReadResult, records) == 16);
 
 impl LogReadResult {
     /// Size in bytes, as fixed by the schema.
-    pub const SIZE: usize = 400;
+    pub const SIZE: usize = 1552;
     /// Size of a descriptor carrying this body, header included.
-    pub const DESCRIPTOR_LEN: u32 = 432;
+    pub const DESCRIPTOR_LEN: u32 = 1584;
     /// A zeroed value.
     #[must_use]
     pub const fn zeroed() -> Self {

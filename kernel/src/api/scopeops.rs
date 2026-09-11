@@ -17,13 +17,13 @@ use thalyx_abi::generated::{
 };
 
 use crate::api::{BODY, Ctx, begin_response, receipt};
-use crate::event;
 use crate::ipc;
 use crate::mm::{Frame, Owner};
 use crate::obj::{ObjKind, ObjRef, ScopeId};
 use crate::scope::{self, Limits, Resource, State};
 use crate::state::{Machine, ThreadState, Wait};
 use crate::ucopy::Staging;
+use crate::{event, trace};
 use thalyx_boot_protocol::PAGE_SIZE;
 
 fn to_limits(request: &ScopeLimits) -> Limits {
@@ -84,11 +84,18 @@ pub fn create_child(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> 
         return Err(status::LIMIT_EXHAUSTED);
     }
 
-    let index = machine
+    let index = match machine
         .scopes
         .iter()
         .position(|node| node.state == State::Empty)
-        .ok_or(status::LIMIT_EXHAUSTED)?;
+    {
+        Some(index) => index,
+        // No empty slot: a retired one nothing names any more gives up its
+        // accounting for the newcomer.
+        None => (0..machine.scopes.len())
+            .find(|&candidate| scope::collect_retired(machine, candidate))
+            .ok_or(status::LIMIT_EXHAUSTED)?,
+    };
     if !scope::reserve(&mut machine.scopes, parent, Resource::Metadata, 1) {
         return Err(status::LIMIT_EXHAUSTED);
     }
@@ -127,7 +134,7 @@ pub fn create_child(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> 
         .ok_or(status::LIMIT_EXHAUSTED)?;
 
     let label = machine.scopes[index].label_str();
-    event!(
+    trace!(
         "scope.created",
         "scope={index} id={id} label={label} parent={parent} depth={depth} \
          memory_pages={} metadata={} cpu_budget_ns={} parallelism={} queue_bytes={} \
@@ -228,6 +235,9 @@ fn cancel_waits(machine: &mut Machine, root: ScopeId) -> u32 {
         machine.threads[index].state = ThreadState::Ready;
         woken += 1;
     }
+    if woken != 0 {
+        crate::sched::kick_idle(machine);
+    }
     woken
 }
 
@@ -241,7 +251,7 @@ pub fn fence(machine: &mut Machine, ctx: &Ctx) -> Result<u64, i64> {
     let obligations = scope::pending(&machine.scopes, root);
     let id = machine.scopes[root as usize].id;
     let label = machine.scopes[root as usize].label_str();
-    event!(
+    trace!(
         "scope.fenced",
         "scope={root} id={id} label={label} scopes_fenced={scopes_fenced} waits_cancelled={woken} \
          undelivered_withdrawn={withdrawn} threads={} invocations_pending={} effects_pending={} \
@@ -333,7 +343,7 @@ pub fn retire(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
         }
         machine.scopes[index].state = State::Retired;
     }
-    event!(
+    trace!(
         "scope.retired",
         "scope={root} id={id} from_state={previous} freed_pages={} freed_objects={} \
          retained_pages={pages} retained_metadata={metadata}",
@@ -432,7 +442,7 @@ fn release_sponsored(machine: &mut Machine, root: ScopeId) -> (u64, u64) {
         scope::release(&mut machine.scopes, sponsor, Resource::Metadata, 1);
         machine.memories[index] = crate::memobj::MemoryObject::empty();
         machine.memories[index].generation = generation;
-        event!(
+        trace!(
             "mem.released",
             "object={id} pages={count} state_at_release={} sponsor_scope={} \
              reason=scope_retired",

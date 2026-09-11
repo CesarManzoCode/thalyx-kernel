@@ -32,11 +32,11 @@
 use thalyx_abi::generated::{device_state, dma_profile};
 use thalyx_boot_protocol::PAGE_SIZE;
 
-use crate::event;
 use crate::limits::{MAX_DEVICE_REGIONS, MAX_DMA_GRANTS, MAX_IRQ_BINDINGS};
 use crate::obj::ScopeId;
 use crate::pci::{self, Msix};
 use crate::state::MACHINE;
+use crate::{event, trace};
 
 /// Device mappings the kernel tracks at once.
 pub const MAX_DEVICE_MAPS: usize = 12;
@@ -447,7 +447,7 @@ pub fn on_interrupt(vector: u8) {
         if record {
             let device_id = machine.devices[device].id;
             let signal_id = machine.signals[signal].id;
-            event!(
+            trace!(
                 "device.interrupt",
                 "device={device_id} vector=0x{vector:x} entry={} signal={signal_id} \
                  bits=0x{bits:x} session={} deliveries={deliveries} cpu={}",

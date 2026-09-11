@@ -30,8 +30,45 @@ use thalyx_abi::generated::{
 /// Offset of a descriptor body: everything before it is the common header.
 pub const BODY: usize = DescriptorHeader::SIZE;
 
-/// Largest descriptor any assigned operation uses.
+/// Largest descriptor any assigned operation uses, the control-log read
+/// excepted: that one carries a batch of receipts and has a buffer of its own
+/// below, so that every other operation's descriptor stays a few hundred bytes
+/// of stack. Checked against the schema, so an operation that grew past it
+/// fails to build rather than overrunning a caller's stack -- which K6's
+/// sixteen-receipt batch did to the first supervisor that read it into the
+/// old buffer.
 pub const MAX_DESCRIPTOR: usize = 432;
+
+/// The control-log read's descriptor, as the schema sizes it.
+pub const LOG_DESCRIPTOR: usize = {
+    let mut index = 0;
+    let mut len = 0;
+    while index < thalyx_abi::generated::OPERATIONS.len() {
+        if thalyx_abi::generated::OPERATIONS[index].code == op::LOG_READ {
+            len = thalyx_abi::generated::OPERATIONS[index].descriptor_len as usize;
+        }
+        index += 1;
+    }
+    len
+};
+
+const _: () = {
+    let mut index = 0;
+    while index < thalyx_abi::generated::OPERATIONS.len() {
+        let spec = &thalyx_abi::generated::OPERATIONS[index];
+        assert!(
+            spec.descriptor_len as usize <= MAX_DESCRIPTOR
+                || (spec.code == op::LOG_READ && spec.descriptor_len as usize == LOG_DESCRIPTOR)
+        );
+        index += 1;
+    }
+};
+
+/// The control-log read's descriptor: a header and a batch of receipts.
+#[repr(C, align(8))]
+pub struct LogDesc {
+    bytes: [u8; LOG_DESCRIPTOR],
+}
 
 /// A descriptor being built or read.
 ///
@@ -956,7 +993,48 @@ pub fn endpoint_query(endpoint: u64) -> Result<EndpointInfo, i64> {
 /// Reading needs a right that appending does not: a domain that may record what
 /// it did is not thereby allowed to read what everyone else did.
 pub fn log_read(log: u64) -> Result<LogReadResult, i64> {
-    query::<LogReadResult>(log, op::LOG_READ).map(|(result, _)| result)
+    log_read_until(log, 0)
+}
+
+/// Reads a batch of receipts. With a deadline, waits until the log holds a
+/// full batch or the deadline passes, and answers with what there is then.
+pub fn log_read_until(log: u64, deadline_ns: u64) -> Result<LogReadResult, i64> {
+    let mut desc = LogDesc {
+        bytes: [0; LOG_DESCRIPTOR],
+    };
+    let header = DescriptorHeader {
+        major: thalyx_abi::VERSION_MAJOR,
+        minor: thalyx_abi::VERSION_MINOR,
+        opcode: op::LOG_READ,
+        flags: 0,
+        total_len: LOG_DESCRIPTOR as u32,
+        cookie: 0,
+        reserved: 0,
+    };
+    // SAFETY: the header is `repr(C)` plain data of `DescriptorHeader::SIZE`
+    // bytes, and the buffer holds at least that many.
+    unsafe {
+        core::ptr::write_unaligned(desc.bytes.as_mut_ptr().cast::<DescriptorHeader>(), header);
+    }
+    let pointer = core::ptr::from_mut(&mut desc).addr() as u64;
+    // SAFETY: `pointer` names `LOG_DESCRIPTOR` bytes of this program's own
+    // buffer, readable and writable, which is the length the schema assigns
+    // to `LOG_READ`.
+    let (st, aux) = unsafe {
+        thalyx_abi::invoke(
+            entry::INVOKE,
+            log,
+            u64::from(op::LOG_READ),
+            pointer,
+            LOG_DESCRIPTOR as u64,
+            0,
+            deadline_ns,
+        )
+    };
+    finish(st, aux)?;
+    // SAFETY: the kernel wrote a `LogReadResult` at `BODY`, which lies within
+    // the buffer, and the type is plain data.
+    Ok(unsafe { core::ptr::read_unaligned(desc.bytes.as_ptr().add(BODY).cast::<LogReadResult>()) })
 }
 
 /// Drops every receipt up to and including `through_sequence`.
@@ -1361,6 +1439,10 @@ pub mod report {
     /// The ring validator was run against entries this program forged in
     /// memory the device cannot reach. Value: damaged entries refused.
     pub const VALIDATOR_SELF_TEST: u64 = 0x3015;
+    /// The writer's address space had run on every online processor and the
+    /// probe had read its page, before the withdrawal and the seal. Value:
+    /// the writer's processor mask, with the windows waited above bit 32.
+    pub const SPREAD_OBSERVED: u64 = 0x3016;
 }
 
 /// Reports one observation on the diagnostic plane.

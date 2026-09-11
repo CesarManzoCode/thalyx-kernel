@@ -13,10 +13,10 @@ use crate::arch::x86_64::trap::{
     DEVICE_VECTOR_BASE, DEVICE_VECTOR_COUNT, RESCHEDULE_VECTOR, SPURIOUS_VECTOR, TIMER_VECTOR,
     TLB_VECTOR, TrapFrame,
 };
-use crate::event;
 use crate::sched;
 use crate::state::{MACHINE, ThreadKind};
 use crate::tlb;
+use crate::{event, trace};
 
 const VECTOR_PAGE_FAULT: u64 = 14;
 
@@ -43,7 +43,7 @@ pub fn note_user_entry(frame: &TrapFrame) {
     };
     if let Some((thread, domain)) = announce {
         let name = crate::domain::domain_name(domain);
-        event!(
+        trace!(
             "user.ring3_confirmed",
             "cpu={} domain={domain} name={name} thread={thread} cs=0x{:x} ss=0x{:x} cpl={} \
              rflags=0x{:x} iopl={} rip=0x{:x}",
@@ -147,6 +147,9 @@ pub fn handle(frame: &mut TrapFrame) {
                 lapic.end_of_interrupt();
             }
             crate::device::on_interrupt(vector as u8);
+            // The interrupted thread keeps running; a driver thread the
+            // interrupt woke is handed to an idle processor now.
+            sched::flush_wake();
         }
         vector if vector == u64::from(SPURIOUS_VECTOR) => {
             // A spurious interrupt is not acknowledged.

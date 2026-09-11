@@ -63,6 +63,10 @@ const CALL_ROUNDS: u64 = 96;
 const SERVICED_BEFORE_FENCE: u64 = 12;
 /// Windows the supervisor watches the shared budget over.
 const BUDGET_WINDOWS: u64 = 12;
+
+/// The most windows the supervisor waits for the writer to have run on every
+/// processor and the probe to have read its page.
+const SPREAD_WINDOWS: u64 = 200;
 /// How long a fenced scope is watched before its retirement is attempted
 /// regardless. Generous: the watch ends at quiescence.
 const DRAIN_DEADLINE_NS: u64 = 30_000_000_000;
@@ -455,7 +459,7 @@ fn run() -> ! {
     };
     built += 1;
 
-    match build_worker(
+    let writer = match build_worker(
         mem_scope,
         worker_image,
         "writer",
@@ -475,9 +479,9 @@ fn run() -> ! {
         false,
         None,
     ) {
-        Some(domain) => drop_handle(domain),
+        Some(domain) => domain,
         None => fail(19, status::STATE_CONFLICT),
-    }
+    };
     built += 1;
 
     for instance in 0..2u64 {
@@ -531,6 +535,36 @@ fn run() -> ! {
         let _ = window;
     }
     k2::note(report::SHARED_COUNTER, shared_total());
+
+    // --- the conditions the next two steps are judged against --------------
+    // The withdrawal is judged against a probe that had read the page, and the
+    // seal against a writer whose address space had run on every processor,
+    // so the invalidation has every processor to reach. Both used to be
+    // assumed from the windows waited above; K6's scheduler, which keeps a
+    // woken thread on the processor that woke it when that processor is
+    // about to yield, spread the writer less, and the assumption failed on
+    // KVM. Waited for as conditions now, bounded, and reported either way.
+    let everyone = if limits.cpus_online >= 32 {
+        u32::MAX
+    } else {
+        (1u32 << limits.cpus_online) - 1
+    };
+    let mut waited = 0u64;
+    let mut mask = 0u32;
+    while waited < SPREAD_WINDOWS {
+        mask = k2::domain_query(writer).map_or(0, |info| info.space_cpu_mask);
+        // SAFETY: the supervisor mapped the shared object writable in its own
+        // domain at this address; slot 2 is the probe's word.
+        let probe_rounds =
+            unsafe { core::ptr::read_volatile((SUPER_SHARED_VADDR + 2 * 8) as *const u64) };
+        if mask & everyone == everyone && probe_rounds > 0 {
+            break;
+        }
+        sleep_until(timer, stop, k2::now_ns() + limits.cpu_window_ns);
+        waited += 1;
+    }
+    k2::note(report::SPREAD_OBSERVED, u64::from(mask) | (waited << 32));
+    drop_handle(writer);
 
     // --- a mapping taken away while the space is live ----------------------
     // The domain has two threads, so this is a withdrawal from an address space

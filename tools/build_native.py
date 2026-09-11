@@ -720,6 +720,10 @@ register(
     embed=[("PRELUDE", "user/nhacer/prelude.js", "prelude.inc")],
 )
 register("nengine", ["user/nengine/engine.cpp"], llama=True)
+# K6's paired benchmarks, native half. The other half is the same bench.c
+# compiled for Linux by tools/build_k6_linux.py with this target's MACHINE
+# flags, so the loop that times a primitive is the same code on both sides.
+register("nbench", ["tests/k6/bench.c", "tests/k6/plat_native.c"], extra_dirs=["tests/k6"])
 
 if __name__ == "__main__":
     raise SystemExit(main())

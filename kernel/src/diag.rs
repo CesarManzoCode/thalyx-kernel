@@ -23,8 +23,22 @@
 //! byte is a trip out of the guest, and the first KVM runs spent most of their
 //! time here. A cost that decides how long a run takes is a cost the run should
 //! report, so [`summary`] does.
+//!
+//! Records come in two classes. A **trace** record says that one operation or
+//! one object happened: an admission, a mapping, a derivation, a migration, a
+//! scope created and retired. A **summary** record says what the kernel is,
+//! what it found at boot, that something failed, what a program noted, and
+//! what everything added up to at the end. The K1 to K5 gates are decided from
+//! both, and a package that says nothing keeps both. A package whose
+//! supervisor module carries `TRACE_OFF` asks for the summaries alone: under
+//! KVM a trace record costs about as much as a thousand of the operations it
+//! describes, so a measurement taken with tracing on is a measurement of the
+//! tracing. Withheld records are counted, not lost silently, and the summary
+//! states the count -- the contract's condition for a plane that may drop
+//! events is that it declares doing so.
 
 use core::fmt::Write;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::arch::x86_64::cpu;
 use crate::arch::x86_64::serial::Uart;
@@ -53,6 +67,11 @@ static SINK: SpinLock<Sink> = SpinLock::new(Sink {
     cycles: 0,
 });
 
+/// Whether trace records are written. Summaries always are.
+static TRACE: AtomicBool = AtomicBool::new(true);
+/// Trace records withheld while tracing was off.
+static WITHHELD: AtomicU64 = AtomicU64::new(0);
+
 /// A writer that counts what it writes, so the plane's cost is the bytes it
 /// actually sent and not an estimate from the format string.
 struct Counted {
@@ -76,6 +95,29 @@ pub fn init(uart: Uart, first_seq: u64) {
     sink.uart = Some(uart);
     sink.seq = first_seq;
     sink.first = first_seq;
+}
+
+/// Turns trace records on or off. The change is itself recorded, before it
+/// takes effect, so the log says where its own coverage changed.
+pub fn set_trace(enabled: bool, reason: &str) {
+    crate::event!(
+        "diag.trace",
+        "per_operation={} reason={reason}",
+        if enabled { "on" } else { "off" }
+    );
+    TRACE.store(enabled, Ordering::Release);
+}
+
+/// Whether trace records are being written.
+#[must_use]
+pub fn trace_enabled() -> bool {
+    TRACE.load(Ordering::Relaxed)
+}
+
+/// Counts a trace record that was not written. The [`trace!`](crate::trace)
+/// macro calls this instead of building the record's arguments.
+pub fn withhold() {
+    WITHHELD.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Emits one record. Prefer the [`event!`](crate::event) macro.
@@ -143,14 +185,16 @@ pub fn summary() {
     } else {
         ((u128::from(cycles) * 1_000_000_000u128) / u128::from(hz)) as u64
     };
+    let withheld = WITHHELD.load(Ordering::Relaxed);
     crate::event!(
         "diag.summary",
         "records={records} bytes={bytes} write_cycles={cycles} write_ns={ns} tsc_hz={hz} \
-         port=com1 mode=polled_synchronous"
+         port=com1 mode=polled_synchronous trace={} trace_withheld={withheld}",
+        if trace_enabled() { "on" } else { "off" }
     );
 }
 
-/// Emits one diagnostic record.
+/// Emits one summary record: always written.
 #[macro_export]
 macro_rules! event {
     ($name:expr) => {
@@ -158,5 +202,21 @@ macro_rules! event {
     };
     ($name:expr, $($fields:tt)*) => {
         $crate::diag::emit_event($name, ::core::format_args!($($fields)*))
+    };
+}
+
+/// Emits one trace record: written while tracing is on, counted while it is
+/// off. The arguments are not evaluated when the record is withheld.
+#[macro_export]
+macro_rules! trace {
+    ($name:expr) => {
+        $crate::trace!($name, "")
+    };
+    ($name:expr, $($fields:tt)*) => {
+        if $crate::diag::trace_enabled() {
+            $crate::diag::emit_event($name, ::core::format_args!($($fields)*))
+        } else {
+            $crate::diag::withhold()
+        }
     };
 }

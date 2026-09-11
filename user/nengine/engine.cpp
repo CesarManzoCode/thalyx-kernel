@@ -57,6 +57,21 @@
 
 namespace {
 
+// Whether the notes that describe a request -- what was bound, asked, made
+// and answered -- are written. K5 reads every one of them; K6 measures the
+// engine and asks for none, because on the platform it measures on a
+// diagnostic record costs the thread writing it about as long as the
+// inference itself. Failures and refusals are written either way.
+bool quiet = false;
+
+void say(uint64_t code, uint64_t value)
+{
+    if (!quiet) {
+        th_note(code, value);
+    }
+}
+
+
 // `bit::ENGINE_READY` in user/k5pkg/src/proto.rs.
 constexpr uint64_t READY_BIT = 1ull << 7;
 // The signal the supervisor waits on for that bit.
@@ -326,7 +341,7 @@ void serve_request(Resident &r, th_message &message)
 
     // From here the kernel charges this thread to the caller's scope.
     const int64_t bound = th_bind_worker(invocation);
-    th_note(K5_NOTE_ENGINE_BOUND,
+    say(K5_NOTE_ENGINE_BOUND,
             bound == THALYX_STATUS_OK ? message.header.invocation_id : static_cast<uint64_t>(bound));
 
     std::string prompt(request.prompt_len, '\0');
@@ -343,7 +358,7 @@ void serve_request(Resident &r, th_message &message)
         finish(caller_gone(invocation) ? K5_ENGINE_STATUS_CANCELLED : K5_ENGINE_STATUS_NO_BUFFER);
         return;
     }
-    th_note(K5_NOTE_ENGINE_PROMPT, fnv(prompt));
+    say(K5_NOTE_ENGINE_PROMPT, fnv(prompt));
 
     Outcome out;
     bool ok = false;
@@ -363,7 +378,7 @@ void serve_request(Resident &r, th_message &message)
     uint32_t status = K5_ENGINE_STATUS_OK;
     if (out.cancelled) {
         status = K5_ENGINE_STATUS_CANCELLED;
-        th_note(K5_NOTE_ENGINE_CANCELLED, out.generated);
+        say(K5_NOTE_ENGINE_CANCELLED, out.generated);
     } else if (!ok) {
         status = out.too_long ? K5_ENGINE_STATUS_TOO_LONG : K5_ENGINE_STATUS_FAILED;
         th_note(K5_NOTE_ENGINE_FAILED, fnv(out.why));
@@ -389,12 +404,12 @@ void serve_request(Resident &r, th_message &message)
     if (status == K5_ENGINE_STATUS_OK) {
         r.served++;
         reply.served = r.served;
-        th_note(K5_NOTE_ENGINE_SERVED, r.served);
-        th_note(K5_NOTE_ENGINE_TOKEN, static_cast<uint32_t>(out.first_token));
-        th_note(K5_NOTE_ENGINE_ARGMAX, static_cast<uint32_t>(out.first_argmax));
-        th_note(K5_NOTE_ENGINE_MARGIN, out.first_margin_ppm);
-        th_note(K5_NOTE_ENGINE_DIGEST, out.token_digest);
-        th_note(K5_NOTE_ENGINE_ELAPSED, reply.elapsed_ns);
+        say(K5_NOTE_ENGINE_SERVED, r.served);
+        say(K5_NOTE_ENGINE_TOKEN, static_cast<uint32_t>(out.first_token));
+        say(K5_NOTE_ENGINE_ARGMAX, static_cast<uint32_t>(out.first_argmax));
+        say(K5_NOTE_ENGINE_MARGIN, out.first_margin_ppm);
+        say(K5_NOTE_ENGINE_DIGEST, out.token_digest);
+        say(K5_NOTE_ENGINE_ELAPSED, reply.elapsed_ns);
     }
     finish(status);
 }
@@ -408,12 +423,13 @@ extern "C" int th_main(const th_config *config)
     Resident r;
     const uint32_t n_ctx = config->arg0 ? static_cast<uint32_t>(config->arg0) : 512;
     const int32_t n_threads = config->arg1 ? static_cast<int32_t>(config->arg1) : 1;
+    quiet = (config->arg2 & 1) != 0;
 
     // What the engine was given, named before anything reads it: the host
     // pinned these bytes, and the digest lets the weights this engine loaded
     // be matched to the host's copy without trusting anyone's say-so.
-    th_note(K5_NOTE_ENGINE_MODEL_BYTES, config->bulk_bytes);
-    th_note(K5_NOTE_ENGINE_MODEL_DIGEST,
+    say(K5_NOTE_ENGINE_MODEL_BYTES, config->bulk_bytes);
+    say(K5_NOTE_ENGINE_MODEL_DIGEST,
             fnv(reinterpret_cast<const void *>(static_cast<uintptr_t>(TH_BULK_VADDR)),
                 static_cast<size_t>(config->bulk_bytes)));
 
@@ -444,14 +460,14 @@ extern "C" int th_main(const th_config *config)
 
     r.load_ns = th_now_ns() - started;
     r.weight_bytes = llama_model_size(r.model);
-    th_note(K5_NOTE_ENGINE_LOADED, r.load_ns);
-    th_note(K5_NOTE_ENGINE_WEIGHTS, r.weight_bytes);
-    th_note(K5_NOTE_ENGINE_CONTEXT, llama_n_ctx(r.ctx));
+    say(K5_NOTE_ENGINE_LOADED, r.load_ns);
+    say(K5_NOTE_ENGINE_WEIGHTS, r.weight_bytes);
+    say(K5_NOTE_ENGINE_CONTEXT, llama_n_ctx(r.ctx));
     // What the profile declares about this engine, asked of llama.cpp itself:
     // on this platform there are no mapped files, and the weights this engine
     // holds are pages it read into memory charged to its own scope.
-    th_note(K5_NOTE_ENGINE_MMAP, llama_supports_mmap() ? 1 : 0);
-    th_note(K5_NOTE_ENGINE_LOG_LINES, log_lines);
+    say(K5_NOTE_ENGINE_MMAP, llama_supports_mmap() ? 1 : 0);
+    say(K5_NOTE_ENGINE_LOG_LINES, log_lines);
     th_signal_raise(SLOT_READY, READY_BIT);
 
     const uint64_t endpoint = thalyx_boot_handle_of(TH_SLOT_INBOUND);

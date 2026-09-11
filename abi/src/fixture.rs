@@ -138,7 +138,7 @@ const RECEIPT_RECORD_BYTES: [u8; 96] = [
     0x8E, 0xE8, 0x0F, 0x38, 0x60, 0x88, 0xB0, 0xD8, 0x1C, 0xFA, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
     0xA0, 0xF6, 0x1B, 0x42, 0x68, 0x8E, 0xB4, 0xDA, 0xA9, 0xFD, 0x21, 0x47, 0x6C, 0x91, 0xB6, 0xDB,
 ];
-const LOG_READ_RESULT_BYTES: [u8; 400] = [
+const LOG_READ_RESULT_BYTES: [u8; 1552] = [
     0xD6, 0x20, 0x40, 0x60, 0xDF, 0x27, 0x46, 0x65, 0xE8, 0x2E, 0x4C, 0x6A, 0x88, 0xA6, 0xC4, 0xE2,
     0xFA, 0x3C, 0x58, 0x74, 0x03, 0x44, 0x5E, 0x79, 0x0C, 0x4B, 0x64, 0x7E, 0x98, 0xB2, 0xCC, 0xE6,
     0x15, 0x52, 0x6A, 0x83, 0x9C, 0xB5, 0xCE, 0xE7, 0x1E, 0x59, 0x70, 0x88, 0xA0, 0xB8, 0xD0, 0xE8,
@@ -164,6 +164,78 @@ const LOG_READ_RESULT_BYTES: [u8; 400] = [
     0x8A, 0xAD, 0xB8, 0xC4, 0xD0, 0xDC, 0xE8, 0xF4, 0x93, 0xB4, 0xBE, 0xC9, 0xD4, 0xDF, 0xEA, 0xF5,
     0x9C, 0xBB, 0xC4, 0xCE, 0xD8, 0xE2, 0xEC, 0xF6, 0x4A, 0xF9, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
     0xAE, 0xC9, 0xD0, 0xD8, 0xE0, 0xE8, 0xF0, 0xF8, 0xB7, 0xD0, 0xD6, 0xDD, 0xE4, 0xEB, 0xF2, 0xF9,
+    0x66, 0x91, 0xA0, 0xB0, 0x6F, 0x98, 0xA6, 0xB5, 0x78, 0x9F, 0xAC, 0xBA, 0xC8, 0xD6, 0xE4, 0xF2,
+    0x81, 0xA6, 0xB2, 0xBF, 0xCC, 0xD9, 0xE6, 0xF3, 0x8A, 0xAD, 0xB8, 0xC4, 0xD0, 0xDC, 0xE8, 0xF4,
+    0x93, 0xB4, 0xBE, 0xC9, 0xD4, 0xDF, 0xEA, 0xF5, 0x9C, 0xBB, 0xC4, 0xCE, 0xD8, 0xE2, 0xEC, 0xF6,
+    0xA5, 0xC2, 0xCA, 0xD3, 0xDC, 0xE5, 0xEE, 0xF7, 0xAE, 0xC9, 0xD0, 0xD8, 0xE0, 0xE8, 0xF0, 0xF8,
+    0xB7, 0xD0, 0xD6, 0xDD, 0xE4, 0xEB, 0xF2, 0xF9, 0x35, 0xF9, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xC9, 0xDE, 0xE2, 0xE7, 0xEC, 0xF1, 0xF6, 0xFB, 0xD2, 0xE5, 0xE8, 0xEC, 0xF0, 0xF4, 0xF8, 0xFC,
+    0x81, 0xA6, 0xB2, 0xBF, 0x8A, 0xAD, 0xB8, 0xC4, 0x93, 0xB4, 0xBE, 0xC9, 0xD4, 0xDF, 0xEA, 0xF5,
+    0x9C, 0xBB, 0xC4, 0xCE, 0xD8, 0xE2, 0xEC, 0xF6, 0xA5, 0xC2, 0xCA, 0xD3, 0xDC, 0xE5, 0xEE, 0xF7,
+    0xAE, 0xC9, 0xD0, 0xD8, 0xE0, 0xE8, 0xF0, 0xF8, 0xB7, 0xD0, 0xD6, 0xDD, 0xE4, 0xEB, 0xF2, 0xF9,
+    0xC0, 0xD7, 0xDC, 0xE2, 0xE8, 0xEE, 0xF4, 0xFA, 0xC9, 0xDE, 0xE2, 0xE7, 0xEC, 0xF1, 0xF6, 0xFB,
+    0xD2, 0xE5, 0xE8, 0xEC, 0xF0, 0xF4, 0xF8, 0xFC, 0x20, 0xF9, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xE4, 0xF3, 0xF4, 0xF6, 0xF8, 0xFA, 0xFC, 0xFE, 0xED, 0xFA, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF,
+    0x9C, 0xBB, 0xC4, 0xCE, 0xA5, 0xC2, 0xCA, 0xD3, 0xAE, 0xC9, 0xD0, 0xD8, 0xE0, 0xE8, 0xF0, 0xF8,
+    0xB7, 0xD0, 0xD6, 0xDD, 0xE4, 0xEB, 0xF2, 0xF9, 0xC0, 0xD7, 0xDC, 0xE2, 0xE8, 0xEE, 0xF4, 0xFA,
+    0xC9, 0xDE, 0xE2, 0xE7, 0xEC, 0xF1, 0xF6, 0xFB, 0xD2, 0xE5, 0xE8, 0xEC, 0xF0, 0xF4, 0xF8, 0xFC,
+    0xDB, 0xEC, 0xEE, 0xF1, 0xF4, 0xF7, 0xFA, 0xFD, 0xE4, 0xF3, 0xF4, 0xF6, 0xF8, 0xFA, 0xFC, 0xFE,
+    0xED, 0xFA, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF, 0x0B, 0xF9, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x08, 0x10, 0x0D, 0x0B, 0x09, 0x07, 0x05, 0x03,
+    0xB7, 0xD0, 0xD6, 0xDD, 0xC0, 0xD7, 0xDC, 0xE2, 0xC9, 0xDE, 0xE2, 0xE7, 0xEC, 0xF1, 0xF6, 0xFB,
+    0xD2, 0xE5, 0xE8, 0xEC, 0xF0, 0xF4, 0xF8, 0xFC, 0xDB, 0xEC, 0xEE, 0xF1, 0xF4, 0xF7, 0xFA, 0xFD,
+    0xE4, 0xF3, 0xF4, 0xF6, 0xF8, 0xFA, 0xFC, 0xFE, 0xED, 0xFA, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF,
+    0xF6, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0xFF, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02,
+    0x08, 0x10, 0x0D, 0x0B, 0x09, 0x07, 0x05, 0x03, 0xF6, 0xF8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0x1A, 0x1E, 0x19, 0x15, 0x11, 0x0D, 0x09, 0x05, 0x23, 0x25, 0x1F, 0x1A, 0x15, 0x10, 0x0B, 0x06,
+    0xD2, 0xE5, 0xE8, 0xEC, 0xDB, 0xEC, 0xEE, 0xF1, 0xE4, 0xF3, 0xF4, 0xF6, 0xF8, 0xFA, 0xFC, 0xFE,
+    0xED, 0xFA, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF, 0xF6, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0xFF, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x08, 0x10, 0x0D, 0x0B, 0x09, 0x07, 0x05, 0x03,
+    0x11, 0x17, 0x13, 0x10, 0x0D, 0x0A, 0x07, 0x04, 0x1A, 0x1E, 0x19, 0x15, 0x11, 0x0D, 0x09, 0x05,
+    0x23, 0x25, 0x1F, 0x1A, 0x15, 0x10, 0x0B, 0x06, 0xE1, 0xF8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0x35, 0x33, 0x2B, 0x24, 0x1D, 0x16, 0x0F, 0x08, 0x3E, 0x3A, 0x31, 0x29, 0x21, 0x19, 0x11, 0x09,
+    0xED, 0xFA, 0xFA, 0xFB, 0xF6, 0x01, 0x01, 0x01, 0xFF, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02,
+    0x08, 0x10, 0x0D, 0x0B, 0x09, 0x07, 0x05, 0x03, 0x11, 0x17, 0x13, 0x10, 0x0D, 0x0A, 0x07, 0x04,
+    0x1A, 0x1E, 0x19, 0x15, 0x11, 0x0D, 0x09, 0x05, 0x23, 0x25, 0x1F, 0x1A, 0x15, 0x10, 0x0B, 0x06,
+    0x2C, 0x2C, 0x25, 0x1F, 0x19, 0x13, 0x0D, 0x07, 0x35, 0x33, 0x2B, 0x24, 0x1D, 0x16, 0x0F, 0x08,
+    0x3E, 0x3A, 0x31, 0x29, 0x21, 0x19, 0x11, 0x09, 0xCC, 0xF8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0x50, 0x48, 0x3D, 0x33, 0x29, 0x1F, 0x15, 0x0B, 0x59, 0x4F, 0x43, 0x38, 0x2D, 0x22, 0x17, 0x0C,
+    0x08, 0x10, 0x0D, 0x0B, 0x11, 0x17, 0x13, 0x10, 0x1A, 0x1E, 0x19, 0x15, 0x11, 0x0D, 0x09, 0x05,
+    0x23, 0x25, 0x1F, 0x1A, 0x15, 0x10, 0x0B, 0x06, 0x2C, 0x2C, 0x25, 0x1F, 0x19, 0x13, 0x0D, 0x07,
+    0x35, 0x33, 0x2B, 0x24, 0x1D, 0x16, 0x0F, 0x08, 0x3E, 0x3A, 0x31, 0x29, 0x21, 0x19, 0x11, 0x09,
+    0x47, 0x41, 0x37, 0x2E, 0x25, 0x1C, 0x13, 0x0A, 0x50, 0x48, 0x3D, 0x33, 0x29, 0x1F, 0x15, 0x0B,
+    0x59, 0x4F, 0x43, 0x38, 0x2D, 0x22, 0x17, 0x0C, 0xB7, 0xF8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0x6B, 0x5D, 0x4F, 0x42, 0x35, 0x28, 0x1B, 0x0E, 0x74, 0x64, 0x55, 0x47, 0x39, 0x2B, 0x1D, 0x0F,
+    0x23, 0x25, 0x1F, 0x1A, 0x2C, 0x2C, 0x25, 0x1F, 0x35, 0x33, 0x2B, 0x24, 0x1D, 0x16, 0x0F, 0x08,
+    0x3E, 0x3A, 0x31, 0x29, 0x21, 0x19, 0x11, 0x09, 0x47, 0x41, 0x37, 0x2E, 0x25, 0x1C, 0x13, 0x0A,
+    0x50, 0x48, 0x3D, 0x33, 0x29, 0x1F, 0x15, 0x0B, 0x59, 0x4F, 0x43, 0x38, 0x2D, 0x22, 0x17, 0x0C,
+    0x62, 0x56, 0x49, 0x3D, 0x31, 0x25, 0x19, 0x0D, 0x6B, 0x5D, 0x4F, 0x42, 0x35, 0x28, 0x1B, 0x0E,
+    0x74, 0x64, 0x55, 0x47, 0x39, 0x2B, 0x1D, 0x0F, 0xA2, 0xF8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0x86, 0x72, 0x61, 0x51, 0x41, 0x31, 0x21, 0x11, 0x8F, 0x79, 0x67, 0x56, 0x45, 0x34, 0x23, 0x12,
+    0x3E, 0x3A, 0x31, 0x29, 0x47, 0x41, 0x37, 0x2E, 0x50, 0x48, 0x3D, 0x33, 0x29, 0x1F, 0x15, 0x0B,
+    0x59, 0x4F, 0x43, 0x38, 0x2D, 0x22, 0x17, 0x0C, 0x62, 0x56, 0x49, 0x3D, 0x31, 0x25, 0x19, 0x0D,
+    0x6B, 0x5D, 0x4F, 0x42, 0x35, 0x28, 0x1B, 0x0E, 0x74, 0x64, 0x55, 0x47, 0x39, 0x2B, 0x1D, 0x0F,
+    0x7D, 0x6B, 0x5B, 0x4C, 0x3D, 0x2E, 0x1F, 0x10, 0x86, 0x72, 0x61, 0x51, 0x41, 0x31, 0x21, 0x11,
+    0x8F, 0x79, 0x67, 0x56, 0x45, 0x34, 0x23, 0x12, 0x8D, 0xF8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xA1, 0x87, 0x73, 0x60, 0x4D, 0x3A, 0x27, 0x14, 0xAA, 0x8E, 0x79, 0x65, 0x51, 0x3D, 0x29, 0x15,
+    0x59, 0x4F, 0x43, 0x38, 0x62, 0x56, 0x49, 0x3D, 0x6B, 0x5D, 0x4F, 0x42, 0x35, 0x28, 0x1B, 0x0E,
+    0x74, 0x64, 0x55, 0x47, 0x39, 0x2B, 0x1D, 0x0F, 0x7D, 0x6B, 0x5B, 0x4C, 0x3D, 0x2E, 0x1F, 0x10,
+    0x86, 0x72, 0x61, 0x51, 0x41, 0x31, 0x21, 0x11, 0x8F, 0x79, 0x67, 0x56, 0x45, 0x34, 0x23, 0x12,
+    0x98, 0x80, 0x6D, 0x5B, 0x49, 0x37, 0x25, 0x13, 0xA1, 0x87, 0x73, 0x60, 0x4D, 0x3A, 0x27, 0x14,
+    0xAA, 0x8E, 0x79, 0x65, 0x51, 0x3D, 0x29, 0x15, 0x78, 0xF8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xBC, 0x9C, 0x85, 0x6F, 0x59, 0x43, 0x2D, 0x17, 0xC5, 0xA3, 0x8B, 0x74, 0x5D, 0x46, 0x2F, 0x18,
+    0x74, 0x64, 0x55, 0x47, 0x7D, 0x6B, 0x5B, 0x4C, 0x86, 0x72, 0x61, 0x51, 0x41, 0x31, 0x21, 0x11,
+    0x8F, 0x79, 0x67, 0x56, 0x45, 0x34, 0x23, 0x12, 0x98, 0x80, 0x6D, 0x5B, 0x49, 0x37, 0x25, 0x13,
+    0xA1, 0x87, 0x73, 0x60, 0x4D, 0x3A, 0x27, 0x14, 0xAA, 0x8E, 0x79, 0x65, 0x51, 0x3D, 0x29, 0x15,
+    0xB3, 0x95, 0x7F, 0x6A, 0x55, 0x40, 0x2B, 0x16, 0xBC, 0x9C, 0x85, 0x6F, 0x59, 0x43, 0x2D, 0x17,
+    0xC5, 0xA3, 0x8B, 0x74, 0x5D, 0x46, 0x2F, 0x18, 0x63, 0xF8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xD7, 0xB1, 0x97, 0x7E, 0x65, 0x4C, 0x33, 0x1A, 0xE0, 0xB8, 0x9D, 0x83, 0x69, 0x4F, 0x35, 0x1B,
+    0x8F, 0x79, 0x67, 0x56, 0x98, 0x80, 0x6D, 0x5B, 0xA1, 0x87, 0x73, 0x60, 0x4D, 0x3A, 0x27, 0x14,
+    0xAA, 0x8E, 0x79, 0x65, 0x51, 0x3D, 0x29, 0x15, 0xB3, 0x95, 0x7F, 0x6A, 0x55, 0x40, 0x2B, 0x16,
+    0xBC, 0x9C, 0x85, 0x6F, 0x59, 0x43, 0x2D, 0x17, 0xC5, 0xA3, 0x8B, 0x74, 0x5D, 0x46, 0x2F, 0x18,
+    0xCE, 0xAA, 0x91, 0x79, 0x61, 0x49, 0x31, 0x19, 0xD7, 0xB1, 0x97, 0x7E, 0x65, 0x4C, 0x33, 0x1A,
+    0xE0, 0xB8, 0x9D, 0x83, 0x69, 0x4F, 0x35, 0x1B, 0x4E, 0xF8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xF2, 0xC6, 0xA9, 0x8D, 0x71, 0x55, 0x39, 0x1D, 0xFB, 0xCD, 0xAF, 0x92, 0x75, 0x58, 0x3B, 0x1E,
 ];
 const FAULT_REPORT_BYTES: [u8; 72] = [
     0x6F, 0x98, 0xA6, 0xB5, 0xC4, 0xD3, 0xE2, 0xF1, 0x78, 0x9F, 0xAC, 0xBA, 0xC8, 0xD6, 0xE4, 0xF2,
@@ -243,7 +315,7 @@ pub const FIXTURES: [Fixture; 15] = [
     Fixture {
         name: "LogReadResult",
         bytes: &LOG_READ_RESULT_BYTES,
-        size: 400,
+        size: 1552,
     },
     Fixture {
         name: "FaultReport",
@@ -3086,7 +3158,7 @@ pub fn verify() -> (u32, u32) {
     // LogReadResult
     {
         let bytes = &LOG_READ_RESULT_BYTES;
-        // SAFETY: the array is 400 bytes, the exact size of
+        // SAFETY: the array is 1552 bytes, the exact size of
         // the structure, every field of which is an integer, so any bit
         // pattern is a valid value. The read is unaligned by construction.
         let value: LogReadResult =
@@ -3309,6 +3381,630 @@ pub fn verify() -> (u32, u32) {
         }
         checked += 1;
         if value.records[3].b != 18010717228014948535u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[4].schema != 2963312998u32 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[4].kind != 3047594095u32 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[4].sequence != 17502350209482268536u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[4].epoch != 17574974069272651393u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[4].ns != 17647597929063034250u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[4].origin_domain_id != 17720221788853417107u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[4].origin_scope_id != 17792845648643799964u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[4].object_id != 17865469508434182821u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[4].grant_id != 17938093368224565678u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[4].parent_invocation_id != 18010717228014948535u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[4].result != -1739i64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[4].a != 18155964947595714249u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[4].b != 18228588807386097106u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[5].schema != 3216156289u32 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[5].kind != 3300437386u32 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[5].sequence != 17720221788853417107u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[5].epoch != 17792845648643799964u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[5].ns != 17865469508434182821u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[5].origin_domain_id != 17938093368224565678u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[5].origin_scope_id != 18010717228014948535u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[5].object_id != 18083341087805331392u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[5].grant_id != 18155964947595714249u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[5].parent_invocation_id != 18228588807386097106u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[5].result != -1760i64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[5].a != 18373836526966862820u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[5].b != 18446460386757245677u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[6].schema != 3468999580u32 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[6].kind != 3553280677u32 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[6].sequence != 17938093368224565678u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[6].epoch != 18010717228014948535u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[6].ns != 18083341087805331392u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[6].origin_domain_id != 18155964947595714249u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[6].origin_scope_id != 18228588807386097106u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[6].object_id != 18301212667176479963u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[6].grant_id != 18373836526966862820u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[6].parent_invocation_id != 18446460386757245677u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[6].result != -1781i64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[6].a != 144964032628459775u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[6].b != 217587892418842632u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[7].schema != 3721842871u32 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[7].kind != 3806123968u32 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[7].sequence != 18155964947595714249u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[7].epoch != 18228588807386097106u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[7].ns != 18301212667176479963u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[7].origin_domain_id != 18373836526966862820u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[7].origin_scope_id != 18446460386757245677u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[7].object_id != 72340172838076918u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[7].grant_id != 144964032628459775u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[7].parent_invocation_id != 217587892418842632u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[7].result != -1802i64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[7].a != 362835611999608346u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[7].b != 435459471789991203u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[8].schema != 3974686162u32 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[8].kind != 4058967259u32 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[8].sequence != 18373836526966862820u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[8].epoch != 18446460386757245677u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[8].ns != 72340172838076918u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[8].origin_domain_id != 144964032628459775u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[8].origin_scope_id != 217587892418842632u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[8].object_id != 290211752209225489u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[8].grant_id != 362835611999608346u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[8].parent_invocation_id != 435459471789991203u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[8].result != -1823i64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[8].a != 580707191370756917u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[8].b != 653331051161139774u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[9].schema != 4227529453u32 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[9].kind != 16843254u32 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[9].sequence != 144964032628459775u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[9].epoch != 217587892418842632u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[9].ns != 290211752209225489u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[9].origin_domain_id != 362835611999608346u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[9].origin_scope_id != 435459471789991203u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[9].object_id != 508083331580374060u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[9].grant_id != 580707191370756917u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[9].parent_invocation_id != 653331051161139774u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[9].result != -1844i64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[9].a != 798578770741905488u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[9].b != 871202630532288345u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[10].schema != 185405448u32 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[10].kind != 269686545u32 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[10].sequence != 362835611999608346u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[10].epoch != 435459471789991203u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[10].ns != 508083331580374060u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[10].origin_domain_id != 580707191370756917u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[10].origin_scope_id != 653331051161139774u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[10].object_id != 725954910951522631u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[10].grant_id != 798578770741905488u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[10].parent_invocation_id != 871202630532288345u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[10].result != -1865i64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[10].a != 1016450350113054059u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[10].b != 1089074209903436916u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[11].schema != 438248739u32 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[11].kind != 522529836u32 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[11].sequence != 580707191370756917u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[11].epoch != 653331051161139774u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[11].ns != 725954910951522631u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[11].origin_domain_id != 798578770741905488u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[11].origin_scope_id != 871202630532288345u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[11].object_id != 943826490322671202u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[11].grant_id != 1016450350113054059u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[11].parent_invocation_id != 1089074209903436916u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[11].result != -1886i64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[11].a != 1234321929484202630u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[11].b != 1306945789274585487u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[12].schema != 691092030u32 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[12].kind != 775373127u32 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[12].sequence != 798578770741905488u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[12].epoch != 871202630532288345u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[12].ns != 943826490322671202u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[12].origin_domain_id != 1016450350113054059u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[12].origin_scope_id != 1089074209903436916u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[12].object_id != 1161698069693819773u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[12].grant_id != 1234321929484202630u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[12].parent_invocation_id != 1306945789274585487u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[12].result != -1907i64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[12].a != 1452193508855351201u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[12].b != 1524817368645734058u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[13].schema != 943935321u32 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[13].kind != 1028216418u32 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[13].sequence != 1016450350113054059u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[13].epoch != 1089074209903436916u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[13].ns != 1161698069693819773u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[13].origin_domain_id != 1234321929484202630u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[13].origin_scope_id != 1306945789274585487u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[13].object_id != 1379569649064968344u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[13].grant_id != 1452193508855351201u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[13].parent_invocation_id != 1524817368645734058u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[13].result != -1928i64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[13].a != 1670065088226499772u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[13].b != 1742688948016882629u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[14].schema != 1196778612u32 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[14].kind != 1281059709u32 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[14].sequence != 1234321929484202630u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[14].epoch != 1306945789274585487u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[14].ns != 1379569649064968344u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[14].origin_domain_id != 1452193508855351201u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[14].origin_scope_id != 1524817368645734058u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[14].object_id != 1597441228436116915u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[14].grant_id != 1670065088226499772u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[14].parent_invocation_id != 1742688948016882629u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[14].result != -1949i64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[14].a != 1887936667597648343u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[14].b != 1960560527388031200u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[15].schema != 1449621903u32 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[15].kind != 1533903000u32 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[15].sequence != 1452193508855351201u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[15].epoch != 1524817368645734058u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[15].ns != 1597441228436116915u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[15].origin_domain_id != 1670065088226499772u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[15].origin_scope_id != 1742688948016882629u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[15].object_id != 1815312807807265486u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[15].grant_id != 1887936667597648343u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[15].parent_invocation_id != 1960560527388031200u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[15].result != -1970i64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[15].a != 2105808246968796914u64 {
+            failed += 1;
+        }
+        checked += 1;
+        if value.records[15].b != 2178432106759179771u64 {
             failed += 1;
         }
     }

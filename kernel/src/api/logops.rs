@@ -10,28 +10,102 @@
 //! the kernel stamps the real domain and scope over it, every time.
 
 use thalyx_abi::generated::{
-    LogAckRequest, LogAppendRequest, LogInfo, LogReadResult, ReceiptRecord, receipt_kind, status,
+    LogAckRequest, LogAppendRequest, LogInfo, LogReadResult, OpSpec, ReceiptRecord, receipt_kind,
+    status,
 };
 
-use crate::api::{BODY, Ctx, begin_response};
+use crate::api::{BODY, Ctx, begin_response, resolve};
 use crate::event;
-use crate::state::Machine;
+use crate::state::{MACHINE, Machine, ThreadState, Wait};
 use crate::ucopy::Staging;
 
+/// Receipts one read carries: the interface's batch.
+pub const BATCH: usize = thalyx_abi::generated::limit::RECEIPT_BATCH as usize;
+
 /// Reads a bounded batch of receipts and the loss count.
-pub fn read(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u64, i64> {
-    let index = ctx.cap.object.index as usize;
-    let mut records = [ReceiptRecord::zeroed(); 4];
-    let count = machine.logs[index].read(&mut records);
-    let result = LogReadResult {
-        count: count as u32,
-        lost: machine.logs[index].lost,
-        next_sequence: machine.logs[index].next_sequence,
-        records,
-    };
-    begin_response(staging, ctx.operation);
-    staging.write(BODY, result);
-    Ok(count as u64)
+///
+/// With a deadline, the read waits until the log holds a full batch or the
+/// deadline passes, and answers with what there is then -- possibly nothing.
+/// Without one it answers at once, as it always did. The wait is what lets an
+/// auditor keep up with the log without polling it and without being woken
+/// for every receipt: K6 found that an auditor that slept a tick between looks
+/// let a sixty-four-cell log fill in a fraction of a millisecond of a client's
+/// calls, so the admissions it was meant to cover were refused for want of a
+/// cell; and that one woken per receipt cost as much execution as the client
+/// it audited. The audited profile's promise is that a covered operation is
+/// refused rather than unrecorded; this is what keeps the refusal from being
+/// the ordinary case.
+pub fn read(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64> {
+    let mut final_pass = false;
+    loop {
+        {
+            let mut machine = MACHINE.lock();
+            let now = crate::api::now_ns();
+            let cap = resolve(
+                &machine,
+                ctx.domain,
+                ctx.handle,
+                spec.object_type,
+                spec.rights,
+                now,
+            )?;
+            let index = cap.object.index as usize;
+            let mut records = [ReceiptRecord::zeroed(); BATCH];
+            let count = machine.logs[index].read(&mut records);
+            if count >= BATCH || ctx.deadline == 0 || final_pass || now >= ctx.deadline {
+                let result = LogReadResult {
+                    count: count as u32,
+                    lost: machine.logs[index].lost,
+                    next_sequence: machine.logs[index].next_sequence,
+                    records,
+                };
+                drop(machine);
+                begin_response(staging, ctx.operation);
+                staging.write(BODY, result);
+                return Ok(count as u64);
+            }
+            if ctx.flags & thalyx_abi::generated::flag::NONBLOCKING != 0 {
+                return Err(status::WOULD_BLOCK);
+            }
+            let thread = ctx.thread;
+            machine.threads[thread].wait = Wait::Log(index as u16, cap.object.generation);
+            machine.threads[thread].wait_deadline_ns = ctx.deadline;
+            machine.threads[thread].wake_status = status::OK;
+            machine.threads[thread].state = ThreadState::Blocked;
+        }
+        crate::sched::block_current();
+        let mut machine = MACHINE.lock();
+        let woken = machine.threads[ctx.thread].wake_status;
+        machine.threads[ctx.thread].wake_status = status::OK;
+        drop(machine);
+        match woken {
+            status::OK => {}
+            // The deadline is an answer, not a failure: what the log holds at
+            // that moment is what the reader asked for.
+            status::TIMED_OUT => final_pass = true,
+            other => return Err(other),
+        }
+    }
+}
+
+/// Wakes a thread waiting on `index`, once the log holds a full batch for it.
+pub fn wake_reader(machine: &mut Machine, index: usize, generation: u32) {
+    if machine.logs[index].count < BATCH {
+        return;
+    }
+    for thread in 0..machine.threads.len() {
+        if machine.threads[thread].state != ThreadState::Blocked {
+            continue;
+        }
+        if machine.threads[thread].wait == Wait::Log(index as u16, generation) {
+            machine.threads[thread].wait = Wait::None;
+            machine.threads[thread].wait_deadline_ns = 0;
+            machine.threads[thread].wake_status = status::OK;
+            machine.threads[thread].state = ThreadState::Ready;
+            crate::sched::kick_idle(machine);
+            return;
+        }
+    }
 }
 
 /// Appends a service note whose origin the kernel stamps.

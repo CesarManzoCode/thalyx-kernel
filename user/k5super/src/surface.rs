@@ -39,18 +39,25 @@ use crate::work::{self, WorkParts};
 const RUN_DEADLINE_NS: u64 = 240_000_000_000;
 /// How long one wait between checks is.
 const POLL_NS: u64 = 20_000_000;
-/// How long after a work says it is asking the engine its scope is closed:
-/// long enough for the engine to have taken the request, bound to it, decoded
-/// the prompt and produced some tokens, and far shorter than the inference it
-/// was asked for.
-const CANCEL_AFTER_CPU_NS: u64 = 10_000_000;
+/// How much execution the engine charges the asking work after binding to
+/// it before the work's scope is closed: enough for the engine to have
+/// decoded the prompt it was lent -- one batch -- and produced a token, and
+/// short of the inference it was asked for. Under KVM the model answers the
+/// four-hundred-token request in about forty milliseconds of execution, and
+/// the two diagnostic records the engine writes between binding and decoding
+/// cost it nearly three milliseconds each on that platform, charged here; so
+/// the first token is some thirteen milliseconds in, the answer forty, and
+/// the closing has to land between them. Ten milliseconds until K6, when a
+/// scheduler that no longer waited a tick for every wake let the engine
+/// finish before a supervisor polling every millisecond had fenced.
+const CANCEL_AFTER_CPU_NS: u64 = 15_000_000;
 /// How long after a work says it is asking it is closed regardless, if the
 /// engine never binds to it: a run that cannot show the closing ends rather
 /// than waiting for ever, and the gate says why.
 const CANCEL_FALLBACK_NS: u64 = 60_000_000_000;
 /// How often the run's signals are looked at while that closing is awaited.
 /// Short, because four hundred tokens take a fraction of a second under KVM.
-const WATCH_POLL_NS: u64 = 1_000_000;
+const WATCH_POLL_NS: u64 = 200_000;
 /// How long a closed scope is given to drain before the run is called stuck.
 const DRAIN_DEADLINE_NS: u64 = 30_000_000_000;
 
@@ -367,7 +374,8 @@ pub fn run(system: u64, supervision: u64, plan: &Plan, shape: &Shape) -> bool {
             engine_image,
             model,
             plan.arg0,
-            limits.cpu_window_ns,
+            limits.cpu_window_ns / 2,
+            false,
             plan.seed,
         ) else {
             k2::note(note::BUILD_STEP_FAILED, 141);
@@ -474,9 +482,22 @@ pub fn run(system: u64, supervision: u64, plan: &Plan, shape: &Shape) -> bool {
     // slots were filled and checked against the number that came back.
     let mut standing: [Option<Standing>; MAX_WORKS] = [None, None];
     for (index, plan_one) in plans.iter().enumerate() {
+        // The asking work's scope gets a twentieth of a window: the engine's
+        // inference is charged to it, and a budget that stretches forty
+        // milliseconds of execution over most of a second is what makes
+        // "closed while the engine computes for it" a condition this
+        // supervisor can meet rather than a race it sometimes wins. Under KVM
+        // the model answers the four-hundred-token request in about forty
+        // milliseconds of execution; at half a window the answer sometimes
+        // came before the fence, however soon the fence followed the binding.
+        let work_budget = if plan_one.role == work_role::ASKER {
+            limits.cpu_window_ns / 20
+        } else {
+            limits.cpu_window_ns / 2
+        };
         let Ok(work_scope) = k2::scope_create_child(
             system,
-            services::limits_for(limits.cpu_window_ns / 2, 320, 3),
+            services::limits_for(work_budget, 320, 3),
             name16(plan_one.scope_label),
         ) else {
             k2::note(note::BUILD_STEP_FAILED, 106);
@@ -747,6 +768,20 @@ pub fn run(system: u64, supervision: u64, plan: &Plan, shape: &Shape) -> bool {
         if all_finished {
             break;
         }
+    }
+    // The cut is looked for once more: a service that cut the run stops
+    // answering, the work whose call it was answering ends in the same turn
+    // of this loop, and a turn that checked the signal first and the works
+    // second would leave with the cut unreported. K6's scheduler, which wakes
+    // a caller within microseconds of the answer instead of at the next tick,
+    // made that order the usual one.
+    if let Ok(info) = k2::signal_wait(crash, k4bit::CRASH, k2::now_ns() + POLL_NS)
+        && info.bits & k4bit::CRASH != 0
+    {
+        audit::drain(log, &mut auditor);
+        audit::report(&auditor);
+        k2::note(note::CUT, 1);
+        return true;
     }
     audit::observe(log, &mut auditor);
     audit::drain(log, &mut auditor);

@@ -20,7 +20,6 @@ use crate::arch::x86_64::fpu;
 use crate::arch::x86_64::paging::{AddressSpace, MapError};
 use crate::arch::x86_64::trap::TrapFrame;
 use crate::elf::{self, Reject};
-use crate::event;
 use crate::layout;
 use crate::limits::MAX_CPUS;
 use crate::mm::{Owner, Rights};
@@ -30,6 +29,7 @@ use crate::state::{
     Domain, DomainState, ExitReason, FaultRecord, MACHINE, MAX_DOMAINS, MAX_KSTACKS, MAX_THREADS,
     Machine, ThreadKind, ThreadState, Wait,
 };
+use crate::{event, trace};
 
 /// Why a domain could not be created.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -230,11 +230,21 @@ pub fn create_in(
     if !scope::has_parallelism(&machine.scopes, owner_scope) {
         return Err(CreateError::LimitExhausted);
     }
-    let index = machine
+    let index = match machine
         .domains
         .iter()
         .position(|domain| domain.state == DomainState::Empty)
-        .ok_or(CreateError::DomainTableFull)?;
+    {
+        Some(index) => index,
+        None => {
+            // No empty slot: the oldest dead one nothing names any more, if
+            // there is one, gives up its accounting for the newcomer.
+            let dead = (0..MAX_DOMAINS)
+                .find(|&candidate| collect_dead(machine, candidate))
+                .ok_or(CreateError::DomainTableFull)?;
+            dead
+        }
+    };
     let thread_index = machine
         .threads
         .iter()
@@ -573,6 +583,7 @@ pub fn activate_in(machine: &mut Machine, index: usize) -> Result<(), Activation
             machine.threads[thread].state = ThreadState::Ready;
         }
     }
+    crate::sched::kick_idle(machine);
     let _ = thread_index;
     Ok(())
 }
@@ -737,6 +748,46 @@ fn kick_running_threads(machine: &Machine, index: usize) {
     }
 }
 
+/// Frees the table slot of a domain that has stopped, been reaped, and is
+/// named by no capability.
+///
+/// Everything else the domain held went before this: its threads and address
+/// space at the reap, its capabilities and fault channel at termination, its
+/// pages and metadata back to its scope. The slot keeps its generation, so a
+/// handle that outlived the domain names nothing rather than the next
+/// occupant. Returns whether the slot was freed.
+///
+/// Called when a creation finds no empty slot, not when the domain dies: a
+/// dead domain's slot is also its accounting -- what it was charged, how it
+/// ended -- and the run's per-domain summary reads it at the end. Until K6 a
+/// dead domain kept its slot for the rest of the boot, and K6's closure
+/// benchmark, which builds and stops a domain per sample, found the table of
+/// sixteen full after sixteen.
+pub fn collect_dead(machine: &mut Machine, index: usize) -> bool {
+    let domain = &machine.domains[index];
+    if domain.state != DomainState::Dead
+        || domain.refs != 0
+        || domain.space.is_some()
+        || domain.thread_count() != 0
+        || machine
+            .allocator()
+            .quarantined_for(Owner::Domain(index as u16))
+            != 0
+    {
+        return false;
+    }
+    let domain = &machine.domains[index];
+    let (generation, id, scope) = (domain.generation, domain.id, domain.owner_scope);
+    let name = domain.name_str();
+    trace!(
+        "domain.collected",
+        "domain={index} name={name} id={id} scope={}", machine.scopes[scope as usize].id
+    );
+    machine.domains[index] = Domain::empty();
+    machine.domains[index].generation = generation;
+    true
+}
+
 /// Reclaims every domain that has stopped and that no processor is still
 /// standing on.
 pub fn reap_dead() {
@@ -819,7 +870,7 @@ pub fn reap_dead() {
         drop(machine);
         let name = domain_name(index);
 
-        event!(
+        trace!(
             "mm.reclaimed",
             "domain={index} name={name} reason={reason} data_frames={data} \
              table_frames={tables} charged_before={charged_before} charged_after={charged_after} \
@@ -994,7 +1045,7 @@ pub fn terminate_in(machine: &mut Machine, index: usize, reason: ExitReason, cod
 
     let name = machine.domains[index].name_str();
     let scope = machine.domains[index].owner_scope;
-    event!(
+    trace!(
         "domain.terminated",
         "domain={index} name={name} reason={} code=0x{code:x} scope={} threads={} \
          notes={} invocations={} refusals={}",
