@@ -88,6 +88,14 @@ pub mod note {
     pub const ENGINE_SCOPE_PAGES: u64 = 0x5023;
     /// The engine's scope after the run. Value: nanoseconds it was charged.
     pub const ENGINE_SCOPE_CPU: u64 = 0x5024;
+    /// The supervisor fenced a work's scope while the engine computed for it.
+    /// Value: scopes the barrier reached.
+    pub const WORK_CANCELLED: u64 = 0x5025;
+    /// A closed work's scope could not be retired yet. Value: invocations
+    /// pending, threads running (bits 16 up), effects pending (bits 32 up).
+    pub const WORK_DRAINING: u64 = 0x5026;
+    /// A closed work's scope was retired. Value: pages it still retained.
+    pub const WORK_RETIRED: u64 = 0x5027;
     /// The run reached its end. Value: domains that finished cleanly.
     pub const DONE: u64 = 0x50FF;
 }
@@ -257,6 +265,11 @@ fn run() -> ! {
         rt::exit(1)
     };
     k2::note(note::STAGE, u64::from(plan.stage));
+    // The supervisor's own image is a handle it will never use, and a handle is
+    // a grant in a table of thirty-two.
+    if let Some(own_image) = image_named("k5super") {
+        let _ = k2::cap_close(own_image);
+    }
 
     // A supervision endpoint: every domain this supervisor builds reports its
     // faults here, so a domain that dies is a message and not a silence.

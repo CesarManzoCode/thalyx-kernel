@@ -163,6 +163,16 @@ pub mod note {
     pub const TOOL_READ: u64 = 0x5215;
     /// The digest the tool computed over the bytes it actually read.
     pub const TOOL_SUM: u64 = 0x5216;
+    /// After a cut, the work asked the service what became of each request identity it may have spent. Value: identities spent, with the last outcome in bits 8 and up.
+    pub const WORK_RESUMED: u64 = 0x5217;
+    /// The version this work would have published is already published with its change in it: nothing to redo. Value: the generation.
+    pub const WORK_RECOVERED: u64 = 0x5218;
+    /// The work is about to ask the engine for a long inference and has raised its signal to say so. Value: tokens asked for.
+    pub const WORK_ASKING: u64 = 0x5219;
+    /// A publication was refused for a stale generation and the work started again over the version that won. Value: the generation it now stands on.
+    pub const WORK_REBASED: u64 = 0x521A;
+    /// A check the program asked for needs a tool this backend does not have, and the launcher refused it rather than answering with a weaker one. Value: the tool identity asked for.
+    pub const PROFILE_REFUSED: u64 = 0x521B;
 }
 
 /// `HostOp` values crossing the boundary as integers.
@@ -286,6 +296,42 @@ pub mod engine_status {
     /// The request was read and could not be served; the answer bytes are the reason, as Thalyx's engine reports one.
     /// `EngineStatus::FAILED`.
     pub const FAILED: u32 = 6;
+}
+
+/// `Scenario` values crossing the boundary as integers.
+pub mod scenario {
+    /// One work carries the vertical through.
+    /// `Scenario::BASELINE`.
+    pub const BASELINE: u32 = 1;
+    /// Two works over the same version, both asking the same engine, both publishing against the same generation. One is refused and starts again over the version that won.
+    /// `Scenario::RIVALS`.
+    pub const RIVALS: u32 = 2;
+    /// A work asks the engine for a long inference and its scope is closed while the engine computes for it; a second, unrelated work then uses the same engine.
+    /// `Scenario::CANCEL`.
+    pub const CANCEL: u32 = 3;
+}
+
+/// What the engine is asked, on both backends.
+///
+/// From the schema's fixture, so the native program, the Linux reference
+/// and the gate ask one question from one source.
+pub mod engine_case {
+    /// Context the engine builds, in tokens.
+    pub const CONTEXT_TOKENS: u64 = 512;
+    /// Threads the engine computes a graph with.
+    pub const COMPUTE_THREADS: u64 = 1;
+    /// The publisher's two prompts, in order.
+    pub const PUBLISHER_PROMPTS: [&str; 2] = ["hola hola", "hola"];
+    /// Tokens each answer of the `publisher` case may run to.
+    pub const PUBLISHER_PREDICT: u32 = 12;
+    /// The rival's two prompts, different from the publisher's so an answer given to the wrong work would be visible.
+    pub const RIVAL_PROMPTS: [&str; 2] = ["adios", "adios adios"];
+    /// Tokens each answer of the `rival` case may run to.
+    pub const RIVAL_PREDICT: u32 = 12;
+    /// One inference long enough to be cancelled while it runs: about a second of generation on the emulated processor, against a closure that comes a quarter of a second in.
+    pub const LONG_PROMPTS: [&str; 1] = ["hola hola hola hola hola hola"];
+    /// Tokens each answer of the `long` case may run to.
+    pub const LONG_PREDICT: u32 = 400;
 }
 
 /// The inline half of a host call; the bytes are in the shared region.

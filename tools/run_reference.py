@@ -29,10 +29,22 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 REFERENCE = ROOT / "build" / "reference"
+SCHEMA = ROOT / "abi" / "schema" / "k5-proto-v1.json"
 
-# What the native engine is built with, so both sides answer the same question.
-CONTEXT = 512
-THREADS = 1
+
+def fixture() -> dict:
+    """What the engine is asked, from the one place both backends read it."""
+    return json.loads(SCHEMA.read_text())["fixtures"]["engine"]
+
+
+def fixture_cases() -> list[dict]:
+    return fixture()["cases"]
+
+
+# What the native engine is built with, so both sides answer the same question:
+# the fixture's numbers, not this file's.
+CONTEXT = fixture()["context_tokens"]
+THREADS = fixture()["compute_threads"]
 
 
 def read_exactly(stream, n: int) -> bytes:

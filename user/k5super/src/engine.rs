@@ -16,19 +16,20 @@
 
 use thalyx_abi::{ScopeLimits, domain_state, memory_state, right};
 use thalyx_user_k5pkg::native::{self, Config, addr};
-use thalyx_user_k5pkg::proto::{bit, note as k5note};
+use thalyx_user_k5pkg::proto::{bit, engine_case, note as k5note};
 use thalyx_user_rt::k2::{self, name16};
 
 use crate::launch::{self, Install, Recipe};
 use crate::note;
 
-/// Context the engine builds, in tokens. The host reference is run with the
-/// same number, because both sides have to answer the same question.
-pub const CONTEXT_TOKENS: u64 = 512;
+/// Context the engine builds, in tokens: the fixture's number, which the host
+/// reference is run with too, because both sides have to answer the same
+/// question.
+pub const CONTEXT_TOKENS: u64 = engine_case::CONTEXT_TOKENS;
 /// Threads llama.cpp computes a graph with. One, so every instruction of an
 /// inference runs on the worker bound to the invocation and is charged to the
 /// caller; a second ggml thread would be a thread nobody bound.
-pub const COMPUTE_THREADS: u64 = 1;
+pub const COMPUTE_THREADS: u64 = engine_case::COMPUTE_THREADS;
 /// How long loading may take before the supervisor stops waiting. The weights
 /// are small; ggml's tables and llama.cpp's graph reservation are not free on
 /// an emulated processor.
@@ -40,14 +41,8 @@ const POLL_NS: u64 = 20_000_000;
 pub struct Engine {
     /// The endpoint works reach it through, by facets bound on it.
     pub endpoint: u64,
-    /// Its domain.
-    pub domain: u64,
     /// Its scope, narrowed to reading what it has been charged.
     pub scope: u64,
-    /// The signal it raised when it was ready, and raises nothing else on.
-    pub ready: u64,
-    /// Bytes of the model the image carried.
-    pub model_bytes: u64,
 }
 
 /// Ceilings of the engine's scope. Memory is the one sized by the workload,
@@ -203,15 +198,18 @@ pub fn build(
         }
     }
     let _ = k2::cap_close(built.done_signal);
+    // Said once, and named once: the ready signal and the domain handle have
+    // no further use here -- the engine is never stopped by this supervisor,
+    // and the kernel's own summary says how it ended -- and a handle is a
+    // grant in a table of thirty-two slots.
+    let _ = k2::cap_close(ready);
+    let _ = k2::cap_close(built.domain);
     let scope_view = k2::derive(scope, right::INSPECT, 0, 0).unwrap_or(0);
     let _ = k2::cap_close(scope);
     k2::note(note::ENGINE_READY, model_bytes);
     Some(Engine {
         endpoint,
-        domain: built.domain,
         scope: scope_view,
-        ready,
-        model_bytes,
     })
 }
 

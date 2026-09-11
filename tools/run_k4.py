@@ -113,13 +113,14 @@ def qemu_command(
     medium: Path,
     processors: int,
     debug_exit: bool,
+    memory: str = MEMORY,
 ) -> list[str]:
     argv = [
         str(tools.qemu),
         "-machine", "q35,accel=tcg",
         "-cpu", CPU_MODEL,
         "-smp", str(processors),
-        "-m", MEMORY,
+        "-m", memory,
         "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={tools.ovmf_code}",
         "-drive", f"if=pflash,format=raw,unit=1,file={vars_copy}",
         "-drive", f"format=raw,file={image}",
@@ -147,11 +148,15 @@ def one_leg(
     processors: int,
     timeout: float,
     debug_exit: bool,
+    memory: str = MEMORY,
 ) -> dict:
-    """Runs one leg and records what it did, without judging it."""
+    """Runs one leg and records what it did, without judging it.
+
+    The machine is K4's unless the caller says otherwise; K5's cases run the
+    same legs on the K5 image with K5's memory."""
     vars_copy = out / f"OVMF_VARS-{leg}.fd"
     shutil.copyfile(tools.ovmf_vars, vars_copy)
-    argv = qemu_command(tools, vars_copy, image, medium, processors, debug_exit)
+    argv = qemu_command(tools, vars_copy, image, medium, processors, debug_exit, memory)
     print("+", " ".join(argv), file=sys.stderr)
 
     started = time.monotonic()

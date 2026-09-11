@@ -354,11 +354,21 @@ impl Store {
     }
 
     /// Decides what the harness wants done at `point`.
+    ///
+    /// At `BEFORE_OBJECT` the argument names the object. At every other point
+    /// it counts how many times the point is passed before the directive
+    /// applies: zero is the first publication of the run, which is every K4
+    /// case; K5's runs publish a seed version before the one a cut is about,
+    /// and name the second.
     pub fn fault_at(&mut self, point: u32, ordinal: u64) -> Fault {
         if !self.harness.present || self.harness.applied || self.harness.point != point {
             return Fault::None;
         }
         if point == fault_point::BEFORE_OBJECT && self.harness.arg != ordinal {
+            return Fault::None;
+        }
+        if point != fault_point::BEFORE_OBJECT && self.harness.arg > 0 {
+            self.harness.arg -= 1;
             return Fault::None;
         }
         self.harness.applied = true;

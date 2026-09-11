@@ -14,6 +14,7 @@
 //! error that ends the run: a program that could not write `if` would be back to
 //! asking a model what to do about every mistake it makes.
 
+use thalyx_user_k5pkg::proto::{engine_case, work_role};
 use thalyx_user_k5pkg::thalyx::{Json, verb};
 use thalyx_user_rt::k2;
 
@@ -28,6 +29,9 @@ pub struct Context<'a> {
     pub root: [u8; 32],
     /// The run's seed, and the mark derived from it.
     pub seed: u64,
+    /// The role this work was built as, which decides its intent: what it
+    /// edits, what it records under and what it asks the model.
+    pub role: u32,
     /// Whether the workspace may still be changed.
     pub open: bool,
     /// The workspace.
@@ -69,9 +73,54 @@ fn refuse(out: &mut [u8], word: &[u8], detail: &[u8]) -> usize {
     json.finish().unwrap_or(0)
 }
 
+/// What a role means to do: the file it edits, the placeholder it replaces,
+/// the name it records the model's answers under, and what it asks the model.
+///
+/// In Thalyx this is the intent, and it arrives with the work. Here it is a
+/// function of the role the supervisor wrote into the work's page, so two
+/// works built as rivals are the same program over two intents.
+pub struct Intent {
+    pub target: &'static [u8],
+    pub placeholder: &'static [u8],
+    pub record: &'static [u8],
+    pub prompts: &'static [&'static str],
+    pub predict: u32,
+}
+
+pub fn intent_of(role: u32) -> Intent {
+    match role {
+        work_role::RIVAL => Intent {
+            target: content::NAME_MODULE,
+            placeholder: content::ZERO_MARK,
+            record: content::NAME_RIVAL_RECORD,
+            prompts: &engine_case::RIVAL_PROMPTS,
+            predict: engine_case::RIVAL_PREDICT,
+        },
+        _ => Intent {
+            target: content::NAME_MODULE,
+            placeholder: content::ZERO_MARK,
+            record: content::NAME_MODEL_RECORD,
+            prompts: &engine_case::PUBLISHER_PROMPTS,
+            predict: engine_case::PUBLISHER_PREDICT,
+        },
+    }
+}
+
+/// The mark a role writes: the run's seed, and for a rival the seed with its
+/// role folded in, so two works of one run never write the same bytes.
+pub fn mark_for(seed: u64, role: u32, out: &mut [u8; content::MARK_LEN]) {
+    let value = if role == work_role::RIVAL {
+        seed ^ 0x5249_5641_4C00_0000
+    } else {
+        seed
+    };
+    content::mark_of(value, out);
+}
+
 fn state(context: &mut Context<'_>, out: &mut [u8]) -> usize {
     let mut mark = [0u8; content::MARK_LEN];
-    content::mark_of(context.seed, &mut mark);
+    mark_for(context.seed, context.role, &mut mark);
+    let intent = intent_of(context.role);
     let mut json = Json::new(out);
     json.open();
     json.field_bool("ok", true);
@@ -80,6 +129,16 @@ fn state(context: &mut Context<'_>, out: &mut [u8]) -> usize {
     json.digest(&context.root);
     json.field_string("mark", &mark);
     json.field_string("zero_mark", content::ZERO_MARK);
+    json.field_string("target", intent.target);
+    json.field_string("placeholder", intent.placeholder);
+    json.field_string("record", intent.record);
+    json.key("prompts");
+    json.open_array();
+    for prompt in intent.prompts {
+        json.string(prompt.as_bytes());
+    }
+    json.close_array();
+    json.field_number("predict", u64::from(intent.predict));
     json.field_number("names", context.workspace.len() as u64);
     json.field_bool("open", context.open);
     json.close();

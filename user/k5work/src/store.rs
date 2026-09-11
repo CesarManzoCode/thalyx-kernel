@@ -239,6 +239,26 @@ impl Store {
         .is_some()
     }
 
+    /// What became of one of this principal's request identities.
+    ///
+    /// After a cut, a work that may already have asked for something has to
+    /// find out before it asks for anything else: an identity with a durable
+    /// result is answered with that result forever, and reusing one for other
+    /// inputs is a conflict rather than a retry.
+    pub fn result(&mut self, sequence: u64) -> Option<StoreReply> {
+        match self.call(
+            &StoreRequest {
+                op: store_op::RESULT,
+                request_sequence: sequence,
+                ..StoreRequest::zeroed()
+            },
+            0,
+        ) {
+            Answer::Reply(reply) => Some(reply),
+            Answer::Outcome(_) | Answer::Gone(_) => None,
+        }
+    }
+
     /// Asks for a conditioned transition of the published root.
     #[allow(clippy::too_many_arguments)]
     pub fn publish(

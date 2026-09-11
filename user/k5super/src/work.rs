@@ -42,8 +42,6 @@ pub struct WorkParts<'a> {
     pub host_endpoint: u64,
     /// The region shared with the language runtime, or zero.
     pub channel: u64,
-    /// The signal the supervisor raises to ask it to stop.
-    pub cancel: u64,
 }
 
 /// The work's domain and the staging buffer it lends.
@@ -97,19 +95,13 @@ pub fn build(parts: &WorkParts<'_>, config: WorkConfig) -> Option<BuiltWork> {
         0,
     )
     .ok()?;
+    // `SIGNAL_WAIT` on its own done signal is how a work sleeps: a wait on a
+    // bit nobody raises, with a deadline, spends nothing of its budget.
     k2::domain_install_cap(
         domain,
         parts.done,
         work_slot::DONE,
-        right::INSPECT | right::SIGNAL_RAISE,
-        0,
-    )
-    .ok()?;
-    k2::domain_install_cap(
-        domain,
-        parts.cancel,
-        work_slot::CANCEL,
-        right::INSPECT | right::SIGNAL_WAIT,
+        right::INSPECT | right::SIGNAL_RAISE | right::SIGNAL_WAIT,
         0,
     )
     .ok()?;

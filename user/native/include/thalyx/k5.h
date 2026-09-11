@@ -158,6 +158,16 @@
 #define K5_NOTE_TOOL_READ 0x5215ull
 /* The digest the tool computed over the bytes it actually read. */
 #define K5_NOTE_TOOL_SUM 0x5216ull
+/* After a cut, the work asked the service what became of each request identity it may have spent. Value: identities spent, with the last outcome in bits 8 and up. */
+#define K5_NOTE_WORK_RESUMED 0x5217ull
+/* The version this work would have published is already published with its change in it: nothing to redo. Value: the generation. */
+#define K5_NOTE_WORK_RECOVERED 0x5218ull
+/* The work is about to ask the engine for a long inference and has raised its signal to say so. Value: tokens asked for. */
+#define K5_NOTE_WORK_ASKING 0x5219ull
+/* A publication was refused for a stale generation and the work started again over the version that won. Value: the generation it now stands on. */
+#define K5_NOTE_WORK_REBASED 0x521Aull
+/* A check the program asked for needs a tool this backend does not have, and the launcher refused it rather than answering with a weaker one. Value: the tool identity asked for. */
+#define K5_NOTE_PROFILE_REFUSED 0x521Bull
 
 /* One Thalyx request: a verb and its arguments. */
 #define K5_HOST_OP_REQUEST 1u
@@ -224,6 +234,17 @@
 #define K5_ENGINE_STATUS_CANCELLED 5u
 /* The request was read and could not be served; the answer bytes are the reason, as Thalyx's engine reports one. */
 #define K5_ENGINE_STATUS_FAILED 6u
+
+/* One work carries the vertical through. */
+#define K5_SCENARIO_BASELINE 1u
+/* Two works over the same version, both asking the same engine, both publishing against the same generation. One is refused and starts again over the version that won. */
+#define K5_SCENARIO_RIVALS 2u
+/* A work asks the engine for a long inference and its scope is closed while the engine computes for it; a second, unrelated work then uses the same engine. */
+#define K5_SCENARIO_CANCEL 3u
+
+/* What the engine is asked, on both backends: the fixture's parameters. */
+#define K5_ENGINE_CONTEXT_TOKENS 512u
+#define K5_ENGINE_COMPUTE_THREADS 1u
 
 /* The inline half of a host call; the bytes are in the shared region. */
 typedef struct {

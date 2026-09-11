@@ -17,6 +17,7 @@ Esta nota se escribe mientras K5 se ejecuta, etapa por etapa, y dice en cada mom
 | `surface` | Primera superficie nativa de Thalyx: versión identificada, contexto, workspace privado, cambio real, publicación condicionada y evidencia durable, sobre el estado administrado de K4. La validación es una afirmación que el propio trabajo hace sobre sí mismo, y eso es lo que la etiqueta de integración parcial significa. | **Ejecutado** |
 | `work` | Programa acotado real —QuickJS de verdad— y herramienta nativa real, ejecutada en su propio dominio sobre un candidato sellado, decidiendo la publicación. | **Ejecutado** |
 | `engine` | Motor CPU residente real —llama.cpp en la etiqueta que Thalyx fija, con el `serve_one` de su propio motor— y la toolchain que esa carga necesita: C++ alojado, hilos, TLS, desenrollado, archivos administrados. Residencia y petición cobradas a ámbitos distintos por el kernel. | **Ejecutado** |
+| matriz EXP-10 | La misma imagen bajo adversidad: dos trabajos rivales contra el mismo motor y la misma versión; un trabajo cerrado mientras el motor calcula para él; y tres publicaciones que fallan —cortada después de preparar, cortada después de comprometer, escritura rechazada por el medio— cada una seguida del arranque que la recupera. | **Ejecutado** |
 
 ## El target nativo
 
@@ -49,9 +50,11 @@ Una quinta imagen UEFI construida desde las mismas fuentes con el mismo script y
 |---|---|---|
 | Runtime nativo | `python3 tools/build_native.py` | `build/native/libthalyx-native.a` y las imágenes de la etapa |
 | Imagen | `python3 tools/build_image.py --phase k5 --stage smoke` | `build/thalyx-k5.img`, manifiesto con digest de cada artefacto y herramienta |
-| Ejecución | `python3 tools/run_k5_stages.py` | `exit_status=33` (`k1.terminal status=complete`) |
-| Veredicto | `python3 tools/check_k5.py` | `K5 GATE PASSED: 27 of 27 criteria met` |
-| Autocomprobación | `python3 tools/check_k5.py --self-test` | `38 damages, each noticed by the criterion named` |
+| Ejecución | `python3 tools/run_k5_stages.py` | Las cuatro etapas, cada una con `exit_status=33` (`k1.terminal status=complete`) |
+| Referencia Linux | `python3 tools/build_reference.py` | `build/reference/thalyx-engine` y `tiny.gguf`, **ejecución del anfitrión**, etiquetada |
+| Matriz EXP-10 | `python3 tools/run_k5_cases.py` | 5 casos, 8 tramos, todos con `exit_status=33` |
+| Veredicto | `python3 tools/check_k5.py` | `K5 GATE PASSED: 44 of 44 criteria met` |
+| Autocomprobación | `python3 tools/check_k5.py --self-test` | `81 damages, each noticed by the criterion named` |
 | Protocolos K5 | `python3 tools/check_k5_proto.py` | El Rust y el C generados coinciden con `abi/schema/k5-proto-v1.json` |
 
 Plataforma: QEMU `q35` con acelerador `tcg`, cuatro procesadores, CPU `qemu64,+smep,+smap,+pdpe1gb,+x2apic`, 1024 MiB y OVMF.
@@ -192,6 +195,56 @@ Seis defectos que compilar no encuentra, y dos son del kernel:
 5. **Un runtime parado mientras liberaba su heap.** El lanzador terminaba por autoridad al runtime de lenguaje en cuanto el trabajo lo pedía, y el runtime, en otro procesador, seguía liberando memoria; la terminación retiró sus mapeos, el hilo falló sobre la arena retirada, y la ejecución contó **un fallo de usuario contra un dominio ya terminado**. Dos correcciones, y la del kernel es la que cuenta: una terminación envía ahora una interrupción a cada procesador que esté ejecutando un hilo del dominio, y toda vuelta a anillo 3 —interrupción, trampa o `syscall`— comprueba si el hilo fue parado y, si lo fue, lo abandona con un registro propio, `thread.stopped_late`, en vez de devolverle el control; un fallo que llegue antes que la interrupción se clasifica igual y no se cuenta. El lanzador, además, da al runtime un plazo acotado para irse por su cuenta, porque parar a un programa en medio de liberar memoria es una forma de parar y no la única.
 6. **Cabeceras C que un compilador de C++ no aceptaba.** `_Static_assert`, `_Alignof` y un campo llamado `class`. Los generadores lo escriben ahora en las dos grafías con las mismas aserciones.
 
+## La matriz EXP-10: la vertical bajo adversidad
+
+[La ruta](../roadmap/phases.md) pide que la vertical completa incluya dos tareas rivales, cierre durante servicio residente y supervivencia a una caída en publicación, y EXP-10 pide fallos honestos y ninguna dependencia oculta en el anfitrión. `tools/run_k5_cases.py` ejecuta cinco casos, cada uno sobre **la misma imagen de la etapa `engine`** —mismo kernel, mismo supervisor, mismo runtime, misma herramienta, mismo motor— con un escenario y, cuando el caso lo dice, un corte. El escenario viaja en el bloque de directiva del medio exactamente como en K4, de modo que el supervisor lee qué trabajos construir del mismo sitio del que el servicio de estado lee dónde fallar, y el anfitrión escribe los dos. Cada caso tiene su propio medio, su propia semilla y su propio directorio; nada aquí juzga un caso, y la puerta lee lo que el kernel y el medio registraron.
+
+El argumento de la directiva creció una acepción: en los puntos que no son `BEFORE_OBJECT` cuenta cuántas veces se pasa por el punto antes de aplicar, porque un run de K5 publica la versión semilla antes de la que un corte trata, y un corte en la semilla sería un corte en la fixture. Los quince casos de K4 usan cero y no cambian; `tools/check_k4.py` lo sigue diciendo 31/31 con 48/48.
+
+### `rivals`: dos trabajos, un motor, una transición
+
+Dos dominios de trabajo —`k5pub` y `k5riv`— con dos principales distintos (facetas 1 y 2 del servicio de estado, bound en ese orden y comprobadas), dos ámbitos, dos buffers de prompt, dos regiones compartidas con dos runtimes distintos, y **el mismo motor**. El rival espera a que exista una versión publicada, porque un rival es un segundo trabajo sobre una versión y no una carrera por la fixture. Los dos ejecutan **el mismo programa** sobre intenciones distintas que `estado` les da —qué archivo editan, qué marcador reemplazan, bajo qué nombre registran lo que dijo el modelo, y qué le preguntan—: los dos reemplazan el mismo marcador de dieciséis ceros de `module.js`, cada uno con una marca propia derivada de la semilla y del rol, y le preguntan al motor prompts distintos. Eso es lo que los hace rivales y no dos trabajos: las aserciones del módulo solo se sostienen cuando el marcador ha desaparecido, así que ninguno puede dejárselo al otro.
+
+Lo que la puerta decidió, desde los registros:
+
+- **Un motor sirvió a los dos y no mezcló nada.** Cuatro `sched.bound` del hilo del motor: dos cobrados al ámbito `work` y dos al ámbito `rival`, cada uno con `effective_scope` igual al `origin_scope` de la invocación y `account=origin_budget`. Los digests de los prompts que cada trabajo prestó son los de la fixture de su rol, los cuatro que el motor leyó son exactamente esos cuatro, y los digests de respuesta que cada trabajo anotó son una subsecuencia —en su orden— de los que el motor produjo, sin ninguno en común entre los dos. El motor los sirvió intercalados: `pub`, `riv`, `pub`, `riv`.
+- **Una transición admitida, la otra rechazada y abandonada con honestidad.** Los dos validaron con la herramienta real (salida 0 los dos) y los dos intentaron publicar contra la generación 1. Uno lo consiguió; el otro fue rechazado con `GENERATION_STALE` —en el `FORK` con que congela su candidato, que es el mismo rechazo que la publicación habría encontrado un paso después— y **volvió a empezar sobre la versión que ganó**: la releyó del servicio, ejecutó el programa de nuevo, y el programa encontró el marcador ya reemplazado, falló su primera aserción, enganchó y terminó como `ASSERTION`. El trabajo abandonó: nada publicado se movió, `final_generation=2` en los dos, y el módulo publicado lleva **exactamente una** de las dos marcas —la puerta recalcula las dos desde la semilla y busca ambas en los bytes del medio—. El registro del ganador está en la versión y el del perdedor no.
+- **Sin fuga de autoridad ni de estado privado.** El rival ejecuta un control antes de trabajar: pide la única operación que la política reserva al publicador, `COMPACT`, y el servicio la rechaza con `FORBIDDEN`; su faceta es su principal y nada que ponga en una petición lo convierte en el otro. Las tablas de capacidades que el kernel escribió al instalar dicen el resto: los dos trabajos tienen objetos distintos en cada ranura privada —área de preparación, señal, endpoint del runtime, región compartida, ámbito propio, buffer de prompt— y el mismo objeto en las ranuras de servicio, por facetas distintas; el motor recibió las invocaciones del uno por la faceta 1 y las del otro por la 2. El kernel no rechazó ninguna operación a ninguno de los dos.
+
+### `cancel`: cierre mientras el motor calcula
+
+Un trabajo `k5ask` lee la versión, dice en su señal que va a preguntar, y pide al motor cuatrocientos tokens sobre un prompt de la fixture. Un cuarto de segundo después el supervisor **cerca su ámbito**. Lo que sigue es del kernel y del motor, no del programa:
+
+- `scope.fenced` del ámbito `asker` con `threads=1 invocations_pending=1`: la barrera encontró la obligación del motor sobre él, y el `sched.bound` que la creó está antes en el registro.
+- El motor, que pregunta al kernel entre token y token si quien preguntó sigue ahí, lo notó con **18 de 400** tokens hechos —el número varía con la carga del anfitrión; lo que la puerta exige es que sea menor que lo pedido—, paró, y descargó la obligación: un `INVOCATION_REPLY` a un llamante cuya espera el kernel canceló se rechaza, así que la resuelve como `ABORTED`; `ipc.resolved` lo registra con `cancel=origin_fenced` o `origin_dead`, según el trabajo ya se haya ido cuando el motor mira, y las dos cosas son un llamante que ya no está.
+- Solo entonces el ámbito quedó quiescente y `scope.retired` lo liberó `from_state=quiescent`; hasta ese momento `SCOPE_RETIRE` había sido rechazado, y el supervisor anotó cada vez por qué —una invocación pendiente—.
+- El trabajo vio su llamada volver `CANCELLED` (−13) del kernel, lo anotó y se fue por su cuenta.
+
+Y el servicio siguió siendo el servicio: ningún `domain.terminated` del motor, estado final `runnable`, una sola carga de pesos; después de la barrera, un trabajo `k5pub` sin relación con el anterior le hizo sus dos preguntas —dos `sched.bound` cobrados a su propio ámbito—, validó y publicó, y el medio lleva su marca.
+
+Esto necesitó una corrección del motor: la primera versión contestaba con `INVOCATION_REPLY` también a un llamante cancelado, el kernel lo rechazaba con `STATE_CONFLICT` —no hay nadie esperando—, la obligación quedaba pendiente para siempre, y el ámbito cercado no se retiraba nunca: la ejecución terminó por plazo con `SCOPE_RETIRE` rechazado treinta segundos seguidos. `th_resolve` existe desde entonces en el runtime nativo, y la puerta exige el `ipc.resolved`.
+
+### Tres publicaciones que fallan, y el arranque que las recupera
+
+Cada uno de estos casos tiene dos tramos sobre un medio que se arrastra del primero al segundo, con el argumento de directiva en 1 para que el corte caiga en la publicación del trabajo y no en la de la semilla. En el segundo tramo el trabajo **encuentra sus identidades de petición gastadas** antes de pedir nada —recorre sus secuencias preguntando al servicio qué fue de cada una, exactamente como el cliente de K4— y después mira si su cambio ya está publicado.
+
+- **`cut-after-prepare`.** La directiva se aplica en `AFTER_PREPARE` con `STOP`; la llamada de publicación del trabajo vuelve con `PENDING` del kernel, sin respuesta, y el supervisor anota el corte. El medio del primer tramo no lleva la marca. En el segundo tramo el trabajo encuentra dos identidades gastadas y la última **abortada** por la recuperación, ve que su cambio no está, y hace **la vertical entera otra vez** —runtime, dos inferencias, herramienta con salida 0— antes de publicar la generación 2, que el medio lleva marcada.
+- **`cut-after-commit`.** `AFTER_COMMIT` con `STOP`: el commit es durable y nada después de él. Que el trabajo llegara a oír la respuesta antes de que la máquina terminara es una carrera que el corte no decide, y la puerta acepta las dos cosas; el medio decide, y lleva la versión. En el segundo tramo el trabajo encuentra dos identidades gastadas y la última **comprometida**, lee la versión, encuentra su marca, y **no publica nada**: ni runtime, ni motor, ni herramienta. La última raíz es la misma en los dos medios.
+- **`io-error-commit`.** `BEFORE_COMMIT` con `IO_ERROR`: el medio rechaza la escritura del commit. El servicio no publica sobre un estado que solo supone; la llamada vuelve `PENDING`, el trabajo lo anota, termina sin éxito, y el medio del primer tramo tiene una sola versión y sin marca. No hay corte: la máquina sigue y termina por su cuenta. El segundo tramo encuentra la identidad abortada y publica.
+
+Estos tres son los cortes de K4 dentro de la vertical de K5, con el runtime de lenguaje, la herramienta y el motor en el circuito; lo que no cambia es el mecanismo, y ese es el punto.
+
+### Lo que la matriz corrigió
+
+Cuatro cosas que la etapa `engine` sola no podía encontrar, porque tenía un trabajo:
+
+1. **Una tabla de treinta y dos ranuras.** Con dos trabajos, dos runtimes levantados y una herramienta construyéndose, el supervisor se quedó sin tabla de handles en mitad de un lanzamiento (`SCOPE_CREATE_SIGNAL` rechazado con `LIMIT_EXHAUSTED`). Ninguna corrección cambia el límite: el supervisor cierra cada handle en su último uso —su propia imagen, el dominio del servicio, el ámbito del driver, el endpoint del almacén después de bind, las señales de fin de los trabajos que vigila por el dominio, el endpoint del motor cuando todas las facetas están bound, la señal de trabajo y el candidato prestado de una herramienta en cuanto están instalados—.
+2. **Un canal de fallos por endpoint.** Un canal de fallos reserva una celda de la cola de su endpoint mientras el dominio vive, una cola tiene ocho, y los servicios, el motor, dos trabajos y dos runtimes ocupan siete: la herramienta que llegó después fue rechazada. El lanzador tiene ahora un endpoint de supervisión propio, que es donde debían reportar los dominios que construye.
+3. **Un lanzador de un solo runtime.** Servía a un trabajo; ahora sirve a varios por **la faceta que el kernel autenticó** en la petición y por nada que la petición diga: cada trabajo tiene una ranura —su región, su endpoint de host, su runtime mientras está levantado— y la petición de uno llega a su ranura y a ninguna otra.
+4. **El motor contestando a nadie.** Descrito arriba.
+
+Y una del checker de K4 que la regresión hizo visible: el daño «los dos corredores dicen que publicaron» reescribía el rechazo de `k4pub`, suponiendo que `k4pub` perdía; en una ejecución en la que gana, el daño no tocaba nada y el criterio «no lo notaba». Ahora reescribe el del perdedor, sea cual sea.
+
 ## Lo que la etapa `smoke` corrigió
 
 Dos defectos que compilar no encuentra:
@@ -201,14 +254,14 @@ Dos defectos que compilar no encuentra:
 
 ## Qué decide la puerta, y desde dónde
 
-`tools/check_k5.py` decide **34** criterios por separado; cuatro son las regresiones K1–K4 sobre el mismo binario de kernel. La disciplina es la misma en todos:
+`tools/check_k5.py` decide **44** criterios por separado; cuatro son las regresiones K1–K4 sobre el mismo binario de kernel, y diez son la matriz EXP-10. La disciplina es la misma en todos:
 
 - **Construir no es ejecutar.** Todo criterio sobre el lado nativo se decide desde los registros del kernel de un dominio que el kernel construyó, activó, planificó y cobró.
 - **Un invitado que imprime `PASS` no demuestra nada.** Donde un criterio lee una nota del propio programa, lo dice en su título, y el valor que lee es un número que el programa solo pudo producir haciendo el trabajo.
 
 El criterio decisivo no lo narra el invitado en absoluto: **el medio lleva una versión publicada cuyo módulo lleva la semilla de este run**, decodificada aquí por el módulo que genera el esquema de K4. El anfitrión eligió la semilla y la escribió en la imagen; un invitado que no hubiera hecho el trabajo no habría podido poner esos bytes ahí. Dos más se apoyan en la misma clase de evidencia: la herramienta leyó **exactamente** los bytes que el medio dice que la versión publicada enlaza (2913 de 2913), y el registro de validación durable nombra la identidad de herramienta que realmente corrió.
 
-`--self-test` daña la evidencia de **52** formas distintas —notas cambiadas y quitadas, sucesos del kernel quitados y añadidos, bytes del medio reescritos, respuestas de referencia reescritas— y un criterio nombrado tiene que notar cada una.
+`--self-test` daña la evidencia de **81** formas distintas —notas cambiadas y quitadas, sucesos del kernel quitados y añadidos, bytes del medio reescritos, respuestas de referencia reescritas, y en la matriz un tramo que no termina, una vinculación cobrada al ámbito equivocado, un rechazo que no fue por generación vieja, una barrera que no encontró obligación, una invocación cancelada resuelta como comprometida, un motor terminado, una recuperación que publica dos veces— y un criterio nombrado tiene que notar cada una.
 
 ## Lo que estas etapas **no** demuestran
 
@@ -217,20 +270,23 @@ El criterio decisivo no lo narra el invitado en absoluto: **el medio lleva una v
 - **La biblioteca estándar de C++ es la del anfitrión.** Se enlaza preconstruida, registrada por digest, y lo que se demuestra es que la clausura de lo que referencia está en `user/native`; no que esa biblioteca haya sido auditada.
 - **No hay comprobación de tipos.** La herramienta compila y ejecuta aserciones; `Check::Rust` de Thalyx compila un grafo de crates y nada aquí lo hace.
 - **No hay `cargo`, ni compilador de Rust, dentro del kernel.** La toolchain que produce estas imágenes es del anfitrión y el manifiesto lo dice; lo que se ejecuta nativamente es la imagen.
-- **Un solo trabajo.** Todavía no hay dos trabajos rivales, ni cancelación durante un servicio residente, ni un corte en publicación dentro de esta vertical: la comprobación de cancelación existe en el motor y no se ha ejercido.
+- **Dos trabajos rivales, no más.** La matriz muestra dos principales sobre un motor; no muestra un motor bajo carga de muchos, ni mide cuánto cuesta el intercalado. Eso es K6.
+- **La cancelación se observa entre tokens.** El motor pregunta al kernel entre token y token, así que una inferencia cancelada gasta hasta un token más de la reserva de cierre; no hay interrupción de un cómputo en curso, y no se afirma ninguna.
 - Sigue sin haber aislamiento de DMA, hardware físico ni durabilidad frente a corte de energía: los límites de K3 y K4 se heredan enteros.
 
 ## Digests de la ejecución registrada
 
 ```text
-thalyx-k5.img (engine) 57b3d3a198cf03f5188812ffc7a042cec415d35c5074a77bef8d9974f693a6f5
-kernel.elf             12f2482231093b706800f439b8530b9fb322c01b5d156d523441c75374fd3b3b
-nengine.elf            2b3d4221452cc79ac7d8008394b7f0dd21530f3addb6096a525b04401bee8d3e
-nhacer.elf             be0e36dd69a98a579dd308ceaa43f37ae420d0a8899d3278931c8ceeea62fb5c
+thalyx-k5.img (engine) 5066a02b9819aaf2854bb19db887e570dbbc17e0f62b51d80b57293f559f45ed
+kernel.elf             5637489e712df7061a226b2db9763bb5cc35a10ecdba2abacbc6c61f935a2c4e
+nengine.elf            6b12fbd48bc525d6a994f4f87a9d7b4fa85e094455889cb8b158a8b5692070a0
+nhacer.elf             9471b0585fbfea6959103a1a8c413aedeba6ff14366cd3e3027acd17f3d9df47
 ncheck.elf             b0e0fcc69e7c85e8b4341db09763092adcfd39a11671c4f42763a5059a4736ad
-libthalyx-native.a     e92f4a98822e1ae88e7bb31ceb6ac4507d01c704a1dacc542c5528906e89dc38
+libthalyx-native.a     ea33f76f291a48349c1e608e60efbe625abedc928f8cbab7d5811b7ea92927e0
 tiny.gguf              1b726566329f3aaca2f6d89ee0ec4efc31986936628ca6d68591077c857d3267
 llama.cpp b10665 tree  4e623890a44101bdc55674b90ab9eea9fce7ef5952ad2f904f58d32106e4f93c
 ```
+
+Cada caso de la matriz construye la misma imagen con su propia semilla en el plan; `build/k5-cases/<caso>/run.json` lleva el digest de la suya y el manifiesto entero.
 
 El binario de referencia `thalyx-engine` y el modelo se construyen en el anfitrión con `python3 tools/build_reference.py`; su `reference.json` registra compilador, banderas y paquetes. Es tooling del anfitrión y no evidencia.

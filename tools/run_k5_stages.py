@@ -25,11 +25,8 @@ STAGES = ["smoke", "surface", "work", "engine"]
 SEEDS = {"smoke": 0x5EED0001, "surface": 0x5EED0002, "work": 0x5EED0003, "engine": 0x5EED0004}
 NEEDS_MEDIUM = {"smoke": False, "surface": True, "work": True, "engine": True}
 
-# What the engine-stage program asks, as `user/k5work/src/content.rs` has it.
-# The Linux reference is asked the same, and the gate checks that the record
-# the native run published names exactly these.
-ENGINE_PROMPTS = ["hola hola", "hola"]
-ENGINE_PREDICT = 12
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import run_reference  # noqa: E402
 
 
 def run(argv: list[str]) -> None:
@@ -70,8 +67,9 @@ def main() -> int:
             # The other side of the comparison, on the host and labelled so:
             # Thalyx's own engine, unchanged, on the same model and prompts.
             cases = []
-            for prompt in ENGINE_PROMPTS:
-                cases += ["--case", prompt, str(ENGINE_PREDICT)]
+            for case in run_reference.fixture_cases():
+                for prompt in case["prompts"]:
+                    cases += ["--case", prompt, str(case["predict"])]
             run([sys.executable, str(ROOT / "tools/run_reference.py"), *cases,
                  "--out", str(out / "reference.json")])
         record = json.loads((out / "run.json").read_text())

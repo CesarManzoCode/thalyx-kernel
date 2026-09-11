@@ -13,6 +13,13 @@
 //! service, no engine, no device, no authority to build anything further. When
 //! it is done its scope is retired, and what it cost is read from the kernel's
 //! accounting rather than from what the tool says about itself.
+//!
+//! The launcher serves more than one work, and it tells them apart the way the
+//! state service tells principals apart: by the facet the kernel authenticated
+//! on the request, never by a field in it. Each work has a slot -- the region it
+//! shares with its runtime, the endpoint that runtime calls it on, and the
+//! runtime while one is up -- and a work's request reaches its own slot and no
+//! other. A work that asked to stop "the runtime" stops its runtime.
 
 use thalyx_abi::{ScopeLimits, domain_state, memory_state, right, status};
 use thalyx_user_k4fmt::Pod;
@@ -33,6 +40,36 @@ const TOOL_DEADLINE_NS: u64 = 60_000_000_000;
 /// How long one wait between checks is.
 const POLL_NS: u64 = 5_000_000;
 
+/// Works the launcher can serve at once. A slot per principal facet.
+pub const MAX_WORKS: usize = 2;
+
+/// What the launcher keeps for one work: the two objects a run of its language
+/// runtime needs, and the runtime while one is up.
+#[derive(Clone, Copy)]
+pub struct WorkSlot {
+    /// The region this work and its language runtime share, or zero when the
+    /// slot is not in use.
+    pub channel: u64,
+    /// The facet of the endpoint the runtime calls this work on.
+    pub host_facet: u64,
+    /// The runtime's domain while it is up, or zero.
+    pub runtime_domain: u64,
+    /// Its scope while it is up, or zero.
+    pub runtime_scope: u64,
+    /// Its done signal while it is up, or zero.
+    pub runtime_done: u64,
+}
+
+impl WorkSlot {
+    pub const EMPTY: WorkSlot = WorkSlot {
+        channel: 0,
+        host_facet: 0,
+        runtime_domain: 0,
+        runtime_scope: 0,
+        runtime_done: 0,
+    };
+}
+
 /// Everything the launcher needs to name.
 pub struct Launcher {
     /// The endpoint it receives launch requests on.
@@ -45,20 +82,13 @@ pub struct Launcher {
     pub runtime_image: u64,
     /// Where a domain's faults are reported.
     pub supervision: u64,
-    /// The region a work and its language runtime share.
-    pub channel: u64,
-    /// The endpoint the runtime calls its work on.
-    pub host_facet: u64,
-    /// Where a tool writes its report.
+    /// Where a tool writes its report. One page: tools run one at a time, and
+    /// the launcher reads the report before it answers.
     pub report: u64,
     /// The run's seed.
     pub seed: u64,
-    /// The runtime's domain while it is up, or zero.
-    pub runtime_domain: u64,
-    /// Its scope while it is up, or zero.
-    pub runtime_scope: u64,
-    /// Its done signal while it is up, or zero.
-    pub runtime_done: u64,
+    /// One slot per principal facet of the launch endpoint, facet one first.
+    pub slots: [WorkSlot; MAX_WORKS],
     /// Tools run so far.
     pub tools_run: u64,
     /// The digest of the tool's configuration, for the validation record.
@@ -108,16 +138,19 @@ fn run_tool(
     // which could change under it would be validating nothing in particular.
     let Ok(info) = k2::memory_query(candidate) else {
         k2::note(k5note::LAUNCH_NOT_SEALED, 1);
+        let _ = k2::cap_close(candidate);
         return refuse(launch_status::NOT_SEALED);
     };
     if info.state != memory_state::SEALED {
         k2::note(k5note::LAUNCH_NOT_SEALED, u64::from(info.state));
+        let _ = k2::cap_close(candidate);
         return refuse(launch_status::NOT_SEALED);
     }
 
     let Ok(scope) =
         k2::scope_create_child(launcher.system, tool_limits(cpu_window_ns), name16("tool"))
     else {
+        let _ = k2::cap_close(candidate);
         return refuse(launch_status::UNAVAILABLE);
     };
 
@@ -194,10 +227,19 @@ fn run_tool(
         },
     );
     let Some(built) = built else {
+        let _ = k2::cap_close(candidate);
         let _ = k2::scope_fence(scope);
         let _ = k2::scope_retire(scope);
         return refuse(launch_status::UNAVAILABLE);
     };
+    // A tool has no worker threads, so the signal they would have waited on
+    // is a grant nobody will name again, and the candidate the work lent is
+    // installed and mapped where the tool will read it. Both go now and not
+    // after the run, because the table this launcher shares with its
+    // supervisor is full at exactly the moment two works have runtimes up and
+    // one of them asks for a tool.
+    let _ = k2::cap_close(built.work_signal);
+    let _ = k2::cap_close(candidate);
     launcher.tools_run += 1;
     k2::note(k5note::LAUNCH_BUILT, TOOL_ID);
 
@@ -250,7 +292,6 @@ fn run_tool(
     }
     reply.exit_code = exit_code;
 
-    let _ = k2::cap_close(built.work_signal);
     let _ = k2::cap_close(built.done_signal);
     let _ = k2::domain_terminate(built.domain);
     let _ = k2::cap_close(built.domain);
@@ -272,10 +313,12 @@ fn run_tool(
 /// answer it.
 fn start_runtime(
     launcher: &mut Launcher,
+    which: usize,
     request: &LaunchRequest,
     cpu_window_ns: u64,
 ) -> LaunchReply {
-    if launcher.runtime_domain != 0 {
+    let slot = launcher.slots[which];
+    if slot.runtime_domain != 0 || slot.channel == 0 {
         return refuse(launch_status::UNAVAILABLE);
     }
     let Ok(scope) = k2::scope_create_child(
@@ -327,10 +370,10 @@ fn start_runtime(
     };
     let installs = [Install {
         slot: native::slot::SERVICE,
-        handle: launcher.host_facet,
+        handle: slot.host_facet,
         rights: right::INSPECT | right::ENDPOINT_CALL,
     }];
-    let channel = launcher.channel;
+    let channel = slot.channel;
     let built = launch::build_with(
         &recipe,
         &installs,
@@ -355,9 +398,9 @@ fn start_runtime(
         let _ = k2::scope_retire(scope);
         return refuse(launch_status::UNAVAILABLE);
     };
-    launcher.runtime_domain = built.domain;
-    launcher.runtime_scope = scope;
-    launcher.runtime_done = built.done_signal;
+    launcher.slots[which].runtime_domain = built.domain;
+    launcher.slots[which].runtime_scope = scope;
+    launcher.slots[which].runtime_done = built.done_signal;
     let _ = k2::cap_close(built.work_signal);
     k2::note(k5note::LAUNCH_BUILT, u64::from(native::role::HACER));
 
@@ -370,9 +413,10 @@ fn start_runtime(
 /// own before it is stopped.
 const RUNTIME_LEAVE_NS: u64 = 2_000_000_000;
 
-fn stop_runtime(launcher: &mut Launcher) -> LaunchReply {
+fn stop_runtime(launcher: &mut Launcher, which: usize) -> LaunchReply {
     let mut reply = LaunchReply::zeroed();
-    if launcher.runtime_domain == 0 {
+    let slot = launcher.slots[which];
+    if slot.runtime_domain == 0 {
         return reply;
     }
     // A runtime whose program has finished is still tearing its heap down when
@@ -381,31 +425,27 @@ fn stop_runtime(launcher: &mut Launcher) -> LaunchReply {
     // given a bounded moment to leave by itself -- it raises its done bit when
     // it does -- and is stopped by authority only if it has not. Either way it
     // is stopped: this bounds the wait, it does not make stopping optional.
-    let _ = k2::signal_wait(
-        launcher.runtime_done,
-        DONE_BIT,
-        k2::now_ns() + RUNTIME_LEAVE_NS,
-    );
-    if let Ok(info) = k2::domain_query(launcher.runtime_domain) {
+    let _ = k2::signal_wait(slot.runtime_done, DONE_BIT, k2::now_ns() + RUNTIME_LEAVE_NS);
+    if let Ok(info) = k2::domain_query(slot.runtime_domain) {
         reply.exit_code = info.exit_code as u32;
         if info.faults != 0 {
             reply.status = launch_status::FAULTED;
         }
     }
-    if let Ok(info) = k2::scope_query(launcher.runtime_scope) {
+    if let Ok(info) = k2::scope_query(slot.runtime_scope) {
         reply.cpu_ns = info.cpu_total_ns;
         reply.pages = info.memory_pages_used;
     }
-    let _ = k2::domain_terminate(launcher.runtime_domain);
-    let _ = k2::cap_close(launcher.runtime_domain);
-    let _ = k2::cap_close(launcher.runtime_done);
-    let _ = k2::scope_fence(launcher.runtime_scope);
-    let (_, drain) = k2::scope_retire(launcher.runtime_scope);
+    let _ = k2::domain_terminate(slot.runtime_domain);
+    let _ = k2::cap_close(slot.runtime_domain);
+    let _ = k2::cap_close(slot.runtime_done);
+    let _ = k2::scope_fence(slot.runtime_scope);
+    let (_, drain) = k2::scope_retire(slot.runtime_scope);
     k2::note(k5note::LAUNCH_RETIRED, drain.retained_pages);
-    let _ = k2::cap_close(launcher.runtime_scope);
-    launcher.runtime_domain = 0;
-    launcher.runtime_scope = 0;
-    launcher.runtime_done = 0;
+    let _ = k2::cap_close(slot.runtime_scope);
+    launcher.slots[which].runtime_domain = 0;
+    launcher.slots[which].runtime_scope = 0;
+    launcher.slots[which].runtime_done = 0;
     reply
 }
 
@@ -424,14 +464,19 @@ pub fn serve(launcher: &mut Launcher, cpu_window_ns: u64, deadline_ns: u64) -> b
     } else {
         0
     };
+    // The principal is the facet the kernel stamped, and its slot is the one
+    // bound in that position. A facet with no slot is a caller this launcher
+    // was never told about.
+    let which = (message.header.facet as usize).wrapping_sub(1);
     let reply = match request {
+        Some(_) if which >= MAX_WORKS => refuse(launch_status::UNAVAILABLE),
         Some(request) if request.op == launch_op::RUN_TOOL => {
             run_tool(launcher, &request, lent, cpu_window_ns)
         }
         Some(request) if request.op == launch_op::START_RUNTIME => {
-            start_runtime(launcher, &request, cpu_window_ns)
+            start_runtime(launcher, which, &request, cpu_window_ns)
         }
-        Some(request) if request.op == launch_op::STOP_RUNTIME => stop_runtime(launcher),
+        Some(request) if request.op == launch_op::STOP_RUNTIME => stop_runtime(launcher, which),
         Some(_) => {
             let mut reply = LaunchReply::zeroed();
             reply.tool_id = TOOL_ID;
@@ -440,10 +485,11 @@ pub fn serve(launcher: &mut Launcher, cpu_window_ns: u64, deadline_ns: u64) -> b
         }
         None => refuse(launch_status::NO_SUCH_TOOL),
     };
-    if lent != 0 {
-        // The handle the caller lent is charged to this domain's table until it
-        // is closed, and a launcher that kept one per call would run out of
-        // table rather than out of anything interesting.
+    // The handle the caller lent is charged to this domain's table until it is
+    // closed, and a launcher that kept one per call would run out of table
+    // rather than out of anything interesting. A tool run closes it itself, as
+    // soon as the tool has it.
+    if lent != 0 && !matches!(request, Some(request) if request.op == launch_op::RUN_TOOL) {
         let _ = k2::cap_close(lent);
     }
     let _ = k2::invocation_reply(invocation, u64::from(reply.status), reply.as_bytes());

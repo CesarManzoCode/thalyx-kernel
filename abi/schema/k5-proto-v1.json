@@ -210,6 +210,23 @@
         "value": 6,
         "doc": "The request was read and could not be served; the answer bytes are the reason, as Thalyx's engine reports one."
       }
+    ],
+    "Scenario": [
+      {
+        "name": "BASELINE",
+        "value": 1,
+        "doc": "One work carries the vertical through."
+      },
+      {
+        "name": "RIVALS",
+        "value": 2,
+        "doc": "Two works over the same version, both asking the same engine, both publishing against the same generation. One is refused and starts again over the version that won."
+      },
+      {
+        "name": "CANCEL",
+        "value": 3,
+        "doc": "A work asks the engine for a long inference and its scope is closed while the engine computes for it; a second, unrelated work then uses the same engine."
+      }
     ]
   },
   "structs": [
@@ -835,6 +852,68 @@
     "TOOL_SUM": {
       "value": 21014,
       "doc": "The digest the tool computed over the bytes it actually read."
+    },
+    "WORK_RESUMED": {
+      "value": 21015,
+      "doc": "After a cut, the work asked the service what became of each request identity it may have spent. Value: identities spent, with the last outcome in bits 8 and up."
+    },
+    "WORK_RECOVERED": {
+      "value": 21016,
+      "doc": "The version this work would have published is already published with its change in it: nothing to redo. Value: the generation."
+    },
+    "WORK_ASKING": {
+      "value": 21017,
+      "doc": "The work is about to ask the engine for a long inference and has raised its signal to say so. Value: tokens asked for."
+    },
+    "WORK_REBASED": {
+      "value": 21018,
+      "doc": "A publication was refused for a stale generation and the work started again over the version that won. Value: the generation it now stands on."
+    },
+    "PROFILE_REFUSED": {
+      "value": 21019,
+      "doc": "A check the program asked for needs a tool this backend does not have, and the launcher refused it rather than answering with a weaker one. Value: the tool identity asked for."
+    }
+  },
+  "fixtures": {
+    "comment": [
+      "What the engine is asked, on both backends. The native program reads",
+      "these through the Rust module, the Linux reference and the gate read",
+      "this file, so the two sides of EXP-11's comparison are asked one",
+      "question from one source. `predict` is tokens; the sampler is greedy",
+      "(temperature zero) on both sides, the context is `context_tokens`, and",
+      "the engine computes with `compute_threads` threads."
+    ],
+    "engine": {
+      "context_tokens": 512,
+      "compute_threads": 1,
+      "cases": [
+        {
+          "name": "publisher",
+          "prompts": [
+            "hola hola",
+            "hola"
+          ],
+          "predict": 12,
+          "doc": "The publisher's two prompts, in order."
+        },
+        {
+          "name": "rival",
+          "prompts": [
+            "adios",
+            "adios adios"
+          ],
+          "predict": 12,
+          "doc": "The rival's two prompts, different from the publisher's so an answer given to the wrong work would be visible."
+        },
+        {
+          "name": "long",
+          "prompts": [
+            "hola hola hola hola hola hola"
+          ],
+          "predict": 400,
+          "doc": "One inference long enough to be cancelled while it runs: about a second of generation on the emulated processor, against a closure that comes a quarter of a second in."
+        }
+      ]
     }
   }
 }

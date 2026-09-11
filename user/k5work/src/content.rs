@@ -21,7 +21,21 @@ pub const NAME_MODULE: &[u8] = b"module.js";
 pub const NAME_PROGRAM: &[u8] = b"program.js";
 
 /// The mark the seed version carries and the work replaces.
+///
+/// Both works of the `rivals` scenario replace this same mark, each with a
+/// mark of its own. That is what makes them rivals rather than two works: the
+/// module's own tests hold only once the mark is gone, so neither can leave it
+/// to the other, and the one whose publication is refused starts again over
+/// the version that won, finds the placeholder already replaced, and has
+/// nothing it can honestly do but abandon -- with the evidence of the attempt
+/// published nowhere and recorded everywhere.
 pub const ZERO_MARK: &[u8] = b"0000000000000000";
+
+/// The name the publisher records what the model said under.
+pub const NAME_MODEL_RECORD: &[u8] = b"model.json";
+
+/// The name the rival records what the model said under.
+pub const NAME_RIVAL_RECORD: &[u8] = b"rival.json";
 
 /// Bytes of a mark.
 pub const MARK_LEN: usize = 16;
@@ -101,42 +115,41 @@ const verdict = thalyx.mustPass(thalyx.validate({ check: "program" }), "the tool
 return { mark: state.mark, changed: changed.count, checks: verdict.checks_run, sum: sum >>> 0 };
 "#;
 
-/// The prompts the engine-stage program sends, in order. The host reference is
-/// asked the same two, and the gate checks the published record names these.
-pub const ENGINE_PROMPTS: [&str; 2] = ["hola hola", "hola"];
-/// Tokens each answer may run to.
-pub const ENGINE_PREDICT: u32 = 12;
-
 /// The program when a resident engine is there to ask.
 ///
 /// The same change as [`PROGRAM`] -- read the version, ask what a name is,
-/// mark the module, check the change, have a real tool decide -- and before
-/// validating it asks the model twice and puts what the model said into the
-/// version it publishes. Two answers from one engine are how residency is
-/// shown rather than claimed: the second one says it was the second, and that
-/// the weights were loaded once.
+/// mark a file, check the change, have a real tool decide -- and before
+/// validating it asks the model and puts what the model said into the version
+/// it publishes. Two answers from one engine are how residency is shown rather
+/// than claimed: the second one says it was the second, and that the weights
+/// were loaded once.
+///
+/// What it edits, what it records under, and what it asks the model come from
+/// `estado`: the work's own intent, which the program reads rather than
+/// carries. The publisher and the rival run this same program over different
+/// intents, which is what makes them rivals rather than two programs.
 pub const PROGRAM_ENGINE: &[u8] = br#""use strict";
 const state = thalyx.mustWork(thalyx.call("estado", []), "read the published version");
-const before = thalyx.mustWork(thalyx.call("leer", ["module.js"]), "read the module");
-thalyx.assert(before.text.indexOf(state.zero_mark) >= 0, "the seed version is unmarked");
+const before = thalyx.mustWork(thalyx.call("leer", [state.target]), "read the target");
+thalyx.assert(before.text.indexOf(state.placeholder) >= 0, "the target still has its placeholder");
 
 const context = thalyx.mustWork(thalyx.call("contexto", ["checksum"]), "ask what checksum is");
 thalyx.assert(context.uses >= 2, "checksum is used more than once", context);
 
 thalyx.mustWork(
-  thalyx.call("sustituir", ["module.js", state.zero_mark, state.mark]),
-  "replace the mark"
+  thalyx.call("sustituir", [state.target, state.placeholder, state.mark]),
+  "replace the placeholder"
 );
-const after = thalyx.mustWork(thalyx.call("leer", ["module.js"]), "read it back");
-thalyx.assert(after.text.indexOf(state.mark) >= 0, "the mark is in the module");
-thalyx.assert(after.text.indexOf(state.zero_mark) < 0, "the old mark is gone");
+const after = thalyx.mustWork(thalyx.call("leer", [state.target]), "read it back");
+thalyx.assert(after.text.indexOf(state.mark) >= 0, "the mark is in the target");
+thalyx.assert(after.text.indexOf(state.placeholder) < 0, "the placeholder is gone");
 
-const prompts = ["hola hola", "hola"];
-const first = thalyx.model(prompts[0], 12);
+const prompts = state.prompts;
+const first = thalyx.model(prompts[0], state.predict);
 thalyx.assert(first.ok === true, "the engine answered", first);
-const second = thalyx.model(prompts[1], 12);
+const second = thalyx.model(prompts[1], state.predict);
 thalyx.assert(second.ok === true, "the engine answered again", second);
-thalyx.assert(second.served === first.served + 1, "the same engine served both", second);
+thalyx.assert(second.served > first.served, "the same engine served both, in order", second);
 thalyx.assert(second.load_ns === first.load_ns, "and loaded its weights once", second);
 
 const answers = [first, second].map((a, i) => ({
@@ -150,12 +163,12 @@ const answers = [first, second].map((a, i) => ({
   served: a.served,
 }));
 thalyx.mustWork(
-  thalyx.call("escribir", ["model.json", JSON.stringify({ engine: "llama.cpp b10665", answers: answers })]),
+  thalyx.call("escribir", [state.record, JSON.stringify({ engine: "llama.cpp b10665", answers: answers })]),
   "record what the model said"
 );
 
 const changed = thalyx.changed();
-thalyx.assert(changed.count === 2, "the module and the record changed", changed);
+thalyx.assert(changed.count === 2, "the target and the record changed", changed);
 
 const verdict = thalyx.mustPass(thalyx.validate({ check: "program" }), "the tool passed");
 return { mark: state.mark, changed: changed.count, checks: verdict.checks_run, served: second.served };

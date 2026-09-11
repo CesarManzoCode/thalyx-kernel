@@ -320,7 +320,7 @@
         { "name": "magic", "type": "u8[8]" },
         { "name": "version", "type": "u32" },
         { "name": "fault_point", "type": "u32" },
-        { "name": "fault_arg", "type": "u64" },
+        { "name": "fault_arg", "type": "u64", "doc": "At BEFORE_OBJECT, the ordinal of the object. At every other point, how many times the point is passed before the directive applies: zero is the first publication, one the second. Added in K5, whose runs publish a seed version before the one a cut is about; K4's cases all use zero and are unchanged." },
         { "name": "fault_mode", "type": "u32" },
         { "name": "leg", "type": "u32" },
         { "name": "scenario", "type": "u64" },

@@ -131,6 +131,26 @@ def generate_rust(schema: dict) -> str:
             out.append(f"    pub const {item['name']}: u32 = {item['value']};")
         out.append("}")
         out.append("")
+    engine = schema.get("fixtures", {}).get("engine")
+    if engine:
+        out.append("/// What the engine is asked, on both backends.")
+        out.append("///")
+        out.append("/// From the schema's fixture, so the native program, the Linux reference")
+        out.append("/// and the gate ask one question from one source.")
+        out.append("pub mod engine_case {")
+        out.append("    /// Context the engine builds, in tokens.")
+        out.append(f"    pub const CONTEXT_TOKENS: u64 = {engine['context_tokens']};")
+        out.append("    /// Threads the engine computes a graph with.")
+        out.append(f"    pub const COMPUTE_THREADS: u64 = {engine['compute_threads']};")
+        for case in engine["cases"]:
+            name = case["name"].upper()
+            prompts = ", ".join(json.dumps(prompt) for prompt in case["prompts"])
+            out.extend(doc(case.get("doc"), "    ", "///"))
+            out.append(f"    pub const {name}_PROMPTS: [&str; {len(case['prompts'])}] = [{prompts}];")
+            out.append(f"    /// Tokens each answer of the `{case['name']}` case may run to.")
+            out.append(f"    pub const {name}_PREDICT: u32 = {case['predict']};")
+        out.append("}")
+        out.append("")
     for definition in schema["structs"]:
         fields, size, align = layout(definition)
         out.extend(doc(definition.get("doc"), "", "///"))
@@ -199,6 +219,12 @@ def generate_c(schema: dict) -> str:
             if item.get("doc"):
                 out.append(f"/* {item['doc']} */")
             out.append(f"#define K5_{prefix}_{item['name']} {item['value']}u")
+        out.append("")
+    engine = schema.get("fixtures", {}).get("engine")
+    if engine:
+        out.append("/* What the engine is asked, on both backends: the fixture's parameters. */")
+        out.append(f"#define K5_ENGINE_CONTEXT_TOKENS {engine['context_tokens']}u")
+        out.append(f"#define K5_ENGINE_COMPUTE_THREADS {engine['compute_threads']}u")
         out.append("")
     for definition in schema["structs"]:
         fields, size, align = layout(definition)

@@ -260,13 +260,22 @@ bool serve_one(Resident &r,
     return true;
 }
 
+// Answers, or -- when there is nobody left to answer -- discharges. A caller
+// whose scope was closed has had its wait cancelled by the kernel, and a reply
+// to it is refused; the obligation is this engine's until it says what became
+// of the request, and what became of it is that it was abandoned.
 void answer_with(uint64_t invocation, const k5_engine_reply &reply)
 {
-    th_payload body;
-    std::memset(&body, 0, sizeof(body));
-    std::memcpy(body.bytes, &reply, sizeof(reply));
-    body.len = sizeof(reply);
-    th_reply(invocation, reply.status, &body);
+    if (reply.status != K5_ENGINE_STATUS_CANCELLED) {
+        th_payload body;
+        std::memset(&body, 0, sizeof(body));
+        std::memcpy(body.bytes, &reply, sizeof(reply));
+        body.len = sizeof(reply);
+        if (th_reply(invocation, reply.status, &body) == THALYX_STATUS_OK) {
+            return;
+        }
+    }
+    th_resolve(invocation, THALYX_OUTCOME_ABORTED, reply.generated);
 }
 
 void serve_request(Resident &r, th_message &message)

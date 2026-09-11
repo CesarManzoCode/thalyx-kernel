@@ -28,9 +28,13 @@ mod tree;
 mod verbs;
 
 use thalyx_abi::{boot_handle, right, status};
-use thalyx_user_k4fmt::generated::{Policy, Validation, object_type, store_status};
+use thalyx_user_k4fmt::generated::{
+    Policy, StoreRequest, Validation, object_type, result_outcome, store_op, store_status,
+};
 use thalyx_user_k4fmt::{self as k4, Binding, Pod};
-use thalyx_user_k5pkg::proto::{WorkConfig, note, work_addr, work_role, work_slot};
+use thalyx_user_k5pkg::proto::{
+    WorkConfig, bit, engine_case, note, work_addr, work_role, work_slot,
+};
 use thalyx_user_k5pkg::thalyx::verdict;
 use thalyx_user_rt::k2::{self, report};
 use thalyx_user_rt::{self as rt, entry_on_stack};
@@ -63,6 +67,9 @@ const FP_BASE: u64 = 0x5B21_7777_1111_9001;
 
 /// The tool identity the validation policy requires.
 const TOOL_ID: u64 = 0x4B35_2001;
+
+/// How long a rival waits for the publisher's seed version.
+const SEED_WAIT_NS: u64 = 60_000_000_000;
 
 /// The coverage a validation must claim, and the coverage the tool reports.
 const MIN_COVERAGE_PPM: u64 = 900_000;
@@ -473,6 +480,7 @@ fn run_publisher(store: &mut Store, config: &WorkConfig) -> bool {
         generation: state.generation,
         root: state.digest0,
         seed: config.seed,
+        role: config.role,
         open: true,
         workspace,
     };
@@ -587,6 +595,47 @@ fn run_publisher(store: &mut Store, config: &WorkConfig) -> bool {
     published
 }
 
+/// Finds the first request identity this principal has not spent.
+///
+/// A work that was cut has to find out what became of what it may already have
+/// asked for before it asks for anything else. Guessing is not available: a
+/// request identity with a durable result is answered with that result
+/// forever, and reusing one for different inputs is a conflict rather than a
+/// retry. So the work walks its own sequences forward, asking the service
+/// about each, and starts again after the last one that is spent -- whether it
+/// committed, was aborted by recovery, or is one the store cannot say about.
+/// Only `NEVER_SEEN` is free.
+fn resume_after(store: &mut Store, limit: u64) -> u64 {
+    let mut spent = 0u64;
+    let mut outcome = result_outcome::NEVER_SEEN;
+    while spent < limit {
+        let Some(reply) = store.result(spent + 1) else {
+            break;
+        };
+        if reply.outcome == result_outcome::NEVER_SEEN {
+            break;
+        }
+        spent += 1;
+        outcome = reply.outcome;
+    }
+    k2::note(note::WORK_RESUMED, spent | (u64::from(outcome) << 8));
+    spent
+}
+
+/// Whether the published version already carries this work's change.
+///
+/// After a cut the answer decides everything: a change that is published is
+/// not redone -- the retry is answered from the durable result, as K4's
+/// evidence puts it -- and a change that is not is the whole vertical again.
+fn already_published(workspace: &Workspace, config: &WorkConfig) -> bool {
+    let mut mark = [0u8; content::MARK_LEN];
+    verbs::mark_for(config.seed, config.role, &mut mark);
+    let intent = verbs::intent_of(config.role);
+    workspace
+        .read(intent.target)
+        .is_some_and(|bytes| tree::find_bytes(bytes, &mark).is_some())
+}
+
 /// The vertical, driven by a program the language runtime executes.
 ///
 /// The difference from the `surface` stage is not the verb surface -- that is
@@ -594,30 +643,137 @@ fn run_publisher(store: &mut Store, config: &WorkConfig) -> bool {
 /// to publish*. Here a program does the first, and a real tool run in a domain
 /// of its own does the second: the publication happens only when that tool
 /// exited zero over the exact candidate the record names.
+///
+/// Two things around it are what EXP-10 asks for. The work may be starting
+/// again after a cut, in which case it first finds its spent request
+/// identities and looks at whether its change is already published. And its
+/// publication may be refused because another work published first, in which
+/// case it starts the whole thing again -- context, program, tool -- over the
+/// version that won, once: a second refusal is a fact the run records.
 fn run_with_runtime(store: &mut Store, config: &WorkConfig) -> bool {
     let Some(state) = store.query() else {
         k2::note(note::WORK_UNEXPECTED, 0x0E00);
         return false;
     };
     k2::note(note::VERSION_SEEN, state.generation);
-    if state.generation == 0 && publish_seed(store, config).is_none() {
+    if config.leg > 1 {
+        store.sequence = resume_after(store, 8);
+    }
+    if config.role == work_role::RIVAL {
+        // A rival is a second work over a published version. It waits for
+        // one: the seed is the publisher's to publish, and a rival that raced
+        // it for the seed would be racing the fixture rather than the work.
+        let by = k2::now_ns() + SEED_WAIT_NS;
+        loop {
+            let Some(now) = store.query() else {
+                k2::note(note::WORK_UNEXPECTED, 0x0E04);
+                return false;
+            };
+            if now.generation >= 1 {
+                break;
+            }
+            if k2::now_ns() > by {
+                k2::note(note::WORK_UNEXPECTED, 0x0E05);
+                return false;
+            }
+            let _ = k2::signal_wait(
+                boot_handle(work_slot::DONE),
+                1 << 63,
+                k2::now_ns() + 20_000_000,
+            );
+        }
+        probe_authority(store);
+    } else if state.generation == 0 && publish_seed(store, config).is_none() {
         return false;
     }
-    let Some(state) = store.query() else {
-        k2::note(note::WORK_UNEXPECTED, 0x0E01);
-        return false;
-    };
-    let workspace = workspace();
-    *workspace = Workspace::new();
-    let Some(entries) = load_version(store, state.digest0, workspace) else {
-        k2::note(note::WORK_UNEXPECTED, 0x0E02);
-        return false;
-    };
-    k2::note(
-        note::VERSION_SEEN,
-        state.generation | ((entries as u64) << 32),
-    );
 
+    let mut attempts = 0u32;
+    loop {
+        attempts += 1;
+        let Some(state) = store.query() else {
+            k2::note(note::WORK_UNEXPECTED, 0x0E01);
+            return false;
+        };
+        let workspace = workspace();
+        *workspace = Workspace::new();
+        let Some(entries) = load_version(store, state.digest0, workspace) else {
+            k2::note(note::WORK_UNEXPECTED, 0x0E02);
+            return false;
+        };
+        k2::note(
+            note::VERSION_SEEN,
+            state.generation | ((entries as u64) << 32),
+        );
+
+        if config.leg > 1 && already_published(workspace, config) {
+            // The cut fell after the commit: the version exists and this is
+            // what recovery adopted. There is nothing to redo, and redoing it
+            // would publish a second version that says the same thing.
+            k2::note(note::WORK_RECOVERED, state.generation);
+            k2::note(note::FINAL_GENERATION, state.generation);
+            k2::note(note::EVIDENCE_READ, (entries as u64) | (1 << 32));
+            return true;
+        }
+
+        match attempt_with_runtime(store, config, state.generation, state.digest0) {
+            Attempt::Published => return true,
+            Attempt::Failed => return false,
+            Attempt::Abandoned(went_through) => return went_through,
+            Attempt::Stale if attempts < 2 => {
+                // Another work published first. What this work did is done
+                // against a version that is no longer the one, so it is not
+                // reused: the workspace is dropped and the vertical starts
+                // again over what is published now.
+                if let Some(now) = store.query() {
+                    k2::note(note::WORK_REBASED, now.generation);
+                }
+            }
+            Attempt::Stale => return false,
+        }
+    }
+}
+
+/// A control the rival runs before it does anything: it asks the service for
+/// the one operation its policy reserves to the publisher, and expects to be
+/// refused. Its facet is its principal; nothing it can put in a request makes
+/// it the other work, and the service is what says so.
+fn probe_authority(store: &mut Store) {
+    match store.call(
+        &StoreRequest {
+            op: store_op::COMPACT,
+            ..StoreRequest::zeroed()
+        },
+        0,
+    ) {
+        Answer::Reply(reply) if reply.status == store_status::FORBIDDEN => {
+            k2::note(
+                report::REFUSED_AS_EXPECTED,
+                u64::from(store_status::FORBIDDEN),
+            );
+        }
+        Answer::Reply(reply) => k2::note(report::NOT_REFUSED, u64::from(reply.status)),
+        Answer::Outcome(code) | Answer::Gone(code) => {
+            k2::note(report::NOT_REFUSED, (-code) as u64 | (1 << 32));
+        }
+    }
+}
+
+/// What one attempt at the vertical came to.
+enum Attempt {
+    Published,
+    Failed,
+    Abandoned(bool),
+    Stale,
+}
+
+/// One attempt: the program, the tool, the publication, against `generation`.
+fn attempt_with_runtime(
+    store: &mut Store,
+    config: &WorkConfig,
+    generation: u64,
+    root: [u8; 32],
+) -> Attempt {
+    let workspace = workspace();
     // The program comes out of the published version, like everything else the
     // work is about. In Thalyx it arrives from an inference; here it is content
     // under a name, and the evidence says which of the two happened.
@@ -629,15 +785,16 @@ fn run_with_runtime(store: &mut Store, config: &WorkConfig) -> bool {
         }
         None => {
             k2::note(note::WORK_UNEXPECTED, 0x0E03);
-            return false;
+            return Attempt::Failed;
         }
     };
 
     let mut driver = hacer::Driver {
         context: verbs::Context {
-            generation: state.generation,
-            root: state.digest0,
+            generation,
+            root,
             seed: config.seed,
+            role: config.role,
             open: true,
             workspace,
         },
@@ -685,20 +842,34 @@ fn run_with_runtime(store: &mut Store, config: &WorkConfig) -> bool {
         if let Some(final_state) = store.query() {
             k2::note(note::FINAL_GENERATION, final_state.generation);
         }
-        return went_through
-            || outcome.metrics.finish == thalyx_user_k5pkg::proto::finish::ASSERTION;
+        return Attempt::Abandoned(
+            went_through || outcome.metrics.finish == thalyx_user_k5pkg::proto::finish::ASSERTION,
+        );
     }
 
     let Some(candidate) = freeze(
         store,
         driver.context.workspace,
-        state.generation,
-        state.generation,
+        generation,
+        generation,
         verdict::PASSED,
         true,
         (outcome.tool_id, outcome.tool_config_digest),
     ) else {
-        return false;
+        // A freeze forks over the version the work is against, and the service
+        // refuses a fork over a generation that is no longer the published one.
+        // That is the same refusal a publication would have met, one step
+        // earlier: the version moved under this work.
+        if let Some(now) = store.query()
+            && now.generation != generation
+        {
+            k2::note(
+                note::PUBLISH_REFUSED,
+                u64::from(store_status::GENERATION_STALE),
+            );
+            return Attempt::Stale;
+        }
+        return Attempt::Failed;
     };
     // The tree the tool was given, and the tree the service encoded. A program
     // that changed the workspace after validating it produces two different
@@ -712,7 +883,7 @@ fn run_with_runtime(store: &mut Store, config: &WorkConfig) -> bool {
     let sequence = store.sequence;
     let published = match store.publish(
         sequence,
-        state.generation,
+        generation,
         candidate.root,
         candidate.policy,
         candidate.validation,
@@ -723,6 +894,10 @@ fn run_with_runtime(store: &mut Store, config: &WorkConfig) -> bool {
             k2::note(note::PUBLISHED, reply.generation);
             k2::note(note::ROOT_PREFIX, prefix(&candidate.root));
             true
+        }
+        Answer::Reply(reply) if reply.status == store_status::GENERATION_STALE => {
+            k2::note(note::PUBLISH_REFUSED, u64::from(reply.status));
+            return Attempt::Stale;
         }
         Answer::Reply(reply) => {
             k2::note(note::PUBLISH_REFUSED, u64::from(reply.status));
@@ -737,12 +912,13 @@ fn run_with_runtime(store: &mut Store, config: &WorkConfig) -> bool {
     if published && let Some(final_state) = store.query() {
         k2::note(note::FINAL_GENERATION, final_state.generation);
         let mut mark = [0u8; content::MARK_LEN];
-        content::mark_of(config.seed, &mut mark);
+        verbs::mark_for(config.seed, config.role, &mut mark);
+        let intent = verbs::intent_of(config.role);
         let check = driver.context.workspace;
         *check = Workspace::new();
         if let Some(count) = load_version(store, final_state.digest0, check) {
             let marked = check
-                .read(content::NAME_MODULE)
+                .read(intent.target)
                 .is_some_and(|bytes| tree::find_bytes(bytes, &mark).is_some());
             k2::note(
                 note::EVIDENCE_READ,
@@ -750,7 +926,57 @@ fn run_with_runtime(store: &mut Store, config: &WorkConfig) -> bool {
             );
         }
     }
-    published
+    if published {
+        Attempt::Published
+    } else {
+        Attempt::Failed
+    }
+}
+
+/// The work that is closed while the engine computes for it.
+///
+/// It reads the version it is against, says on its signal that it is about to
+/// ask, and asks the engine for more tokens than anybody will wait for. Its
+/// supervisor closes its scope while that runs. What happens then is the
+/// kernel's and the engine's to do, not this program's: the call comes back
+/// `CANCELLED`, or does not come back at all, and the work leaves.
+fn run_asker(store: &mut Store, config: &WorkConfig) -> bool {
+    let Some(state) = store.query() else {
+        k2::note(note::WORK_UNEXPECTED, 0x0E00);
+        return false;
+    };
+    k2::note(note::VERSION_SEEN, state.generation);
+    let workspace = workspace();
+    *workspace = Workspace::new();
+    let mut driver = hacer::Driver {
+        context: verbs::Context {
+            generation: state.generation,
+            root: state.digest0,
+            seed: config.seed,
+            role: config.role,
+            open: false,
+            workspace,
+        },
+        launcher: 0,
+        inbound: 0,
+        engine: boot_handle(work_slot::ENGINE),
+        prompt: boot_handle(work_slot::PROMPT),
+        seed: config.seed,
+        validated_tree: [0u8; 32],
+    };
+    let predict = u64::from(engine_case::LONG_PREDICT);
+    k2::note(note::WORK_ASKING, predict);
+    let _ = k2::signal_raise(boot_handle(work_slot::DONE), bit::WORK_ASKING);
+    let written = engine::answer(
+        &mut driver,
+        engine_case::LONG_PROMPTS[0].as_bytes(),
+        predict,
+        answer_buffer(),
+    );
+    let answer = &answer_buffer()[..written];
+    let cancelled = tree::find_bytes(answer, b"\"error\":\"cancelled\"").is_some();
+    k2::note(note::CANCELLED, u64::from(cancelled));
+    cancelled
 }
 
 fn run() -> ! {
@@ -765,8 +991,11 @@ fn run() -> ! {
 
     let done = boot_handle(work_slot::DONE);
     let ok = match config.role {
-        work_role::PUBLISHER if config.uses_runtime != 0 => run_with_runtime(&mut store, &config),
+        work_role::PUBLISHER | work_role::RIVAL if config.uses_runtime != 0 => {
+            run_with_runtime(&mut store, &config)
+        }
         work_role::PUBLISHER => run_publisher(&mut store, &config),
+        work_role::ASKER => run_asker(&mut store, &config),
         other => {
             k2::note(note::WORK_UNEXPECTED, u64::from(other));
             false

@@ -908,7 +908,7 @@ pub struct HarnessDirective {
     pub version: u32,
     /// Schema field `fault_point`, little-endian `u32`.
     pub fault_point: u32,
-    /// Schema field `fault_arg`, little-endian `u64`.
+    /// At BEFORE_OBJECT, the ordinal of the object. At every other point, how many times the point is passed before the directive applies: zero is the first publication, one the second. Added in K5, whose runs publish a seed version before the one a cut is about; K4's cases all use zero and are unchanged.
     pub fault_arg: u64,
     /// Schema field `fault_mode`, little-endian `u32`.
     pub fault_mode: u32,

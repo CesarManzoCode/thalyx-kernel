@@ -92,6 +92,20 @@ int64_t th_reply(uint64_t invocation, uint64_t result, const th_payload *body)
     return r.status;
 }
 
+int64_t th_resolve(uint64_t invocation, uint32_t outcome, uint64_t detail)
+{
+    thalyx_resolve_request_t request;
+    memset(&request, 0, sizeof(request));
+    request.outcome = outcome;
+    request.detail = detail;
+
+    th_desc d;
+    th_desc_begin(&d, THALYX_OP_INVOCATION_RESOLVE);
+    th_desc_put(&d, TH_BODY, &request, sizeof(request));
+    th_result r = th_op(invocation, THALYX_OP_INVOCATION_RESOLVE, &d, 0);
+    return r.status;
+}
+
 int64_t th_memory_read(uint64_t memory, uint64_t offset, void *into, uint64_t len)
 {
     uint8_t *out = into;

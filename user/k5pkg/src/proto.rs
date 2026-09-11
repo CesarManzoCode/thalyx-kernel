@@ -17,8 +17,8 @@ pub use crate::generated::{
     CANDIDATE_MAX, CHANNEL_ANSWER_MAX, CHANNEL_ANSWER_OFFSET, CHANNEL_PROGRAM_MAX,
     CHANNEL_PROGRAM_OFFSET, CHANNEL_REQUEST_MAX, CHANNEL_REQUEST_OFFSET, CandidateEntry,
     CandidateHeader, EngineReply, EngineRequest, HostReply, HostRequest, LaunchReply,
-    LaunchRequest, PROMPT_MAX, RunMetrics, ToolReport, engine_op, engine_status, finish, host_op,
-    launch_op, launch_status, note, verdict,
+    LaunchRequest, PROMPT_MAX, RunMetrics, ToolReport, engine_case, engine_op, engine_status,
+    finish, host_op, launch_op, launch_status, note, scenario, verdict,
 };
 
 /// Capability slots the supervisor fills in a work domain.
@@ -50,8 +50,6 @@ pub mod work_slot {
     pub const ENGINE: u32 = 10;
     /// The buffer this work lends to the engine, and nobody else's.
     pub const PROMPT: u32 = 11;
-    /// The signal the supervisor raises to ask this work to stop.
-    pub const CANCEL: u32 = 12;
 }
 
 /// Where a work domain finds its mappings.
@@ -80,6 +78,10 @@ pub mod work_addr {
 pub mod bit {
     /// A work domain has finished its script.
     pub const WORK_DONE: u64 = 1 << 1;
+    /// A work domain is about to ask the engine for a long inference. Raised
+    /// on its done signal, so a supervisor that means to close it while the
+    /// engine computes for it knows when that is.
+    pub const WORK_ASKING: u64 = 1 << 2;
     /// A work domain is asked to stop what it is doing.
     pub const CANCEL: u64 = 1 << 6;
     /// The engine has loaded its weights and is admitting requests.
@@ -97,6 +99,9 @@ pub mod work_role {
     pub const FAILING: u32 = 3;
     /// A work that abandons on purpose after changing its workspace.
     pub const ABANDONER: u32 = 4;
+    /// A work that asks the engine for one long inference and is closed by
+    /// its supervisor while the engine computes for it. It never publishes.
+    pub const ASKER: u32 = 5;
 }
 
 /// The script a work follows, written by the supervisor from the run's plan.

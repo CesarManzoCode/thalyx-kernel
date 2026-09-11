@@ -122,6 +122,20 @@ NOTE = {
     "root_prefix": 0x5214,
     "tool_read": 0x5215,
     "tool_sum": 0x5216,
+    "work_resumed": 0x5217,
+    "work_recovered": 0x5218,
+    "work_asking": 0x5219,
+    "work_rebased": 0x521A,
+    "profile_refused": 0x521B,
+    # the supervisor, about a closed work
+    "work_cancelled": 0x5025,
+    "work_draining": 0x5026,
+    "work_retired": 0x5027,
+    # the state service's scaffolding
+    "fault_applied": 0x4022,
+    # the shared report vocabulary of user/rt
+    "refused_as_expected": 0x2007,
+    "not_refused": 0x2008,
     # the language runtime
     "program_compiled": 0x5300,
     "program_refused": 0x5301,
@@ -175,12 +189,14 @@ NOTE = {
     "engine_model_digest": 0x5512,
 }
 
-# What the engine-stage program asks, as the stage runner and the program have
-# it; the gate checks the published record against these and against what the
-# Linux reference answered for them.
-import run_k5_stages  # noqa: E402
+# What the engine is asked, from the fixture in the schema: the native program
+# reads it through the generated Rust module, the Linux reference reads the
+# schema, and so does this gate, so the two sides of the comparison and the
+# judge of it cannot disagree about the question.
+import run_reference  # noqa: E402
 
-ENGINE_PROMPTS = run_k5_stages.ENGINE_PROMPTS
+ENGINE_CASES = {case["name"]: case for case in run_reference.fixture_cases()}
+ENGINE_PROMPTS = ENGINE_CASES["publisher"]["prompts"]
 
 
 def fnv1a64(data: bytes) -> int:
@@ -321,6 +337,48 @@ def load_runs(directory: Path) -> dict[str, Run]:
             reference=json.loads(reference_path.read_text()) if reference_path.exists() else None,
         )
     return runs
+
+
+def load_cases(directory: Path) -> dict[str, Run]:
+    """The EXP-10 matrix, one run per leg, keyed `case:<name>:<leg>`.
+
+    A leg is a boot like any other: the kernel's records and the medium as the
+    leg left it. The reference answers beside the matrix are the Linux side of
+    the engine comparison, asked every prompt the fixture names."""
+    runs: dict[str, Run] = {}
+    if not directory.is_dir():
+        return runs
+    reference_path = directory / "reference.json"
+    reference = json.loads(reference_path.read_text()) if reference_path.exists() else None
+    for child in sorted(directory.iterdir()):
+        record = child / "run.json"
+        if not record.exists():
+            continue
+        spec = json.loads(record.read_text())
+        for leg in spec.get("legs", []):
+            serial = ROOT / leg["serial_log"]
+            if not serial.exists():
+                continue
+            medium_path = ROOT / leg["medium_after"]
+            medium = medium_path.read_bytes() if medium_path.exists() else b""
+            leg_spec = dict(spec)
+            leg_spec.update({"exit_status": leg["exit_status"], "timed_out": leg["timed_out"],
+                             "medium": str(medium_path), "leg": leg["leg"]})
+            name = f"case:{spec['case']}:{leg['leg']}"
+            runs[name] = Run(
+                name=name,
+                spec=leg_spec,
+                records=parse(serial.read_text()),
+                exit_status=leg["exit_status"],
+                timed_out=bool(leg["timed_out"]),
+                medium=medium,
+                reference=reference,
+            )
+    return runs
+
+
+def case_leg(runs: dict[str, Run], case: str, leg: int) -> Run | None:
+    return runs.get(f"case:{case}:{leg}")
 
 
 # --- criteria --------------------------------------------------------------
@@ -1344,8 +1402,10 @@ def check_engine_matches_reference(runs: dict[str, Run]) -> Result:
     answers = (record or {}).get("answers", [])
     reference = run.reference.get("answers", [])
     native = [(a.get("prompt"), a.get("text_hex")) for a in answers]
+    # The reference may have been asked every prompt the fixture names; the
+    # comparison is over the ones this program asked.
     linux = [(a.get("prompt"), a.get("completion_hex")) for a in reference
-             if a.get("status") == 0]
+             if a.get("status") == 0 and a.get("prompt") in ENGINE_PROMPTS]
     tokens = note_values(run.records, "engine_token", "nengine")
     argmax = note_values(run.records, "engine_argmax", "nengine")
     digests = note_values(run.records, "engine_digest", "nengine")
@@ -1441,6 +1501,494 @@ def check_engine_vertical(runs: dict[str, Run]) -> Result:
     return result
 
 
+# --- the EXP-10 matrix -------------------------------------------------------
+#
+# Every case is the engine stage with something done to it, and every criterion
+# below is decided from the kernel's records of that boot and from the medium
+# it left, never from a program's account of itself where the kernel has one.
+
+# The rival's mark is its seed with the role folded in, as `verbs::mark_for`
+# folds it; the host recomputes both marks from the seed it chose.
+RIVAL_SALT = 0x5249_5641_4C00_0000
+
+
+def mark_of(seed: int) -> bytes:
+    return f"{seed & 0xFFFF_FFFF_FFFF_FFFF:016x}".encode()
+
+
+def work_domain_id(run: Run, name: str) -> str | None:
+    created = [r for r in by_event(run.records, "domain.created") if r.get("name") == name]
+    return created[0].get("id") if len(created) == 1 else None
+
+
+def endpoint_of(run: Run, label: str) -> str | None:
+    """The object index of the endpoint the supervisor created under `label`."""
+    found = [r for r in by_event(run.records, "ipc.endpoint_created") if r.get("label") == label]
+    return found[0].get("endpoint") if found else None
+
+
+def facets_used(run: Run, endpoint: str | None, origin: str | None) -> set[str]:
+    return {
+        r.get("facet") for r in by_event(run.records, "ipc.admitted")
+        if r.get("endpoint") == endpoint and r.get("origin_domain") == origin
+    }
+
+
+def engine_bindings(run: Run) -> list[Record]:
+    engine = engine_domain(run)
+    return [r for r in by_event(run.records, "sched.bound")
+            if engine is not None and r.get("domain") == engine.get("id")]
+
+
+def check_cases_ran(runs: dict[str, Run]) -> Result:
+    """The matrix is present and every leg of it reached the kernel's own end."""
+    result = Result("cases_ran", "every case of the EXP-10 matrix ran, every leg to the kernel's own end")
+    wanted = {"rivals": 1, "cancel": 1, "cut-after-prepare": 2, "cut-after-commit": 2,
+              "io-error-commit": 2}
+    missing = [f"{case}:{leg}" for case, legs in wanted.items()
+               for leg in range(1, legs + 1) if case_leg(runs, case, leg) is None]
+    bad = [name for name, run in runs.items() if name.startswith("case:")
+           and (run.timed_out or run.exit_status != EXIT_COMPLETE)]
+    faults = [name for name, run in runs.items() if name.startswith("case:")
+              and by_event(run.records, "user.fault")]
+    result.passed = not missing and not bad and not faults
+    result.detail = (f"missing {missing}, incomplete {bad}, faulted {faults}"
+                     if not result.passed else
+                     f"{sum(legs for legs in wanted.values())} legs of {len(wanted)} cases, "
+                     f"all exiting {EXIT_COMPLETE}, no user fault")
+    return result
+
+
+def check_rivals_two_works(runs: dict[str, Run]) -> Result:
+    """Two works, two principals, two runtimes, one version to start from."""
+    result = Result(
+        "rivals_two_works",
+        "two works over one version, each its own principal, each driving its own runtime",
+    )
+    run = case_leg(runs, "rivals", 1)
+    if run is None:
+        result.detail = "no rivals run"
+        return result
+    pub = work_domain_id(run, "k5pub")
+    riv = work_domain_id(run, "k5riv")
+    store = endpoint_of(run, "store")
+    launch = endpoint_of(run, "launch")
+    store_facets = (facets_used(run, store, pub), facets_used(run, store, riv))
+    launch_facets = (facets_used(run, launch, pub), facets_used(run, launch, riv))
+    runtimes = [r for r in by_event(run.records, "domain.created") if r.get("name") == "nhacer"]
+    scopes = (scope_id(run, "work"), scope_id(run, "rival"))
+    seen = (note_values(run.records, "version_seen", "k5pub"),
+            note_values(run.records, "version_seen", "k5riv"))
+    started_from = [v & 0xFFFF_FFFF for values in seen for v in values if v >> 32]
+    result.passed = (
+        pub is not None and riv is not None and pub != riv
+        and store_facets == ({"1"}, {"2"})
+        and launch_facets == ({"1"}, {"2"})
+        and len(runtimes) >= 2
+        and None not in scopes and scopes[0] != scopes[1]
+        and started_from[:2] == [1, 1]
+    )
+    result.detail = (
+        f"work domains {pub} and {riv}, store facets {store_facets}, launcher facets "
+        f"{launch_facets}, runtimes launched {len(runtimes)}, scopes {scopes}, "
+        f"versions each first loaded {started_from[:2]}"
+    )
+    return result
+
+
+def check_rivals_shared_engine(runs: dict[str, Run]) -> Result:
+    """One resident engine served both, each inference charged to the scope of
+    the work that asked, each work's answers being the ones computed for its
+    own prompts. The engine's records and each work's are compared request by
+    request."""
+    result = Result(
+        "rivals_shared_engine",
+        "one engine served both works, charged each inference to its asker, and mixed nothing up",
+    )
+    run = case_leg(runs, "rivals", 1)
+    if run is None:
+        result.detail = "no rivals run"
+        return result
+    bound = engine_bindings(run)
+    scopes = {scope_id(run, "work"): 0, scope_id(run, "rival"): 0}
+    for r in bound:
+        if r.get("origin_scope") in scopes and r.get("effective_scope") == r.get("origin_scope") \
+                and r.get("account") == "origin_budget":
+            scopes[r.get("origin_scope")] += 1
+    engine_prompts = note_values(run.records, "engine_prompt", "nengine")
+    engine_digests = note_values(run.records, "engine_digest", "nengine")
+    expected = {
+        "k5pub": [fnv1a64(p.encode()) for p in ENGINE_CASES["publisher"]["prompts"]],
+        "k5riv": [fnv1a64(p.encode()) for p in ENGINE_CASES["rival"]["prompts"]],
+    }
+    lent = {name: note_values(run.records, "engine_prompt", name) for name in expected}
+    got = {name: note_values(run.records, "engine_digest", name) for name in expected}
+    # Each work's answers, in its order, are a subsequence of the engine's, and
+    # the engine's prompts are exactly the two works' prompts merged.
+    def subsequence(part: list[int], whole: list[int]) -> bool:
+        at = 0
+        for item in part:
+            while at < len(whole) and whole[at] != item:
+                at += 1
+            if at == len(whole):
+                return False
+            at += 1
+        return True
+    result.passed = (
+        len(bound) == 4
+        and list(scopes.values()) == [2, 2]
+        and lent == expected
+        and sorted(engine_prompts) == sorted(expected["k5pub"] + expected["k5riv"])
+        and all(subsequence(got[name], engine_digests) for name in expected)
+        and all(len(got[name]) == 2 for name in expected)
+        and not set(got["k5pub"]) & set(got["k5riv"])
+    )
+    result.detail = (
+        f"engine bindings {len(bound)} charged per scope {scopes}, prompts each work lent "
+        f"{ {k: [hex(v) for v in vs] for k, vs in lent.items()} }, the engine read "
+        f"{[hex(v) for v in engine_prompts]}, answer digests per work "
+        f"{ {k: [hex(v) for v in vs] for k, vs in got.items()} }"
+    )
+    result.evidence = [line_of(r) for r in bound]
+    return result
+
+
+def check_rivals_one_wins(runs: dict[str, Run]) -> Result:
+    """Both publish against generation one. One transition is admitted; the
+    other is refused for a stale generation, starts again over the version
+    that won, finds the change already made, and abandons. The medium carries
+    exactly one of the two marks."""
+    result = Result(
+        "rivals_one_wins",
+        "one publication was admitted, the other refused as stale, rebased, and honestly abandoned",
+    )
+    run = case_leg(runs, "rivals", 1)
+    if run is None or not run.medium:
+        result.detail = "no rivals run"
+        return result
+    seed = run.spec.get("seed")
+    marks = {"k5pub": mark_of(seed), "k5riv": mark_of(seed ^ RIVAL_SALT)}
+    published = {n: note_values(run.records, "published", n) for n in marks}
+    refused = {n: note_values(run.records, "publish_refused", n) for n in marks}
+    rebased = {n: note_values(run.records, "work_rebased", n) for n in marks}
+    latched = {n: note_values(run.records, "program_latched", n) for n in marks}
+    abandoned = {n: note_values(run.records, "abandoned", n) for n in marks}
+    final = {n: note_values(run.records, "final_generation", n) for n in marks}
+    done = {n: note_values(run.records, "work_done", n) for n in marks}
+    winners = [n for n in marks if 2 in published[n]]
+    losers = [n for n in marks if n not in winners]
+    module = published_content(run, b"module.js") or b""
+    present = [n for n in marks if marks[n] in module]
+    record_name = {"k5pub": b"model.json", "k5riv": b"rival.json"}
+    names = published_lengths(run)
+    ok = (
+        len(winners) == 1 and len(losers) == 1
+        and refused[losers[0]] == [4] and not refused[winners[0]]
+        and rebased[losers[0]] == [2]
+        and len(latched[losers[0]]) == 1
+        and [v & 0xFF for v in abandoned[losers[0]]] == [3]
+        and final[losers[0]][-1:] == [2] and final[winners[0]][-1:] == [2]
+        and present == winners
+        and record_name[winners[0]] in names and record_name[losers[0]] not in names
+        and all(v >> 32 == 1 for n in marks for v in done[n])
+    )
+    result.passed = bool(ok)
+    result.detail = (
+        f"published {published}, refused {refused}, rebased {rebased}, latched "
+        f"{ {n: len(v) for n, v in latched.items()} }, abandoned {abandoned}, final {final}, "
+        f"marks in the published module {present}, names published "
+        f"{sorted(n.decode() for n in names)}"
+    )
+    return result
+
+
+def check_rivals_no_leak(runs: dict[str, Run]) -> Result:
+    """What one work could not do to the other, as executed controls and as
+    facts about two capability tables the kernel wrote."""
+    result = Result(
+        "rivals_no_leak",
+        "the rival's facet carried no authority of the publisher's, and the two held nothing in common but services",
+    )
+    run = case_leg(runs, "rivals", 1)
+    if run is None:
+        result.detail = "no rivals run"
+        return result
+    expected = note_values(run.records, "refused_as_expected", "k5riv")
+    not_refused = note_values(run.records, "not_refused", "k5riv") + \
+        note_values(run.records, "not_refused", "k5pub")
+    def objects(name: str) -> dict[int, tuple[str, str]]:
+        return {
+            r.number("slot"): (r.get("object_type"), r.get("object"))
+            for r in by_event(run.records, "cap.installed") if r.get("name") == name
+        }
+    pub, riv = objects("k5pub"), objects("k5riv")
+    private = [2, 4, 6, 7, 8, 11]   # stage, done, host, channel, own scope, prompt
+    shared = [1, 3, 10]             # store, launcher, engine: endpoints, by facet
+    private_disjoint = all(pub.get(s) != riv.get(s) and pub.get(s) and riv.get(s) for s in private)
+    shared_same_object = all(pub.get(s) == riv.get(s) and pub.get(s, ("",))[0] == "endpoint"
+                             for s in shared)
+    engine = endpoint_of(run, "engine")
+    engine_facets = (facets_used(run, engine, work_domain_id(run, "k5pub")),
+                     facets_used(run, engine, work_domain_id(run, "k5riv")))
+    # A wait that timed out is how a work sleeps, not a refusal of anything.
+    refused = [r for r in by_event(run.records, "k2.refused")
+               if r.get("name") in ("k5pub", "k5riv") and r.get("status") != "-16"]
+    result.passed = (
+        expected == [2] and not not_refused
+        and private_disjoint and shared_same_object
+        and engine_facets[0] and engine_facets[1] and not engine_facets[0] & engine_facets[1]
+        and not refused
+    )
+    result.detail = (
+        f"the rival asked for the publisher's maintenance and was refused {expected} "
+        f"(FORBIDDEN), controls not refused {not_refused}; private slots disjoint "
+        f"{private_disjoint}, service slots the same endpoints {shared_same_object}, engine "
+        f"facets {engine_facets}, kernel refusals of either work {len(refused)}"
+    )
+    return result
+
+
+def check_cancel_mid_inference(runs: dict[str, Run]) -> Result:
+    """A work's scope closed while the engine computed for it. The kernel's
+    barrier found the engine's obligation on it, the engine noticed between
+    tokens and discharged it as abandoned, and only then was the scope
+    quiescent and retired."""
+    result = Result(
+        "cancel_mid_inference",
+        "the asker's scope was fenced with the engine bound to it, the engine stopped between tokens, and the scope drained and retired",
+    )
+    run = case_leg(runs, "cancel", 1)
+    if run is None:
+        result.detail = "no cancel run"
+        return result
+    asker = scope_id(run, "asker")
+    bound = [r for r in engine_bindings(run) if r.get("origin_scope") == asker]
+    fenced = [r for r in by_event(run.records, "scope.fenced") if r.get("id") == asker]
+    retired = [r for r in by_event(run.records, "scope.retired") if r.get("id") == asker]
+    invocation = bound[0].get("invocation") if bound else None
+    resolved = [r for r in by_event(run.records, "ipc.resolved")
+                if r.get("invocation") == invocation]
+    made = note_values(run.records, "engine_cancelled", "nengine")
+    predict = ENGINE_CASES["long"]["predict"]
+    asked = note_values(run.records, "work_asking", "k5ask")
+    saw = note_values(run.records, "cancelled", "k5ask")
+    done = note_values(run.records, "work_done", "k5ask")
+    fenced_by = note_values(run.records, "work_cancelled", "supervisor")
+    retired_by = note_values(run.records, "work_retired", "supervisor")
+    order = (bound and fenced and resolved and retired
+             and bound[0].seq < fenced[0].seq < resolved[0].seq < retired[0].seq)
+    result.passed = bool(
+        order
+        and fenced[0].get("invocations_pending") == "1"
+        # Fenced, or dead by the time the engine looked: the asker leaves as soon
+        # as its call comes back cancelled, and the engine may notice before or
+        # after it has gone. Either is a caller that is no longer there.
+        and resolved[0].get("outcome") == "2"
+        and resolved[0].get("cancel") in ("origin_fenced", "origin_dead")
+        and retired[0].get("from_state") == "quiescent"
+        and len(made) == 1 and made[0] < predict
+        and asked == [predict] and saw == [1] and done == [5 | (1 << 32)]
+        and fenced_by == [1] and len(retired_by) == 1
+    )
+    result.detail = (
+        f"asker scope {asker}: bound at {bound[0].seq if bound else None}, fenced at "
+        f"{fenced[0].seq if fenced else None} with invocations_pending="
+        f"{fenced[0].get('invocations_pending') if fenced else None}, resolved at "
+        f"{resolved[0].seq if resolved else None} as outcome "
+        f"{resolved[0].get('outcome') if resolved else None} ({resolved[0].get('cancel') if resolved else None}), "
+        f"retired at {retired[0].seq if retired else None} from "
+        f"{retired[0].get('from_state') if retired else None}; the engine had made {made} of "
+        f"{predict} tokens; the asker asked {asked}, saw cancelled {saw}, done {done}"
+    )
+    result.evidence = [line_of(r) for r in bound + fenced + resolved + retired]
+    return result
+
+
+def check_cancel_engine_survives(runs: dict[str, Run]) -> Result:
+    """The service the closed work was using is still the service: nothing of
+    it was stopped, and an unrelated work then used it and published."""
+    result = Result(
+        "cancel_engine_survives",
+        "the engine stayed resident through the closure and served an unrelated work that published",
+    )
+    run = case_leg(runs, "cancel", 1)
+    if run is None or not run.medium:
+        result.detail = "no cancel run"
+        return result
+    terminated = [r for r in by_event(run.records, "domain.terminated") if r.get("name") == "nengine"]
+    summary = [r for r in by_event(run.records, "k1.domain_summary") if r.get("name") == "nengine"]
+    loads = note_values(run.records, "engine_loaded", "nengine")
+    work = scope_id(run, "work")
+    asker = scope_id(run, "asker")
+    fenced = [r for r in by_event(run.records, "scope.fenced") if r.get("id") == asker]
+    after = [r for r in engine_bindings(run) if fenced and r.seq > fenced[0].seq]
+    served = note_values(run.records, "engine_served", "k5pub")
+    published = note_values(run.records, "published", "k5pub")
+    seed = run.spec.get("seed")
+    module = published_content(run, b"module.js") or b""
+    result.passed = (
+        not terminated
+        and summary and summary[0].get("final_state") == "runnable"
+        and loads == [1 * loads[0]] if loads else False
+    ) and (
+        len(loads) == 1
+        and len(after) == 2 and all(r.get("origin_scope") == work for r in after)
+        and served == [1, 2]
+        and published == [1, 2]
+        and mark_of(seed) in module
+    )
+    result.detail = (
+        f"engine terminations {len(terminated)}, final state "
+        f"{summary[0].get('final_state') if summary else None}, loads {len(loads)}, bindings after "
+        f"the fence {len(after)} all to the work's scope {work}, served {served}, published "
+        f"{published}, the medium carries the work's mark {mark_of(seed) in module}"
+    )
+    return result
+
+
+def cut_legs(runs: dict[str, Run], case: str) -> tuple[Run | None, Run | None]:
+    return case_leg(runs, case, 1), case_leg(runs, case, 2)
+
+
+def check_cut_after_prepare(runs: dict[str, Run]) -> Result:
+    """Cut with the work's publication prepared and not committed. The work's
+    call did not come back with an answer; recovery aborted the intent; the
+    work on the next boot found its spent identities, found its change
+    unpublished, and did the whole vertical again."""
+    result = Result(
+        "cut_after_prepare",
+        "cut after prepare: the intent was aborted by recovery and the work redid the vertical and published",
+    )
+    first, second = cut_legs(runs, "cut-after-prepare")
+    if first is None or second is None:
+        result.detail = "no cut-after-prepare legs"
+        return result
+    applied = note_values(first.records, "fault_applied", "k5store")
+    refused1 = note_values(first.records, "publish_refused", "k5pub")
+    cut = note_values(first.records, "cut", "supervisor")
+    published1 = note_values(first.records, "published", "k5pub")
+    resumed = note_values(second.records, "work_resumed", "k5pub")
+    runtimes2 = [r for r in by_event(second.records, "domain.created") if r.get("name") == "nhacer"]
+    tools2 = note_values(second.records, "tool_verdict", "k5pub")
+    served2 = note_values(second.records, "engine_served", "k5pub")
+    published2 = note_values(second.records, "published", "k5pub")
+    read2 = note_values(second.records, "evidence_read", "k5pub")
+    seed = second.spec.get("seed")
+    module1 = published_content(first, b"module.js") or b""
+    module2 = published_content(second, b"module.js") or b""
+    result.passed = (
+        applied == [2 | (1 << 8)]
+        and published1 == [1] and len(refused1) == 1 and refused1[0] >> 32 == 1
+        and cut == [1]
+        and mark_of(seed) not in module1
+        and resumed == [2 | (2 << 8)]
+        and len(runtimes2) == 1 and tools2 == [0] and served2 == [1, 2]
+        and published2 == [2] and read2 == [5 | (1 << 32)]
+        and mark_of(seed) in module2
+    )
+    result.detail = (
+        f"leg 1: directive applied {[hex(v) for v in applied]}, published {published1}, the "
+        f"publication's call came back {[hex(v) for v in refused1]}, cut {cut}, medium marked "
+        f"{mark_of(seed) in module1}; leg 2: resumed {[hex(v) for v in resumed]} (two spent, last "
+        f"aborted), runtimes {len(runtimes2)}, tool exit {tools2}, engine served {served2}, "
+        f"published {published2}, evidence read {[hex(v) for v in read2]}, medium marked "
+        f"{mark_of(seed) in module2}"
+    )
+    return result
+
+
+def check_cut_after_commit(runs: dict[str, Run]) -> Result:
+    """Cut with the commit durable and nothing after it. Recovery adopted the
+    version; the work found its change published and published nothing
+    again."""
+    result = Result(
+        "cut_after_commit",
+        "cut after commit: recovery adopted the version and the work found its change published, redoing nothing",
+    )
+    first, second = cut_legs(runs, "cut-after-commit")
+    if first is None or second is None:
+        result.detail = "no cut-after-commit legs"
+        return result
+    applied = note_values(first.records, "fault_applied", "k5store")
+    published1 = note_values(first.records, "published", "k5pub")
+    resumed = note_values(second.records, "work_resumed", "k5pub")
+    recovered = note_values(second.records, "work_recovered", "k5pub")
+    published2 = note_values(second.records, "published", "k5pub")
+    runtimes2 = [r for r in by_event(second.records, "domain.created") if r.get("name") == "nhacer"]
+    bound2 = engine_bindings(second)
+    read2 = note_values(second.records, "evidence_read", "k5pub")
+    seed = second.spec.get("seed")
+    module1 = published_content(first, b"module.js") or b""
+    module2 = published_content(second, b"module.js") or b""
+    store1 = k4gate.read_store(first.medium) if first.medium else None
+    store2 = k4gate.read_store(second.medium) if second.medium else None
+    roots = ([c["root_digest"] for c in k4gate.commits(store1)] if store1 else [],
+             [c["root_digest"] for c in k4gate.commits(store2)] if store2 else [])
+    # Whether the work heard the answer before the machine ended is a race the
+    # cut does not decide; the medium decides, and it carries the version.
+    result.passed = (
+        applied == [6 | (1 << 8)]
+        and published1 in ([1], [1, 2])
+        and mark_of(seed) in module1
+        and resumed == [2 | (1 << 8)]
+        and recovered == [2]
+        and not published2 and not runtimes2 and not bound2
+        and read2 == [5 | (1 << 32)]
+        and mark_of(seed) in module2
+        and roots[0] and roots[0][-1] == roots[1][-1]
+    )
+    result.detail = (
+        f"leg 1: directive applied {[hex(v) for v in applied]}, published {published1}, medium "
+        f"marked {mark_of(seed) in module1}; leg 2: resumed {[hex(v) for v in resumed]} (two spent, "
+        f"last committed), recovered {recovered}, published {published2}, runtimes {len(runtimes2)}, "
+        f"engine bindings {len(bound2)}, evidence read {[hex(v) for v in read2]}, the last root "
+        f"is the same on both media {bool(roots[0]) and roots[0][-1] == roots[1][-1]}"
+    )
+    return result
+
+
+def check_io_error_commit(runs: dict[str, Run]) -> Result:
+    """The medium refused the commit's write. The service did not publish on a
+    state it only assumed; the work recorded a refusal and abandoned; the next
+    boot published."""
+    result = Result(
+        "io_error_commit",
+        "the medium refused the commit: the service refused the publication, the work recorded it, the next boot published",
+    )
+    first, second = cut_legs(runs, "io-error-commit")
+    if first is None or second is None:
+        result.detail = "no io-error-commit legs"
+        return result
+    applied = note_values(first.records, "fault_applied", "k5store")
+    published1 = note_values(first.records, "published", "k5pub")
+    refused1 = note_values(first.records, "publish_refused", "k5pub")
+    done1 = note_values(first.records, "work_done", "k5pub")
+    cut = note_values(first.records, "cut", "supervisor")
+    resumed = note_values(second.records, "work_resumed", "k5pub")
+    published2 = note_values(second.records, "published", "k5pub")
+    seed = second.spec.get("seed")
+    module1 = published_content(first, b"module.js") or b""
+    module2 = published_content(second, b"module.js") or b""
+    store1 = k4gate.read_store(first.medium) if first.medium else None
+    generation1 = len(k4gate.commits(store1)) if store1 else None
+    result.passed = (
+        applied == [5 | (6 << 8)]
+        and published1 == [1] and len(refused1) == 1 and refused1[0] >> 32 == 1
+        and done1 == [1] and not cut
+        and generation1 == 1 and mark_of(seed) not in module1
+        and resumed == [2 | (2 << 8)]
+        and published2 == [2] and mark_of(seed) in module2
+    )
+    result.detail = (
+        f"leg 1: directive applied {[hex(v) for v in applied]}, published {published1}, the "
+        f"publication's call came back {[hex(v) for v in refused1]}, work done {done1} (not ok), "
+        f"cut {cut}, versions on the medium {generation1}, marked {mark_of(seed) not in module1 and 'no' or 'yes'}; "
+        f"leg 2: resumed {[hex(v) for v in resumed]}, published {published2}, marked "
+        f"{mark_of(seed) in module2}"
+    )
+    return result
+
+
 def check_regression(gate: dict | None, name: str, expected: int) -> Result:
     result = Result(f"regression_{name.lower()}", f"the {name} gate still passes on this kernel")
     if gate is None:
@@ -1483,6 +2031,16 @@ CRITERIA = [
     check_engine_matches_reference,
     check_engine_confinement,
     check_engine_vertical,
+    check_cases_ran,
+    check_rivals_two_works,
+    check_rivals_shared_engine,
+    check_rivals_one_wins,
+    check_rivals_no_leak,
+    check_cancel_mid_inference,
+    check_cancel_engine_survives,
+    check_cut_after_prepare,
+    check_cut_after_commit,
+    check_io_error_commit,
 ]
 
 
@@ -1932,6 +2490,243 @@ def append_note(
     return damaged
 
 
+# Damages aimed at one leg of one case. A case is keyed `case:<name>:<leg>`, so
+# these name the leg rather than a stage.
+
+def in_case(runs: dict[str, Run], case: str, leg: int, damage) -> dict[str, Run]:
+    damaged = copy.deepcopy(runs)
+    key = f"case:{case}:{leg}"
+    if key in damaged:
+        damaged[key] = damage(damaged[key])
+    return damaged
+
+
+def note_set(run: Run, key: str, domain: str, value: int) -> Run:
+    for record in notes(run.records, NOTE[key], domain):
+        record.fields["b"] = hex(value)
+    return run
+
+
+def note_drop(run: Run, key: str, domain: str) -> Run:
+    run.records = [r for r in run.records if not (
+        r.event == "user.note" and r.get("kind") == "self_check"
+        and r.number("a") == NOTE[key] and r.get("name") == domain)]
+    return run
+
+
+def note_add(run: Run, key: str, domain: str, value: int) -> Run:
+    run.records.append(Record("kernel", 99997, 1, "user.note", {
+        "domain": "9", "name": domain, "thread": "9", "kind": "self_check", "kind_id": "2",
+        "a": hex(NOTE[key]), "b": hex(value)}))
+    return run
+
+
+def event_drop(run: Run, event: str, **match: str) -> Run:
+    run.records = [r for r in run.records if not (
+        r.event == event and all(r.get(k) == v for k, v in match.items()))]
+    return run
+
+
+def event_set(run: Run, event: str, field_name: str, value: str, **match: str) -> Run:
+    for r in by_event(run.records, event):
+        if all(r.get(k) == v for k, v in match.items()):
+            r.fields[field_name] = value
+    return run
+
+
+def medium_swap(run: Run, before: bytes, after: bytes) -> Run:
+    if run.medium and before in run.medium:
+        run.medium = run.medium.replace(before, after)
+    return run
+
+
+def rivals_mark(runs: dict[str, Run], who: str) -> bytes:
+    run = case_leg(runs, "rivals", 1)
+    seed = run.spec.get("seed") if run else 0
+    return mark_of(seed if who == "k5pub" else seed ^ RIVAL_SALT)
+
+
+def case_mark(runs: dict[str, Run], case: str) -> bytes:
+    run = case_leg(runs, case, 1)
+    return mark_of(run.spec.get("seed") if run else 0)
+
+
+def bindings_to_engine(run: Run) -> list[Record]:
+    return engine_bindings(run)
+
+
+DAMAGE += [
+    (
+        "a case leg that never completed",
+        "cases_ran",
+        lambda runs: in_case(runs, "cancel", 1, lambda run: (setattr(run, "exit_status", 35), run)[1]),
+    ),
+    (
+        "a case leg with a user fault",
+        "cases_ran",
+        lambda runs: in_case(runs, "rivals", 1, lambda run: (run.records.append(
+            Record("kernel", 99995, 1, "user.fault", {"domain": "4", "name": "k5riv"})), run)[1]),
+    ),
+    (
+        "the rival's store facet the publisher's",
+        "rivals_two_works",
+        lambda runs: in_case(runs, "rivals", 1, lambda run: event_set(
+            run, "ipc.admitted", "facet", "1",
+            origin_domain=work_domain_id(run, "k5riv") or "", endpoint=endpoint_of(run, "store") or "")),
+    ),
+    (
+        "the rival's runtime never launched",
+        "rivals_two_works",
+        lambda runs: in_case(runs, "rivals", 1, lambda run: event_drop(run, "domain.created", name="nhacer")),
+    ),
+    (
+        "one of the engine's bindings charged to the engine's own scope",
+        "rivals_shared_engine",
+        lambda runs: in_case(runs, "rivals", 1, lambda run: event_set(
+            run, "sched.bound", "origin_scope", scope_id(run, "engine") or "",
+            origin_scope=scope_id(run, "rival") or "")),
+    ),
+    (
+        "the rival's answer digests the publisher's",
+        "rivals_shared_engine",
+        lambda runs: in_case(runs, "rivals", 1, lambda run: (
+            [note_set(run, "engine_digest", "k5riv", v) for v in
+             note_values(run.records, "engine_digest", "k5pub")[:1]], run)[1]),
+    ),
+    (
+        "the engine read a prompt nobody lent",
+        "rivals_shared_engine",
+        lambda runs: in_case(runs, "rivals", 1, lambda run: note_set(run, "engine_prompt", "nengine", 0x1234)),
+    ),
+    (
+        "the loser's refusal not a stale generation",
+        "rivals_one_wins",
+        lambda runs: in_case(runs, "rivals", 1, lambda run: note_set(run, "publish_refused", "k5riv", 7)),
+    ),
+    (
+        "the loser never rebased",
+        "rivals_one_wins",
+        lambda runs: in_case(runs, "rivals", 1, lambda run: note_drop(run, "work_rebased", "k5riv")),
+    ),
+    (
+        "both marks in the published module",
+        "rivals_one_wins",
+        lambda runs: rewrite_medium(runs, rivals_mark(runs, "k5pub"), rivals_mark(runs, "k5riv")),
+    ),
+    (
+        "the rival's maintenance request not refused",
+        "rivals_no_leak",
+        lambda runs: in_case(runs, "rivals", 1, lambda run: note_add(
+            note_drop(run, "refused_as_expected", "k5riv"), "not_refused", "k5riv", 0)),
+    ),
+    (
+        "the two works installed the same prompt buffer",
+        "rivals_no_leak",
+        lambda runs: in_case(runs, "rivals", 1, lambda run: event_set(
+            run, "cap.installed", "object",
+            next((r.get("object") for r in by_event(run.records, "cap.installed")
+                  if r.get("name") == "k5pub" and r.get("slot") == "11"), "0"),
+            name="k5riv", slot="11")),
+    ),
+    (
+        "the fence found no obligation on the asker",
+        "cancel_mid_inference",
+        lambda runs: in_case(runs, "cancel", 1, lambda run: event_set(
+            run, "scope.fenced", "invocations_pending", "0", label="asker")),
+    ),
+    (
+        "the engine finished the whole inference",
+        "cancel_mid_inference",
+        lambda runs: in_case(runs, "cancel", 1, lambda run: note_set(
+            run, "engine_cancelled", "nengine", ENGINE_CASES["long"]["predict"])),
+    ),
+    (
+        "the cancelled invocation resolved as committed",
+        "cancel_mid_inference",
+        lambda runs: in_case(runs, "cancel", 1, lambda run: event_set(
+            run, "ipc.resolved", "outcome", "1", responder_domain=(engine_domain(run) or Record("", 0, 0, "", {})).get("id") or "")),
+    ),
+    (
+        "the asker's scope retired before the engine let go",
+        "cancel_mid_inference",
+        lambda runs: in_case(runs, "cancel", 1, lambda run: event_drop(
+            run, "ipc.resolved", responder_domain=(engine_domain(run) or Record("", 0, 0, "", {})).get("id") or "")),
+    ),
+    (
+        "the engine terminated after the closure",
+        "cancel_engine_survives",
+        lambda runs: in_case(runs, "cancel", 1, lambda run: (run.records.append(
+            Record("kernel", 99994, 1, "domain.terminated", {"domain": "3", "name": "nengine"})), run)[1]),
+    ),
+    (
+        "the later inferences charged to the closed scope",
+        "cancel_engine_survives",
+        lambda runs: in_case(runs, "cancel", 1, lambda run: event_set(
+            run, "sched.bound", "origin_scope", scope_id(run, "asker") or "",
+            origin_scope=scope_id(run, "work") or "")),
+    ),
+    (
+        "the publisher after the closure published nothing",
+        "cancel_engine_survives",
+        lambda runs: in_case(runs, "cancel", 1, lambda run: note_drop(run, "published", "k5pub")),
+    ),
+    (
+        "the cut after prepare applied nowhere",
+        "cut_after_prepare",
+        lambda runs: in_case(runs, "cut-after-prepare", 1, lambda run: note_drop(run, "fault_applied", "k5store")),
+    ),
+    (
+        "the recovery leg resumed as if nothing were spent",
+        "cut_after_prepare",
+        lambda runs: in_case(runs, "cut-after-prepare", 2, lambda run: note_set(run, "work_resumed", "k5pub", 0)),
+    ),
+    (
+        "the recovery leg published without running the vertical",
+        "cut_after_prepare",
+        lambda runs: in_case(runs, "cut-after-prepare", 2, lambda run: event_drop(run, "domain.created", name="nhacer")),
+    ),
+    (
+        "the medium after recovery unmarked",
+        "cut_after_prepare",
+        lambda runs: in_case(runs, "cut-after-prepare", 2, lambda run: medium_swap(
+            run, case_mark(runs, "cut-after-prepare"), b"ffffffffffffffff")),
+    ),
+    (
+        "the adopted version published a second time",
+        "cut_after_commit",
+        lambda runs: in_case(runs, "cut-after-commit", 2, lambda run: note_add(run, "published", "k5pub", 3)),
+    ),
+    (
+        "the work never said it found its change published",
+        "cut_after_commit",
+        lambda runs: in_case(runs, "cut-after-commit", 2, lambda run: note_drop(run, "work_recovered", "k5pub")),
+    ),
+    (
+        "the recovery leg ran the engine anyway",
+        "cut_after_commit",
+        lambda runs: in_case(runs, "cut-after-commit", 2, lambda run: (run.records.append(
+            Record("kernel", 99993, 1, "sched.bound", {"domain": (engine_domain(run) or Record("", 0, 0, "", {})).get("id") or "0",
+                                                        "invocation": "1", "origin_scope": "0"})), run)[1]),
+    ),
+    (
+        "the refused commit counted as a publication",
+        "io_error_commit",
+        lambda runs: in_case(runs, "io-error-commit", 1, lambda run: note_add(run, "published", "k5pub", 2)),
+    ),
+    (
+        "the medium refused the write and carried the version anyway",
+        "io_error_commit",
+        lambda runs: in_case(runs, "io-error-commit", 1, lambda run: medium_swap(
+            run, b"0000000000000000", case_mark(runs, "io-error-commit"))),
+    ),
+    (
+        "the next boot never published",
+        "io_error_commit",
+        lambda runs: in_case(runs, "io-error-commit", 2, lambda run: note_drop(run, "published", "k5pub")),
+    ),
+]
+
+
 def self_test(runs: dict[str, Run], quiet: bool) -> int:
     baseline = [check(runs) for check in CRITERIA]
     if not all(result.passed for result in baseline):
@@ -1964,6 +2759,7 @@ def self_test(runs: dict[str, Run], quiet: bool) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runs", type=Path, default=ROOT / "build/k5-runs")
+    parser.add_argument("--cases", type=Path, default=ROOT / "build/k5-cases")
     parser.add_argument("--k1", type=Path, default=ROOT / "build/k1-gate.json")
     parser.add_argument("--k2", type=Path, default=ROOT / "build/k2-gate.json")
     parser.add_argument("--k3", type=Path, default=ROOT / "build/k3-gate.json")
@@ -1978,6 +2774,7 @@ def main() -> int:
     if not runs:
         print(f"no runs under {arguments.runs}; run tools/run_k5_stages.py", file=sys.stderr)
         return 2
+    runs.update(load_cases(arguments.cases))
 
     if arguments.self_test:
         return self_test(runs, arguments.quiet)

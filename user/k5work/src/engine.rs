@@ -18,7 +18,7 @@
 //! inference and what residency costs are then two numbers the kernel produced,
 //! not two numbers a program claimed.
 
-use thalyx_abi::{cap_op, right};
+use thalyx_abi::{cap_op, right, status};
 use thalyx_user_k4fmt::Pod;
 use thalyx_user_k5pkg::proto::{
     EngineReply, EngineRequest, engine_op, engine_status, note, work_addr,
@@ -78,7 +78,7 @@ pub fn answer(driver: &mut Driver<'_>, prompt: &[u8], predict: u64, out: &mut [u
 
     let request = EngineRequest {
         op: engine_op::INFER,
-        predict: predict.min(256) as u32,
+        predict: predict.min(thalyx_user_k5pkg::proto::engine_case::CONTEXT_TOKENS) as u32,
         prompt_len: width as u32,
         grammar_len: 0,
         seed: driver.seed,
@@ -108,6 +108,7 @@ pub fn answer(driver: &mut Driver<'_>, prompt: &[u8], predict: u64, out: &mut [u
         k2::now_ns() + INFER_DEADLINE_NS,
         false,
     );
+    let refused = answered.as_ref().err().copied();
     let reply = answered
         .ok()
         .and_then(|result| EngineReply::read_from(&result.payload, 0));
@@ -147,9 +148,22 @@ pub fn answer(driver: &mut Driver<'_>, prompt: &[u8], predict: u64, out: &mut [u
             json.field_number("status", u64::from(reply.status));
             k2::note(note::ENGINE_REFUSED, u64::from(reply.status));
         }
+        // The call itself did not come back with an answer. `CANCELLED` is the
+        // kernel saying this work's own scope was closed while the engine was
+        // computing for it -- the one refusal that is about the caller and not
+        // about the engine, and the program is told which it was.
+        None if refused == Some(status::CANCELLED) => {
+            json.field_bool("ok", false);
+            json.field_string("error", b"cancelled");
+            k2::note(
+                note::ENGINE_REFUSED,
+                (-status::CANCELLED) as u64 | (1 << 32),
+            );
+        }
         None => {
             json.field_bool("ok", false);
             json.field_string("error", b"engine_unreachable");
+            json.field_number("status", refused.map_or(0, |code| (-code) as u64));
             k2::note(note::ENGINE_REFUSED, u64::MAX);
         }
     }

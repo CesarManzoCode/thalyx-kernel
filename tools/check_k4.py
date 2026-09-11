@@ -1820,7 +1820,9 @@ LOG_MUTATIONS = [
         "both racers told they had published",
         "rival",
         1,
-        rewrite_re(r"(name=k4pub[^\n]*)a=0x4032 b=0x[0-9a-f]+", r"\1a=0x4031 b=0x1"),
+        # Whichever of the two lost: the damage names the loser's refusal, and
+        # which client that is depends on the race the run had.
+        rewrite_re(r"(name=k4(?:pub|rival)[^\n]*)a=0x4032 b=0x[0-9a-f]+", r"\1a=0x4031 b=0x1"),
         "rival",
     ),
     (
