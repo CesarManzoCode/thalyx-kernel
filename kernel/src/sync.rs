@@ -33,28 +33,64 @@ use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-/// Acquisitions of the control lock, and time-stamp counter cycles spent
-/// waiting for it.
+/// Acquisitions of the kernel's locks, and time-stamp counter cycles spent
+/// waiting for them, kept by the processor that did the waiting.
 ///
 /// Retained rather than written: a record per acquisition would cost more than
 /// the acquisition and would not survive its own measurement. What a run
 /// reports is the total and the worst wait, which is what "the lock was the
 /// limit" or "the lock was not the limit" is an argument about.
-static CONTENDED_WAITS: AtomicU64 = AtomicU64::new(0);
-static CONTENDED_CYCLES: AtomicU64 = AtomicU64::new(0);
-static WORST_WAIT_CYCLES: AtomicU64 = AtomicU64::new(0);
-static ACQUISITIONS: AtomicU64 = AtomicU64::new(0);
+///
+/// One block per processor, each on its own cache line. Four machine-wide
+/// words did the same sums with one difference: every acquisition on every
+/// processor wrote the same line, so counting the lock's traffic was itself a
+/// line handed between processors as often as the lock was -- an extra
+/// transfer per acquisition, charged to the thing being measured.
+#[repr(C, align(64))]
+struct LockStats {
+    acquisitions: AtomicU64,
+    contended_waits: AtomicU64,
+    contended_cycles: AtomicU64,
+    worst_wait_cycles: AtomicU64,
+}
+
+impl LockStats {
+    const fn new() -> Self {
+        Self {
+            acquisitions: AtomicU64::new(0),
+            contended_waits: AtomicU64::new(0),
+            contended_cycles: AtomicU64::new(0),
+            worst_wait_cycles: AtomicU64::new(0),
+        }
+    }
+}
+
+static STATS: [LockStats; crate::limits::MAX_CPUS] =
+    [const { LockStats::new() }; crate::limits::MAX_CPUS];
+
+/// This processor's block. Every kernel path that can take a lock runs after
+/// its processor installed its per-processor block, on the bootstrap path and
+/// on the application processors' alike, which is what the spin loop's
+/// invalidation service already relies on.
+#[inline]
+fn stats() -> &'static LockStats {
+    &STATS[crate::percpu::index()]
+}
 
 /// Acquisitions, acquisitions that had to wait, cycles spent waiting and the
-/// longest single wait.
+/// longest single wait, summed over the processors.
 #[must_use]
 pub fn contention() -> (u64, u64, u64, u64) {
-    (
-        ACQUISITIONS.load(Ordering::Relaxed),
-        CONTENDED_WAITS.load(Ordering::Relaxed),
-        CONTENDED_CYCLES.load(Ordering::Relaxed),
-        WORST_WAIT_CYCLES.load(Ordering::Relaxed),
-    )
+    let mut totals = (0, 0, 0, 0u64);
+    for stats in &STATS {
+        totals.0 += stats.acquisitions.load(Ordering::Relaxed);
+        totals.1 += stats.contended_waits.load(Ordering::Relaxed);
+        totals.2 += stats.contended_cycles.load(Ordering::Relaxed);
+        totals.3 = totals
+            .3
+            .max(stats.worst_wait_cycles.load(Ordering::Relaxed));
+    }
+    totals
 }
 
 /// A mutual-exclusion cell that never blocks and never yields while held.
@@ -89,7 +125,8 @@ impl<T> SpinLock<T> {
     /// holder that is no longer running.
     pub fn lock(&self) -> SpinGuard<'_, T> {
         let ticket = self.next.fetch_add(1, Ordering::Relaxed);
-        ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
+        let stats = stats();
+        stats.acquisitions.fetch_add(1, Ordering::Relaxed);
         if self.serving.load(Ordering::Acquire) == ticket {
             return SpinGuard { lock: self };
         }
@@ -112,9 +149,9 @@ impl<T> SpinLock<T> {
             core::hint::spin_loop();
         }
         let waited = crate::arch::x86_64::cpu::rdtsc().wrapping_sub(began);
-        CONTENDED_WAITS.fetch_add(1, Ordering::Relaxed);
-        CONTENDED_CYCLES.fetch_add(waited, Ordering::Relaxed);
-        WORST_WAIT_CYCLES.fetch_max(waited, Ordering::Relaxed);
+        stats.contended_waits.fetch_add(1, Ordering::Relaxed);
+        stats.contended_cycles.fetch_add(waited, Ordering::Relaxed);
+        stats.worst_wait_cycles.fetch_max(waited, Ordering::Relaxed);
         SpinGuard { lock: self }
     }
 

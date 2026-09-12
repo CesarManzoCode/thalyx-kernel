@@ -134,6 +134,7 @@ pub fn derive(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
                 .saturating_sub(1);
             let sponsor = machine.grants[child as usize].sponsor;
             machine.grants[child as usize] = crate::obj::Grant::empty();
+            crate::api::free_grant_hint(machine, child as usize);
             crate::scope::release(sponsor, crate::scope::Resource::Metadata, 1);
             Err(status::LIMIT_EXHAUSTED)
         }
