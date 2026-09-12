@@ -23,9 +23,12 @@
 //   * The weights. Thalyx passes `-m <path>`. Here they are the sealed bulk
 //     object the supervisor mapped read-only, opened as `/bulk` -- the only
 //     name this domain can open, because it is the only thing mapped into it.
-//     llama.cpp's loader has no `mmap` to use here and reads the tensors into
-//     buffers this engine allocates, so the resident weights are pages charged
-//     to this domain's own scope.
+//     llama.cpp's loader maps it, and on this system mapping a bound region is
+//     the region's own address: the tensors are read where the supervisor put
+//     them, under the capability that put them there, and no copy of the model
+//     is made. The pages stay charged to the scope that sponsored the sealed
+//     object, which is where a read-only object shared by whoever holds a
+//     capability over it belongs -- not doubled into this domain's heap.
 //   * Who pays. The worker binds to the invocation before it computes, so the
 //     kernel charges the inference to the scope of the work that asked; the
 //     weights and everything loaded once stay charged here. Thalyx measures
@@ -436,8 +439,9 @@ extern "C" int th_main(const th_config *config)
     const uint64_t started = th_now_ns();
     llama_backend_init();
 
-    // Defaults, as Thalyx loads them. `use_mmap` stays on and llama.cpp finds
-    // out for itself that this platform has no mapped files.
+    // Defaults, as Thalyx loads them. `use_mmap` stays on, and on this system
+    // it costs nothing and copies nothing: the model is already mapped
+    // read-only into this domain and `mmap` answers with that address.
     const llama_model_params mp = llama_model_default_params();
     r.model = llama_model_load_from_file(TH_BULK_PATH, mp);
     if (!r.model) {
@@ -464,8 +468,9 @@ extern "C" int th_main(const th_config *config)
     say(K5_NOTE_ENGINE_WEIGHTS, r.weight_bytes);
     say(K5_NOTE_ENGINE_CONTEXT, llama_n_ctx(r.ctx));
     // What the profile declares about this engine, asked of llama.cpp itself:
-    // on this platform there are no mapped files, and the weights this engine
-    // holds are pages it read into memory charged to its own scope.
+    // this platform maps the model rather than reading it into memory of its
+    // own, so the resident weights are the sealed object's pages and not a
+    // second copy.
     say(K5_NOTE_ENGINE_MMAP, llama_supports_mmap() ? 1 : 0);
     say(K5_NOTE_ENGINE_LOG_LINES, log_lines);
     th_signal_raise(SLOT_READY, READY_BIT);

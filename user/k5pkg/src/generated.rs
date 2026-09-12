@@ -340,7 +340,7 @@ pub mod engine_case {
 /// the port publishes with every version, byte for byte, so what a consumer
 /// reads is what the schema says and the gate holds it against the kernel's
 /// records.
-pub const NATIVE_PROFILE_JSON: &str = "{\"audited_control\":true,\"cancellation\":\"scope_closure_between_tokens\",\"dma_isolated\":false,\"engine_compute_threads\":1,\"engine_mmap\":false,\"engine_resident\":true,\"managed_local_v1\":true,\"mutable_files\":false,\"power_cut_durability\":\"unknown\",\"type_check\":false}";
+pub const NATIVE_PROFILE_JSON: &str = "{\"audited_control\":true,\"cancellation\":\"scope_closure_between_tokens\",\"dma_isolated\":false,\"engine_compute_threads\":1,\"engine_mmap\":true,\"engine_resident\":true,\"managed_local_v1\":true,\"mutable_files\":false,\"power_cut_durability\":\"unknown\",\"type_check\":false}";
 
 /// The inline half of a host call; the bytes are in the shared region.
 #[repr(C)]

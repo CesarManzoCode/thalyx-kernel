@@ -5,10 +5,14 @@
  * `sysconf` answers from the kernel's own records -- the processors the kernel
  * brought up, the page size it runs on -- rather than from constants.
  *
- * `_POSIX_MAPPED_FILES` is deliberately not defined. There is no `mmap` here:
- * a domain maps memory objects through capabilities, and a program that would
- * have mapped a file reads it instead. llama.cpp keys its loader on exactly
- * this macro and takes its own read path when it is absent.
+ * `_POSIX_MAPPED_FILES` is defined, and `sys/mman.h` says exactly how much it
+ * means: a domain maps memory objects through capabilities, so the only thing
+ * that can be mapped is a region the domain was already given, read-only, at
+ * the address it is already at. That is enough for a loader to use the bytes
+ * where they are instead of copying them into its own heap, which is the whole
+ * point; it is not enough to allocate, to write through a mapping, or to reach
+ * anything the domain was not handed. llama.cpp keys its loader on exactly
+ * this macro.
  */
 #ifndef _UNISTD_H
 #define _UNISTD_H
@@ -17,6 +21,9 @@
 #include <stdint.h>
 #include <sys/types.h>
 #include "thalyx/cdefs.h"
+
+/* Mapped files exist, in the bounded sense `sys/mman.h` documents. */
+#define _POSIX_MAPPED_FILES 200809L
 
 #define STDIN_FILENO  0
 #define STDOUT_FILENO 1

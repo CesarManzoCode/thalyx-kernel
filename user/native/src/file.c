@@ -7,10 +7,15 @@
  * object mapped at `TH_BULK_VADDR` is `/bulk`. So "the engine cannot open
  * anything but its weights" is a fact about what was mapped into it.
  *
- * Reading is copying out of that mapping. There is no `mmap`: a program that
- * would have mapped a file reads it, and what it reads into is its own heap,
- * charged to its own scope. Writing is refused with `EROFS` and an unbound name
- * with `ENOENT`; neither is accepted and dropped.
+ * Reading is copying out of that mapping, and `mmap` is the same fact without
+ * the copy: the region is already mapped, read-only, at an address this domain
+ * was given, so mapping it read-only answers with that address and nothing
+ * moves. That is the whole of what `mmap` does here. It allocates nothing, it
+ * chooses no address, it grants no authority the domain did not already hold,
+ * and every other request -- a write mapping, an anonymous one, a non-zero
+ * offset, a fixed address -- is refused rather than emulated with a copy.
+ * Writing is refused with `EROFS` and an unbound name with `ENOENT`; neither is
+ * accepted and dropped.
  *
  * Descriptors 0, 1 and 2 are the standard streams. An opened file is
  * descriptor 3 onwards, backed by the same stream `fopen` would return.
@@ -25,6 +30,7 @@
 #include <unistd.h>
 #include <stdarg.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 
 typedef struct {
     const char *name;
@@ -234,6 +240,67 @@ void clearerr(FILE *stream) { stream->eof = 0; stream->error = 0; }
 int feof(FILE *stream) { return stream->eof; }
 int ferror(FILE *stream) { return stream->error; }
 int fileno(FILE *stream) { return stream->fd; }
+
+/* ------------------------------------------------------------- mappings */
+
+/* The region behind a descriptor, at the address it is already mapped at.
+ *
+ * Refused unless every part of the request is one this system can answer
+ * exactly: no chosen address, no offset, read-only, a descriptor that names a
+ * bound region, and a length inside it. `EACCES` for a protection the region
+ * does not have, `ENODEV` for anything else, because "this descriptor cannot
+ * be mapped" and "this mapping would need a write authority" are different
+ * refusals and a caller may act differently on them.
+ */
+void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
+{
+    if (addr != NULL || offset != 0 || length == 0) { errno = EINVAL; return MAP_FAILED; }
+    if ((flags & (MAP_ANONYMOUS | MAP_FIXED)) != 0) { errno = ENODEV; return MAP_FAILED; }
+    if ((prot & (PROT_WRITE | PROT_EXEC)) != 0) { errno = EACCES; return MAP_FAILED; }
+    if ((prot & PROT_READ) == 0) { errno = EACCES; return MAP_FAILED; }
+    struct th_file *s = by_fd(fd);
+    if (s == NULL) { return MAP_FAILED; }          /* `by_fd` set EBADF */
+    if (s->kind != TH_FILE_BLOB || s->data == NULL) { errno = ENODEV; return MAP_FAILED; }
+    if ((uint64_t)length > s->length) { errno = EINVAL; return MAP_FAILED; }
+    return (void *)(uintptr_t)s->data;
+}
+
+/* Refused: the mapping belongs to the domain, not to the program.
+ *
+ * It was installed under a capability the program does not hold and charged to
+ * a scope the program does not control, so there is nothing here that could
+ * honestly succeed. Returning success without removing anything would tell a
+ * caller that pages were released when they were not; a caller that unmaps as
+ * an optimisation carries on, and one that needs it finds out.
+ */
+int munmap(void *addr, size_t length)
+{
+    (void)addr;
+    (void)length;
+    errno = EPERM;
+    return -1;
+}
+
+/* Accepted and does nothing, which is the truth: the region is resident from
+ * the moment it was mapped, so there is nothing to fault in and nothing this
+ * program may evict. */
+int posix_madvise(void *addr, size_t length, int advice)
+{
+    (void)addr;
+    (void)length;
+    (void)advice;
+    return 0;
+}
+
+int madvise(void *addr, size_t length, int advice)
+{
+    return posix_madvise(addr, length, advice);
+}
+
+/* The region is resident and cannot be paged out, so it is already locked in
+ * the only sense this system has. Nothing is claimed beyond that. */
+int mlock(const void *addr, size_t length) { (void)addr; (void)length; return 0; }
+int munlock(const void *addr, size_t length) { (void)addr; (void)length; return 0; }
 
 /* Nothing here buffers, so there is nothing a buffer mode could change. */
 int setvbuf(FILE *stream, char *buffer, int mode, size_t size)
