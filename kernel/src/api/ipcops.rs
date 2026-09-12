@@ -546,7 +546,7 @@ fn wake_receiver(machine: &mut Machine, endpoint: usize, kick: bool) {
     while waiting != 0 {
         let index = waiting.trailing_zeros() as usize;
         waiting &= waiting - 1;
-        if thread::wake_if(
+        if thread::defer_wake_if(
             index,
             |record| record.wait == Wait::Receive(endpoint as u16, generation),
             status::OK,
@@ -567,7 +567,7 @@ fn wake_waiter(machine: &mut Machine, invocation: usize, code: i64, hint: WakeHi
         return;
     };
     let generation = machine.invocations[invocation].generation;
-    thread::wake_if(
+    thread::defer_wake_if(
         waiter,
         |record| record.wait == Wait::Reply(invocation as u16, generation),
         code,
@@ -708,7 +708,10 @@ pub fn receive(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i
 
             let head = machine.endpoints[endpoint].head;
             if head != NO_MESSAGE {
-                return deliver(&mut machine, ctx, endpoint, head as usize, staging);
+                let delivered = deliver(&mut machine, ctx, endpoint, head as usize, staging);
+                drop(machine);
+                crate::sched::flush_wakes();
+                return delivered;
             }
             if ctx.flags & thalyx_abi::generated::flag::NONBLOCKING != 0 {
                 return Err(status::WOULD_BLOCK);

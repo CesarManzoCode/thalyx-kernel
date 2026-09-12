@@ -201,7 +201,7 @@ pub fn raise_bits(machine: &mut Machine, index: usize, generation: u32, bits: u6
     // and two threads waiting on the same bit both go and look. The waker
     // keeps running, so each goes to an idle processor.
     for (thread, _) in thread::iter() {
-        thread::wake_if(
+        thread::defer_wake_if(
             thread,
             |record| {
                 matches!(

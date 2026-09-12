@@ -506,22 +506,59 @@ pub fn wake_if(
     aux: u64,
     hint: crate::sched::WakeHint,
 ) -> bool {
+    if !claim_wake(index, matches, status, aux) {
+        return false;
+    }
+    crate::sched::wake(index, hint);
+    true
+}
+
+/// Consumes a thread's wait if it matches, and leaves the thread to be woken
+/// by the caller: [`wake_if`] with the wake itself deferred.
+///
+/// Between the claim and the wake the thread is `Blocked` with no wait to
+/// match: another claim finds nothing, a deadline finds none, a cancellation
+/// finds nothing to cancel. So the wake can be issued after the lock the
+/// caller holds is dropped, through [`crate::sched::defer_wake`], which is
+/// what keeps a queue lock, a spin on another processor's switch and an
+/// inter-processor interrupt -- a microsecond and a half on this platform --
+/// from happening under the control lock.
+pub fn claim_wake(
+    index: usize,
+    matches: impl FnOnce(&WaitRecord) -> bool,
+    status: i64,
+    aux: u64,
+) -> bool {
     let cell = get(index);
     if cell.state() != ThreadState::Blocked {
         return false;
     }
-    {
-        let mut record = cell.wait.lock();
-        if cell.state() != ThreadState::Blocked || !matches(&record) {
-            return false;
-        }
-        record.wait = Wait::None;
-        record.deadline_ns = 0;
-        record.wake_status = status;
-        record.wake_aux = aux;
-        cell.deadline_ns.store(0, Ordering::Relaxed);
+    let mut record = cell.wait.lock();
+    if cell.state() != ThreadState::Blocked || !matches(&record) {
+        return false;
     }
-    crate::sched::wake(index, hint);
+    record.wait = Wait::None;
+    record.deadline_ns = 0;
+    record.wake_status = status;
+    record.wake_aux = aux;
+    cell.deadline_ns.store(0, Ordering::Relaxed);
+    true
+}
+
+/// [`claim_wake`], with the wake deferred to the next flush of this
+/// processor's deferred wakes: the caller holds a lock the wake should not
+/// happen under.
+pub fn defer_wake_if(
+    index: usize,
+    matches: impl FnOnce(&WaitRecord) -> bool,
+    status: i64,
+    aux: u64,
+    hint: crate::sched::WakeHint,
+) -> bool {
+    if !claim_wake(index, matches, status, aux) {
+        return false;
+    }
+    crate::sched::defer_wake(index, hint);
     true
 }
 

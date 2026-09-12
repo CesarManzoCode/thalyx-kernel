@@ -41,7 +41,7 @@ pub fn read(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
     let mut final_pass = false;
     loop {
         {
-            let machine = MACHINE.lock();
+            let mut machine = MACHINE.lock();
             let now = crate::api::now_ns();
             let cap = resolve(
                 &machine,
@@ -74,6 +74,7 @@ pub fn read(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
                 Wait::Log(index as u16, cap.object.generation),
                 ctx.deadline,
             );
+            machine.logs[index].readers |= 1u64 << ctx.thread;
         }
         crate::sched::block_current();
         let (woken, _) = thread::take_wake_status(ctx.thread);
@@ -92,8 +93,12 @@ pub fn wake_reader(machine: &mut Machine, index: usize, generation: u32) {
     if machine.logs[index].count < BATCH {
         return;
     }
-    for (thread, _) in thread::iter() {
-        if thread::wake_if(
+    let mut waiting = machine.logs[index].readers;
+    while waiting != 0 {
+        let thread = waiting.trailing_zeros() as usize;
+        waiting &= waiting - 1;
+        machine.logs[index].readers &= !(1u64 << thread);
+        if thread::defer_wake_if(
             thread,
             |record| record.wait == Wait::Log(index as u16, generation),
             status::OK,

@@ -974,6 +974,10 @@ pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64)
                 return refuse(domain, operation, code);
             }
         }
+        drop(machine);
+        // The wakes the operation claimed go out now, with the lock dropped:
+        // a reply's caller, a raised signal's waiters.
+        crate::sched::flush_wakes();
         outcome
     };
 

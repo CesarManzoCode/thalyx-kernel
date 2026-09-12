@@ -88,6 +88,12 @@ pub const MIGRATION_RECORD_LIMIT: u64 = 16;
 /// to an idle processor directly, only the synchronous case pays this.
 pub const WAKE_GRACE_NS: u64 = 10_000;
 
+/// Wakes one processor can hold back while it holds a lock. Enough for an
+/// operation's own: a reply wakes one caller, an admission one receiver, a
+/// raised signal a few waiters. Past this the wake is issued at once, which
+/// is correct and merely slower.
+const DEFERRED_WAKES: usize = 4;
+
 /// How long an idle processor watches for work before halting.
 ///
 /// Under hardware virtualization a halt and the interrupt that ends it are
@@ -164,6 +170,13 @@ impl Credit {
 pub struct CpuState {
     /// The run queue.
     rq: SpinLock<RunQueue>,
+    /// Wakes claimed under a lock on this processor and not yet issued:
+    /// thread index in the low bits, hint above. Only this processor writes
+    /// or reads them, with interrupts masked, so the atomics are for the
+    /// static's sake and the ordering is relaxed.
+    deferred: [AtomicUsize; DEFERRED_WAKES],
+    /// How many of `deferred` are filled.
+    deferred_count: AtomicUsize,
     /// Thread currently dispatched here.
     pub current: AtomicUsize,
     /// Thread this processor switched away from and has not yet published as
@@ -223,6 +236,8 @@ impl CpuState {
                 cursor: 0,
                 hint: NO_THREAD,
             }),
+            deferred: [const { AtomicUsize::new(0) }; DEFERRED_WAKES],
+            deferred_count: AtomicUsize::new(0),
             current: AtomicUsize::new(NO_THREAD),
             previous: AtomicUsize::new(NO_THREAD),
             online: AtomicBool::new(false),
@@ -1204,6 +1219,51 @@ fn kick(me: usize, cpu: usize) {
     }
 }
 
+/// Records a wake to be issued by this processor's next [`flush_wakes`].
+///
+/// The thread's wait has been consumed already, under the lock the caller
+/// holds; what is deferred is the queueing, the spin on the thread's last
+/// processor and the interrupt, none of which needs that lock and one of
+/// which costs a microsecond and a half. A full buffer wakes at once.
+pub fn defer_wake(index: usize, hint: WakeHint) {
+    let me = percpu::index();
+    let count = CPUS[me].deferred_count.load(Ordering::Relaxed);
+    if count >= DEFERRED_WAKES {
+        wake(index, hint);
+        return;
+    }
+    let tag = match hint {
+        WakeHint::Sync => 1usize << 32,
+        WakeHint::Any => 0,
+    };
+    CPUS[me].deferred[count].store(index | tag, Ordering::Relaxed);
+    CPUS[me].deferred_count.store(count + 1, Ordering::Relaxed);
+}
+
+/// Issues the wakes this processor deferred, in the order they were claimed.
+///
+/// Called by every path that dropped the control lock after claiming a wake,
+/// and, as the net under those, on the way out of the kernel and before this
+/// processor blocks or idles: a deferred wake is issued by the processor that
+/// deferred it before that processor does anything else with its time.
+pub fn flush_wakes() {
+    let me = percpu::index();
+    let count = CPUS[me].deferred_count.load(Ordering::Relaxed);
+    if count == 0 {
+        return;
+    }
+    CPUS[me].deferred_count.store(0, Ordering::Relaxed);
+    for slot in 0..count.min(DEFERRED_WAKES) {
+        let tagged = CPUS[me].deferred[slot].load(Ordering::Relaxed);
+        let hint = if tagged >> 32 != 0 {
+            WakeHint::Sync
+        } else {
+            WakeHint::Any
+        };
+        wake(tagged & 0xFFFF_FFFF, hint);
+    }
+}
+
 /// Makes a thread whose wait has been consumed runnable.
 ///
 /// The caller has already consumed the wait under the thread's lock and set
@@ -1216,6 +1276,17 @@ pub fn wake(index: usize, hint: WakeHint) {
     let cell = thread::get(index);
     while cell.on_cpu.load(Ordering::Acquire) != 0 {
         core::hint::spin_loop();
+    }
+    // The transition and the enqueue happen under the thread's wait lock,
+    // which is where a stop marks a thread dead and then sweeps the queues.
+    // A wake that runs after the control lock was dropped -- a deferred one
+    // -- could otherwise interleave with that stop: dead first, then made
+    // ready and queued, with nothing left to sweep it. Under the lock the
+    // two are ordered: a wake that finds the thread dead does nothing, and a
+    // stop that finds it ready finds it in a queue.
+    let record = cell.wait.lock();
+    if !matches!(cell.state(), ThreadState::Blocked | ThreadState::Held) {
+        return;
     }
     cell.set_state(ThreadState::Ready);
     let me = percpu::index();
@@ -1241,6 +1312,7 @@ pub fn wake(index: usize, hint: WakeHint) {
                 .store(cpu::rdtsc().max(1), Ordering::Relaxed);
         }
     }
+    drop(record);
     if target == me {
         // A synchronous wake is taken when this processor blocks; anything
         // else waits for this processor's next interrupt or entry, and the
@@ -1371,6 +1443,7 @@ fn delegate_aged_sync(me: usize) {
 /// synchronously and did not pick up is handed to an idle processor once it
 /// has aged, and a wake that asked for this processor is honoured.
 pub fn on_kernel_exit() {
+    flush_wakes();
     let me = percpu::index();
     if CPUS[me].need_resched.load(Ordering::Acquire) {
         schedule(me);
@@ -1631,6 +1704,10 @@ pub fn on_tick(frame: &trap::TrapFrame) {
 /// `Blocked` under the thread's lock. When this returns, the wake status the
 /// waker left is the reason it returned.
 pub fn block_current() {
+    // A wake this processor still holds back goes out first: a synchronous
+    // one is taken by the switch below, and any other must not wait for a
+    // processor that is about to stop running.
+    flush_wakes();
     schedule(percpu::index());
 }
 
@@ -1879,6 +1956,7 @@ fn halt(cpu: usize) {
 /// Returns the thread it dispatched, or `None` when the processor found
 /// nothing and should consider whether the run is over.
 fn idle_turn(cpu: usize) -> Option<usize> {
+    flush_wakes();
     crate::domain::reap_dead();
     tick_bookkeeping(time::observe());
     let next = schedule(cpu);
