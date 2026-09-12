@@ -276,6 +276,13 @@ pub struct Machine {
     pub domains: [Domain; MAX_DOMAINS],
     /// Authority tree.
     pub grants: [Grant; MAX_GRANTS],
+    /// Where the search for a free grant node starts. Every node below it is
+    /// in use, or was the last time the search passed; a release below it
+    /// moves it back. The search is still the whole table when it has to be,
+    /// so nothing is refused that a full scan would have found -- what the
+    /// hint removes is reading a hundred lines of nodes known to be taken to
+    /// find the one after them, on every derivation.
+    pub grant_hint: usize,
     /// Memory objects.
     pub memories: [MemoryObject; MAX_MEMORY_OBJECTS],
     /// Reverse index of installed mappings.
@@ -322,8 +329,6 @@ pub struct Machine {
     pub boot_epoch: u64,
     /// Whether the boot package selected the K2 supervisor path.
     pub managed_boot: bool,
-    /// One bit per assigned operation, set when the dispatch reached it.
-    pub operations_reached: u64,
     /// Root scope of the resource tree, once it exists.
     pub root_scope: Option<ScopeId>,
     /// The system control log, once it exists.
@@ -340,6 +345,7 @@ impl Machine {
             kernel_space: None,
             domains: [const { Domain::empty() }; MAX_DOMAINS],
             grants: [Grant::empty(); MAX_GRANTS],
+            grant_hint: 0,
             memories: [const { MemoryObject::empty() }; MAX_MEMORY_OBJECTS],
             maps: [MapRecord::empty(); MAX_MAPS],
             endpoints: [const { Endpoint::empty() }; MAX_ENDPOINTS],
@@ -362,7 +368,6 @@ impl Machine {
             next_object_id: 1,
             boot_epoch: 0,
             managed_boot: false,
-            operations_reached: 0,
             root_scope: None,
             system_log: None,
             supervisor: None,

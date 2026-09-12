@@ -35,7 +35,9 @@ pub mod logops;
 pub mod memops;
 pub mod scopeops;
 
-use thalyx_abi::generated::{DescriptorHeader, OpSpec, flag, object_type, op, spec, status};
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use thalyx_abi::generated::{DescriptorHeader, OPERATIONS, OpSpec, flag, object_type, op, status};
 
 use crate::arch::x86_64::trap::TrapFrame;
 use crate::obj::{GrantId, NO_GRANT, ObjKind, ObjRef, ScopeId};
@@ -305,12 +307,21 @@ pub fn collect_grant(machine: &mut Machine, grant: GrantId) {
         let parent = node.parent;
         let sponsor = node.sponsor;
         machine.grants[current as usize] = crate::obj::Grant::empty();
+        free_grant_hint(machine, current as usize);
         scope::release(sponsor, scope::Resource::Metadata, 1);
         if parent != NO_GRANT {
             let node = &mut machine.grants[parent as usize];
             node.children = node.children.saturating_sub(1);
         }
         current = parent;
+    }
+}
+
+/// Notes that grant node `index` is free again, for the next allocation's
+/// search to start no later than it.
+pub fn free_grant_hint(machine: &mut Machine, index: usize) {
+    if index < machine.grant_hint {
+        machine.grant_hint = index;
     }
 }
 
@@ -340,7 +351,12 @@ pub fn grant_alloc(
     if u64::from(depth) > thalyx_abi::limit::MAX_DERIVE_DEPTH {
         return None;
     }
-    let Some(index) = machine.grants.iter().position(|node| !node.used) else {
+    let total = machine.grants.len();
+    let hint = machine.grant_hint.min(total);
+    let free = (hint..total)
+        .chain(0..hint)
+        .find(|&index| !machine.grants[index].used);
+    let Some(index) = free else {
         // A refusal that says which resource ran out. Without this the caller
         // sees only "exhausted" and has to guess between a scope ceiling it
         // set and a machine-wide table it did not.
@@ -359,6 +375,7 @@ pub fn grant_alloc(
         scope::release(sponsor, scope::Resource::Metadata, 1);
         return None;
     };
+    machine.grant_hint = index + 1;
     machine.grants[index] = crate::obj::Grant {
         used: true,
         id,
@@ -668,6 +685,68 @@ const fn waits(operation: u32) -> bool {
     )
 }
 
+/// Operation codes are a group in the upper half and a small ordinal in the
+/// lower, which is what makes a two-level table of them possible: `SPEC_INDEX`
+/// maps group and ordinal to the operation's position in `OPERATIONS`, or to
+/// `NO_SPEC`. Built once, at compile time, from the table the schema
+/// generates, and checked against it -- an operation whose code did not fit
+/// the shape would fail the assertion rather than become unreachable.
+const SPEC_GROUPS: usize = 16;
+const SPEC_ORDINALS: usize = 16;
+const NO_SPEC: u8 = u8::MAX;
+
+const SPEC_INDEX: [[u8; SPEC_ORDINALS]; SPEC_GROUPS] = {
+    let mut table = [[NO_SPEC; SPEC_ORDINALS]; SPEC_GROUPS];
+    let mut index = 0;
+    while index < OPERATIONS.len() {
+        let code = OPERATIONS[index].code;
+        let group = (code >> 16) as usize;
+        let ordinal = (code & 0xFFFF) as usize;
+        assert!(group < SPEC_GROUPS && ordinal < SPEC_ORDINALS);
+        assert!(table[group][ordinal] == NO_SPEC);
+        assert!(index < NO_SPEC as usize);
+        table[group][ordinal] = index as u8;
+        index += 1;
+    }
+    table
+};
+
+/// The specification of an operation code, or `None` for one the interface
+/// does not assign.
+///
+/// Two loads and a bounds check, where the generated table's search was a
+/// walk of up to fifty-nine entries on every entry of every processor.
+#[inline]
+#[must_use]
+pub fn spec(code: u32) -> Option<&'static OpSpec> {
+    let group = (code >> 16) as usize;
+    let ordinal = (code & 0xFFFF) as usize;
+    if group >= SPEC_GROUPS || ordinal >= SPEC_ORDINALS {
+        return None;
+    }
+    let index = SPEC_INDEX[group][ordinal];
+    if index == NO_SPEC {
+        return None;
+    }
+    let spec = &OPERATIONS[index as usize];
+    debug_assert!(spec.code == code);
+    Some(spec)
+}
+
+/// One bit per assigned operation, set when the dispatch reached it.
+///
+/// A static word and not a field of the machine. The bit says the same thing
+/// either way, and a field of the machine is a field written under the control
+/// lock: every entry of every processor took that lock once before doing
+/// anything, only to record that the interface had been used at all.
+static OPERATIONS_REACHED: AtomicU64 = AtomicU64::new(0);
+
+/// The operations this run has reached, one bit each.
+#[must_use]
+pub fn operations_reached() -> u64 {
+    OPERATIONS_REACHED.load(Ordering::Relaxed)
+}
+
 /// Marks an operation as having been reached, for the run's own coverage.
 ///
 /// A run that exercises a third of the interface and one that exercises all of
@@ -675,15 +754,98 @@ const fn waits(operation: u32) -> bool {
 /// reader needs to know before believing anything general about the whole.
 /// Counting here, where every operation passes, is the only place the number
 /// cannot be an estimate.
-fn mark_reached(machine: &mut Machine, operation: u32) {
-    let mut index = 0;
-    while index < thalyx_abi::generated::OPERATIONS.len() {
-        if thalyx_abi::generated::OPERATIONS[index].code == operation {
-            machine.operations_reached |= 1u64 << index;
-            return;
-        }
-        index += 1;
+fn mark_reached(spec: &'static OpSpec) {
+    // The index of the entry `spec` names, which is a reference into
+    // `OPERATIONS` itself: a subtraction, rather than a second search of the
+    // table on a path every entry of every processor takes.
+    let base = OPERATIONS.as_ptr();
+    let index = (core::ptr::from_ref(spec) as usize).wrapping_sub(base as usize)
+        / core::mem::size_of::<OpSpec>();
+    if index >= 64 {
+        return;
     }
+    let bit = 1u64 << index;
+    // Read first. After the first entry of each operation the bit is set and
+    // the line is shared, so the common case is a load of a line nobody is
+    // writing instead of a locked read-modify-write every processor contends
+    // for.
+    if OPERATIONS_REACHED.load(Ordering::Relaxed) & bit == 0 {
+        OPERATIONS_REACHED.fetch_or(bit, Ordering::Relaxed);
+    }
+}
+
+/// Copies an operation's descriptor into kernel memory and validates it there.
+///
+/// Reading a domain's memory means walking that domain's page tables, so the
+/// caller holds the control lock. The bytes are a message from an adversary
+/// once they are here, which is why the header is checked after the copy and
+/// never in the memory the caller can still write.
+fn read_descriptor(
+    machine: &Machine,
+    domain: usize,
+    operation: u32,
+    spec: &OpSpec,
+    frame: &TrapFrame,
+    staging: &mut Staging,
+) -> Result<(), i64> {
+    if spec.descriptor_len == 0 {
+        return Ok(());
+    }
+    let Some(space) = machine.domains[domain].space.as_ref() else {
+        return Err(status::PEER_DEAD);
+    };
+    if let Err(fault) = ucopy::copy_in(
+        space,
+        frame.rdx,
+        u64::from(spec.descriptor_len),
+        &mut staging.bytes,
+    ) {
+        // Which way the range was wrong, not only that it was. A caller that
+        // passed an unmapped pointer and one that passed a kernel address get
+        // the same status, and telling them apart from the outside is
+        // otherwise guesswork.
+        trace!(
+            "user.copy_refused",
+            "domain={domain} op={} direction=in addr=0x{:x} len={} reason={}",
+            operation_name(operation),
+            frame.rdx,
+            spec.descriptor_len,
+            fault.name()
+        );
+        return Err(status::INVALID_ADDRESS);
+    }
+    let header: DescriptorHeader = staging.read(0);
+    validate_header(&header, operation, u64::from(spec.descriptor_len))
+}
+
+/// Copies a response a handler wrote back into the caller's descriptor.
+fn write_response(
+    machine: &Machine,
+    domain: usize,
+    operation: u32,
+    spec: &OpSpec,
+    frame: &TrapFrame,
+    staging: &Staging,
+) -> Result<(), i64> {
+    let Some(space) = machine.domains[domain].space.as_ref() else {
+        return Err(status::PEER_DEAD);
+    };
+    let bytes = &staging.bytes[..spec.descriptor_len as usize];
+    if let Err(fault) = ucopy::copy_out(space, frame.rdx, bytes) {
+        // The operation happened. A failed copy of its result is a delivery
+        // failure, not an undo, and the interface says so.
+        trace!(
+            "user.copy_refused",
+            "domain={domain} op={} direction=out addr=0x{:x} len={} reason={} \
+             note=operation_already_happened",
+            operation_name(operation),
+            frame.rdx,
+            spec.descriptor_len,
+            fault.name()
+        );
+        return Err(status::INVALID_ADDRESS);
+    }
+    Ok(())
 }
 
 /// Handles one `INVOKE` entry.
@@ -695,7 +857,7 @@ pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64)
     let Some(spec) = spec(operation) else {
         return refuse(domain, operation, status::NOT_SUPPORTED);
     };
-    mark_reached(&mut MACHINE.lock(), operation);
+    mark_reached(spec);
     if frame.r8 & !flag::KNOWN != 0 {
         return refuse(domain, operation, status::INVALID_ARGUMENT);
     }
@@ -706,42 +868,11 @@ pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64)
     let mut staging = Staging::new();
     let now = now_ns();
 
-    // The descriptor is copied under the lock, because reading a domain's
-    // memory means walking that domain's page tables.
+    // The register length has to agree with the operation's before anything is
+    // read, and an operation with no descriptor is passed none.
     if spec.descriptor_len != 0 {
         if frame.r10 != u64::from(spec.descriptor_len) {
             return refuse(domain, operation, status::INVALID_ARGUMENT);
-        }
-        let machine = MACHINE.lock();
-        let Some(space) = machine.domains[domain].space.as_ref() else {
-            drop(machine);
-            return refuse(domain, operation, status::PEER_DEAD);
-        };
-        let copied = ucopy::copy_in(
-            space,
-            frame.rdx,
-            u64::from(spec.descriptor_len),
-            &mut staging.bytes,
-        );
-        drop(machine);
-        if let Err(fault) = copied {
-            // Which way the range was wrong, not only that it was. A caller
-            // that passed an unmapped pointer and one that passed a kernel
-            // address get the same status, and telling them apart from the
-            // outside is otherwise guesswork.
-            trace!(
-                "user.copy_refused",
-                "domain={domain} op={} direction=in addr=0x{:x} len={} reason={}",
-                operation_name(operation),
-                frame.rdx,
-                spec.descriptor_len,
-                fault.name()
-            );
-            return refuse(domain, operation, status::INVALID_ADDRESS);
-        }
-        let header: DescriptorHeader = staging.read(0);
-        if let Err(code) = validate_header(&header, operation, u64::from(spec.descriptor_len)) {
-            return refuse(domain, operation, code);
         }
     } else if frame.rdx != 0 || frame.r10 != 0 {
         return refuse(domain, operation, status::INVALID_ARGUMENT);
@@ -775,9 +906,23 @@ pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64)
         crate::domain::reap_dead();
     }
 
+    // Whether the answer has already been copied back, which the operations
+    // that hold the lock for their whole run do on the way out of that hold.
+    let mut answered = false;
+
     let outcome = if waits(operation) {
         // These own their locking: they may sleep, and a lock is never held
-        // across a context switch.
+        // across a context switch, so the descriptor is copied in under a hold
+        // of its own before the handler starts.
+        {
+            let machine = MACHINE.lock();
+            if let Err(code) =
+                read_descriptor(&machine, domain, operation, spec, frame, &mut staging)
+            {
+                drop(machine);
+                return refuse(domain, operation, code);
+            }
+        }
         match operation {
             op::ENDPOINT_CALL => ipcops::call(&ctx_base, spec, &mut staging),
             op::ENDPOINT_RECEIVE => ipcops::receive(&ctx_base, spec, &mut staging),
@@ -790,26 +935,46 @@ pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64)
             _ => Err(status::NOT_SUPPORTED),
         }
     } else {
+        // One acquisition for the whole operation. Copying a descriptor in and
+        // a response out both mean walking the calling domain's page tables,
+        // so both need the lock the operation itself needs; taking it three
+        // times in a row made most of this machine's lock traffic a handover
+        // of a lock the same processor was about to ask for again, and every
+        // handover is a cache line another processor has to be given.
         let mut machine = MACHINE.lock();
-        let resolved = if observes_lineage(operation) {
-            resolve_observer(&machine, domain, frame.rdi, spec.object_type, spec.rights)
-        } else {
-            resolve(
-                &machine,
-                domain,
-                frame.rdi,
-                spec.object_type,
-                spec.rights,
-                now,
-            )
-        };
-        match resolved {
-            Ok(cap) => {
-                let ctx = Ctx { cap, ..ctx_base };
-                simple(&mut machine, &ctx, &mut staging, operation)
-            }
+        let outcome = match read_descriptor(&machine, domain, operation, spec, frame, &mut staging)
+        {
             Err(code) => Err(code),
+            Ok(()) => {
+                let resolved = if observes_lineage(operation) {
+                    resolve_observer(&machine, domain, frame.rdi, spec.object_type, spec.rights)
+                } else {
+                    resolve(
+                        &machine,
+                        domain,
+                        frame.rdi,
+                        spec.object_type,
+                        spec.rights,
+                        now,
+                    )
+                };
+                match resolved {
+                    Ok(cap) => {
+                        let ctx = Ctx { cap, ..ctx_base };
+                        simple(&mut machine, &ctx, &mut staging, operation)
+                    }
+                    Err(code) => Err(code),
+                }
+            }
+        };
+        if spec.writes_response && staging.filled {
+            answered = true;
+            if let Err(code) = write_response(&machine, domain, operation, spec, frame, &staging) {
+                drop(machine);
+                return refuse(domain, operation, code);
+            }
         }
+        outcome
     };
 
     if operation == op::DOMAIN_TERMINATE {
@@ -821,28 +986,11 @@ pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64)
     // ones that refuse with an explanation -- a retirement reporting what is
     // still outstanding -- would otherwise have their answer thrown away here,
     // which is the one place it cannot be recovered.
-    if spec.writes_response && staging.filled {
+    if !answered && spec.writes_response && staging.filled {
         let machine = MACHINE.lock();
-        let Some(space) = machine.domains[domain].space.as_ref() else {
+        if let Err(code) = write_response(&machine, domain, operation, spec, frame, &staging) {
             drop(machine);
-            return refuse(domain, operation, status::PEER_DEAD);
-        };
-        let bytes = &staging.bytes[..spec.descriptor_len as usize];
-        let written = ucopy::copy_out(space, frame.rdx, bytes);
-        drop(machine);
-        if let Err(fault) = written {
-            // The operation happened. A failed copy of its result is a delivery
-            // failure, not an undo, and the interface says so.
-            trace!(
-                "user.copy_refused",
-                "domain={domain} op={} direction=out addr=0x{:x} len={} reason={} \
-                 note=operation_already_happened",
-                operation_name(operation),
-                frame.rdx,
-                spec.descriptor_len,
-                fault.name()
-            );
-            return refuse(domain, operation, status::INVALID_ADDRESS);
+            return refuse(domain, operation, code);
         }
     }
 

@@ -1114,7 +1114,7 @@ fn summarize(terminal: sched::Terminal) {
     // of the interface this evidence is silent about instead of leaving a
     // reader to assume it covers them.
     if managed {
-        let reached = MACHINE.lock().operations_reached;
+        let reached = crate::api::operations_reached();
         let total = thalyx_abi::generated::OPERATIONS.len();
         let count = reached.count_ones();
         event!(
