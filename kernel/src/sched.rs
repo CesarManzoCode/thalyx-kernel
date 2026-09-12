@@ -239,8 +239,6 @@ static CPUS: [CpuState; MAX_CPUS] = [const { CpuState::empty() }; MAX_CPUS];
 static IDLE_MASK: AtomicU64 = AtomicU64::new(0);
 /// Processors halted, which need an interrupt to notice anything.
 static HALTED_MASK: AtomicU64 = AtomicU64::new(0);
-/// Bumped whenever a thread becomes runnable: what an idle processor watches.
-static READY_EPOCH: AtomicU64 = AtomicU64::new(0);
 /// Earliest deadline of any timed wait, or `u64::MAX`.
 static NEXT_DEADLINE: AtomicU64 = AtomicU64::new(u64::MAX);
 /// The window the machine is in, as last rolled to.
@@ -587,7 +585,7 @@ fn pick_and_reserve(rq: &mut RunQueue, cpu: usize, current: usize, now: u64, fai
         if !fair && rq.ready & bit(hint) != 0 && eligible(cpu, hint) {
             if reserve_for(cpu, hint, now) {
                 rq.ready &= !bit(hint);
-                rq.cursor = (hint + 1) % MAX_THREADS;
+                rq.cursor = next_slot(hint);
                 return hint;
             }
             refused.note(thread::get(hint).effective_scope());
@@ -604,10 +602,28 @@ fn pick_and_reserve(rq: &mut RunQueue, cpu: usize, current: usize, now: u64, fai
     if current_runs && !fair {
         candidates |= bit(current);
     }
-    let start = rq.cursor;
-    for step in 0..MAX_THREADS {
-        let index = (start + step) % MAX_THREADS;
-        if candidates & bit(index) == 0 || !eligible(cpu, index) {
+    // Over the candidates themselves, from the cursor round: the bits at or
+    // after it, then the ones before. A loop over every slot in the table
+    // instead was a division per slot -- the table's size is not a power of
+    // two -- forty-eight of them on every dispatch, for a queue that usually
+    // holds one thread.
+    let start = rq.cursor.min(MAX_THREADS - 1);
+    let above = candidates >> start;
+    let below = candidates & (bit(start) - 1);
+    let mut walk = above;
+    let mut base = start;
+    loop {
+        if walk == 0 {
+            if base == 0 {
+                break;
+            }
+            walk = below;
+            base = 0;
+            continue;
+        }
+        let index = base + walk.trailing_zeros() as usize;
+        walk &= walk - 1;
+        if !eligible(cpu, index) {
             continue;
         }
         let scope = thread::get(index).effective_scope();
@@ -616,7 +632,7 @@ fn pick_and_reserve(rq: &mut RunQueue, cpu: usize, current: usize, now: u64, fai
         }
         if reserve_for(cpu, index, now) {
             rq.ready &= !bit(index);
-            rq.cursor = (index + 1) % MAX_THREADS;
+            rq.cursor = next_slot(index);
             return index;
         }
         refused.note(scope);
@@ -627,7 +643,7 @@ fn pick_and_reserve(rq: &mut RunQueue, cpu: usize, current: usize, now: u64, fai
         && !refused.holds(thread::get(current).effective_scope())
         && reserve_for(cpu, current, now)
     {
-        rq.cursor = (current + 1) % MAX_THREADS;
+        rq.cursor = next_slot(current);
         return current;
     }
     if stalled != 0 {
@@ -642,6 +658,16 @@ fn pick_and_reserve(rq: &mut RunQueue, cpu: usize, current: usize, now: u64, fai
         CPUS[cpu].throttled.store(true, Ordering::Release);
     }
     idle_thread(cpu)
+}
+
+/// The slot a round-robin cursor moves to after `index`, without a division.
+#[inline]
+fn next_slot(index: usize) -> usize {
+    if index + 1 >= MAX_THREADS {
+        0
+    } else {
+        index + 1
+    }
 }
 
 /// The scopes that refused a dispatch during one pass over a queue.
@@ -979,12 +1005,30 @@ fn select_cpu(index: usize, me: usize) -> usize {
     if free(last) {
         return last;
     }
-    let mut candidates = idle;
-    while candidates != 0 {
-        let candidate = candidates.trailing_zeros() as usize;
-        candidates &= candidates - 1;
-        if free(candidate) {
-            return candidate;
+    // This processor, when the thread last ran here and nothing is queued.
+    // It is not idle -- it is running the thread doing the waking -- but the
+    // cache is warm here and, above all, no other processor has to be
+    // interrupted: an inter-processor interrupt costs about a microsecond and
+    // a half on this platform, measured, which is a third of an IPC round
+    // trip. The woken thread takes this processor at the waker's next kernel
+    // exit, which is what `need_resched` is for. Linux's `wake_affine` makes
+    // the same choice for the same reason.
+    if last == me && queue_depth(me) == 0 {
+        return me;
+    }
+    // A processor that is polling takes the work by looking; a processor that
+    // has halted has to be interrupted, and an interrupt costs about a
+    // microsecond and a half here. Both are idle, and only one of them is
+    // free.
+    let halted = HALTED_MASK.load(Ordering::Acquire);
+    for set in [idle & !halted, idle & halted] {
+        let mut candidates = set;
+        while candidates != 0 {
+            let candidate = candidates.trailing_zeros() as usize;
+            candidates &= candidates - 1;
+            if free(candidate) {
+                return candidate;
+            }
         }
     }
     // Nothing is idle. The processor with the shortest queue then, and the
@@ -1146,7 +1190,6 @@ pub fn wake(index: usize, hint: WakeHint) {
                 .store(cpu::rdtsc().max(1), Ordering::Relaxed);
         }
     }
-    READY_EPOCH.fetch_add(1, Ordering::Release);
     if target == me {
         // A synchronous wake is taken when this processor blocks; anything
         // else waits for this processor's next interrupt or entry, and the
@@ -1268,7 +1311,6 @@ fn delegate_aged_sync(me: usize) {
         let mut rq = CPUS[target].rq.lock();
         rq.ready |= bit(moved);
     }
-    READY_EPOCH.fetch_add(1, Ordering::Release);
     if CPUS[target].idle.load(Ordering::Acquire) == IDLE_HALTED {
         kick(me, target);
     }
