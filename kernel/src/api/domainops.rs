@@ -300,7 +300,7 @@ pub fn unmap(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64
     if request.reserved0 != 0 {
         return Err(status::INVALID_ARGUMENT);
     }
-    let (target, pages, live, mask) = {
+    let (target, pages, live, mask, memory) = {
         let mut machine = MACHINE.lock();
         let cap = resolve(
             &machine,
@@ -331,15 +331,16 @@ pub fn unmap(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64
         // only the ones inside it at this instant. That is the set an
         // invalidation actually has to reach.
         let mask = crate::tlb::space_mask(target);
-        (
-            target,
-            crate::api::memops::withdraw_map(&mut machine, record_index),
-            live,
-            mask,
-        )
+        let (pages, memory) =
+            crate::api::memops::withdraw_map_deferring(&mut machine, record_index);
+        (target, pages, live, mask, memory)
     };
 
-    let ack = crate::tlb::shootdown();
+    // Only the processors that could be holding one of this space's
+    // translations. A processor that has never run in it has nothing to
+    // retire, and making it retire everything it does hold, and waiting for
+    // it, is the cost this used to pay on every unmap.
+    let ack = crate::tlb::shootdown_space(target);
     trace!(
         "mem.unmapped",
         "domain={target} vaddr=0x{:x} pages={pages} active_in_space={live} \
@@ -352,6 +353,13 @@ pub fn unmap(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64
         ack.expected,
         u8::from(!ack.timed_out)
     );
+    // Now that the processors that could hold a translation have acknowledged,
+    // an object nothing else names goes straight back to the pool instead of
+    // through the quarantine.
+    if let Some(memory) = memory {
+        let mut machine = MACHINE.lock();
+        crate::api::memops::collect_memory_acked(&mut machine, memory, !ack.timed_out);
+    }
     if ack.timed_out {
         return Err(status::DRAIN_INCOMPLETE);
     }

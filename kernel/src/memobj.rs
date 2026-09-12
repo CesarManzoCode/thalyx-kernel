@@ -96,6 +96,18 @@ pub struct MemoryObject {
     /// has flushed past this generation, and through the quarantine while one
     /// may not have.
     pub unmapped_at: u64,
+    /// Processors that could be holding a translation of these frames: the
+    /// union, over every mapping ever withdrawn, of the processors the domain
+    /// it was mapped into had run on.
+    ///
+    /// The exact set the reclamation condition is about. "Every online
+    /// processor has flushed past the withdrawal" answers the same question
+    /// with a wider set, and a processor that never ran in any space these
+    /// frames were mapped into holds nothing of them whatever generation it
+    /// last flushed at -- so waiting for it is waiting for nothing, and on a
+    /// machine that no longer interrupts every processor on every unmap it is
+    /// waiting for a while.
+    pub unmapped_cpus: u64,
 }
 
 impl MemoryObject {
@@ -116,6 +128,7 @@ impl MemoryObject {
             label: [0; 16],
             refs: 0,
             unmapped_at: 0,
+            unmapped_cpus: 0,
         }
     }
 

@@ -138,7 +138,11 @@ pub fn build(
         // The run that times this start is the one that asked for a quiet
         // engine; its launcher does not read the runtime's startup notes and
         // pays two milliseconds on the diagnostic plane for each of them.
-        flags: if quiet { native::flag::QUIET_STARTUP } else { 0 },
+        flags: if quiet {
+            native::flag::QUIET_STARTUP
+        } else {
+            0
+        },
     };
     let recipe = Recipe {
         name: "nengine",

@@ -224,6 +224,7 @@ fn image_object(
         label,
         refs: 0,
         unmapped_at: 0,
+        unmapped_cpus: 0,
     };
 
     // SAFETY: the loader copied the module into reserved memory covered by the

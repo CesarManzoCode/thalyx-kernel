@@ -1659,6 +1659,14 @@ fn has_local_work(cpu: usize) -> bool {
 /// use.
 fn halt(cpu: usize) {
     release_credits(cpu);
+    // A processor with nothing to run is never the reason memory cannot come
+    // back. Reclamation waits for every processor to have retired the
+    // translations a withdrawal removed, and one that is about to stop
+    // answering interrupts has no reason to make anyone wait: it holds
+    // nothing it is going to use. Now that an invalidation interrupts only
+    // the processors that could hold one of its translations, an idle
+    // processor is no longer swept along by everyone else's traffic.
+    tlb::refresh_local();
     CPUS[cpu].idle.store(IDLE_HALTED, Ordering::Release);
     IDLE_MASK.fetch_or(bit(cpu), Ordering::AcqRel);
     HALTED_MASK.fetch_or(bit(cpu), Ordering::AcqRel);
