@@ -33,6 +33,29 @@ use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+/// Which lock a [`SpinLock`] is, for the run's own accounting.
+///
+/// One total over every lock in the kernel answered "was a lock the limit"
+/// and could not answer "which one": the control lock, the run queues and the
+/// wait records are taken in different numbers on different paths, and an IPC
+/// round trip takes all three. The classes are what the summary reports
+/// separately.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum LockClass {
+    /// The machine's control lock.
+    Control = 0,
+    /// A processor's run queue.
+    RunQueue = 1,
+    /// A thread's wait record.
+    Wait = 2,
+    /// Everything else: the diagnostic sink, the window roll.
+    Other = 3,
+}
+
+/// Number of classes, which is the number of statistics blocks per processor.
+const CLASSES: usize = 4;
+
 /// Acquisitions of the kernel's locks, and time-stamp counter cycles spent
 /// waiting for them, kept by the processor that did the waiting.
 ///
@@ -41,11 +64,12 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 /// reports is the total and the worst wait, which is what "the lock was the
 /// limit" or "the lock was not the limit" is an argument about.
 ///
-/// One block per processor, each on its own cache line. Four machine-wide
-/// words did the same sums with one difference: every acquisition on every
-/// processor wrote the same line, so counting the lock's traffic was itself a
-/// line handed between processors as often as the lock was -- an extra
-/// transfer per acquisition, charged to the thing being measured.
+/// One block per processor and class, each on its own cache line. Four
+/// machine-wide words did the same sums with one difference: every
+/// acquisition on every processor wrote the same line, so counting the lock's
+/// traffic was itself a line handed between processors as often as the lock
+/// was -- an extra transfer per acquisition, charged to the thing being
+/// measured.
 #[repr(C, align(64))]
 struct LockStats {
     acquisitions: AtomicU64,
@@ -65,24 +89,25 @@ impl LockStats {
     }
 }
 
-static STATS: [LockStats; crate::limits::MAX_CPUS] =
-    [const { LockStats::new() }; crate::limits::MAX_CPUS];
+static STATS: [[LockStats; CLASSES]; crate::limits::MAX_CPUS] =
+    [const { [const { LockStats::new() }; CLASSES] }; crate::limits::MAX_CPUS];
 
-/// This processor's block. Every kernel path that can take a lock runs after
-/// its processor installed its per-processor block, on the bootstrap path and
-/// on the application processors' alike, which is what the spin loop's
-/// invalidation service already relies on.
+/// This processor's block for one class. Every kernel path that can take a
+/// lock runs after its processor installed its per-processor block, on the
+/// bootstrap path and on the application processors' alike, which is what the
+/// spin loop's invalidation service already relies on.
 #[inline]
-fn stats() -> &'static LockStats {
-    &STATS[crate::percpu::index()]
+fn stats(class: LockClass) -> &'static LockStats {
+    &STATS[crate::percpu::index()][class as usize]
 }
 
 /// Acquisitions, acquisitions that had to wait, cycles spent waiting and the
-/// longest single wait, summed over the processors.
+/// longest single wait of one class of lock, summed over the processors.
 #[must_use]
-pub fn contention() -> (u64, u64, u64, u64) {
+pub fn contention(class: LockClass) -> (u64, u64, u64, u64) {
     let mut totals = (0, 0, 0, 0u64);
-    for stats in &STATS {
+    for blocks in &STATS {
+        let stats = &blocks[class as usize];
         totals.0 += stats.acquisitions.load(Ordering::Relaxed);
         totals.1 += stats.contended_waits.load(Ordering::Relaxed);
         totals.2 += stats.contended_cycles.load(Ordering::Relaxed);
@@ -99,6 +124,8 @@ pub struct SpinLock<T> {
     next: AtomicU32,
     /// The ticket now allowed in.
     serving: AtomicU32,
+    /// Which statistics an acquisition is counted under.
+    class: LockClass,
     value: UnsafeCell<T>,
 }
 
@@ -109,11 +136,17 @@ unsafe impl<T: Send> Sync for SpinLock<T> {}
 unsafe impl<T: Send> Send for SpinLock<T> {}
 
 impl<T> SpinLock<T> {
-    /// Creates an unlocked cell.
+    /// Creates an unlocked cell counted under [`LockClass::Other`].
     pub const fn new(value: T) -> Self {
+        Self::of_class(value, LockClass::Other)
+    }
+
+    /// Creates an unlocked cell counted under `class`.
+    pub const fn of_class(value: T, class: LockClass) -> Self {
         Self {
             next: AtomicU32::new(0),
             serving: AtomicU32::new(0),
+            class,
             value: UnsafeCell::new(value),
         }
     }
@@ -125,7 +158,7 @@ impl<T> SpinLock<T> {
     /// holder that is no longer running.
     pub fn lock(&self) -> SpinGuard<'_, T> {
         let ticket = self.next.fetch_add(1, Ordering::Relaxed);
-        let stats = stats();
+        let stats = stats(self.class);
         stats.acquisitions.fetch_add(1, Ordering::Relaxed);
         if self.serving.load(Ordering::Acquire) == ticket {
             return SpinGuard { lock: self };

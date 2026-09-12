@@ -290,7 +290,7 @@ impl ThreadCell {
             bound_invocation: AtomicU64::new(u64::MAX),
             fs_base: AtomicU64::new(0),
             deadline_ns: AtomicU64::new(0),
-            wait: SpinLock::new(WaitRecord::empty()),
+            wait: SpinLock::of_class(WaitRecord::empty(), crate::sync::LockClass::Wait),
             sched: UnsafeCell::new(Sched::empty()),
             control: UnsafeCell::new(Control::empty()),
         }

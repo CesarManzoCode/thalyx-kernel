@@ -99,6 +99,59 @@ fn table(frame: Frame) -> &'static mut [u64; ENTRIES] {
     unsafe { &mut *(frame.hhdm_addr() as *mut [u64; ENTRIES]) }
 }
 
+/// Resolves a virtual address to `(physical address, leaf flags)` in the
+/// hierarchy rooted at `root`, reading the tables the way the processor's own
+/// walker does: one entry at a time, each as it is at that moment.
+///
+/// This is the walk a descriptor copy performs without the control lock, so
+/// the entries are read atomically rather than through a table reference:
+/// another processor may be installing a mapping under the lock while this
+/// one walks, and what this walk must see is either the entry before or the
+/// entry after that store, never a torn one. An entry read as present names a
+/// table or a frame that was fully written before the entry was stored -- the
+/// order the hardware walker relies on too -- and the acquire load is what
+/// makes that order the reader's as well.
+///
+/// What the walk does *not* promise is that the frame stays mapped: that is
+/// the caller's argument, made in `ucopy`.
+#[must_use]
+pub fn translate_in(root: u64, vaddr: u64) -> Option<(u64, u64)> {
+    if !canonical(vaddr) {
+        return None;
+    }
+    let mut frame = Frame::containing(root);
+    let mut level = 3;
+    loop {
+        let entry = load_entry(frame, index(vaddr, level));
+        if entry & PRESENT == 0 {
+            return None;
+        }
+        if level == 0 {
+            return Some(((entry & ADDRESS_MASK) | (vaddr & 0xFFF), entry));
+        }
+        if entry & HUGE != 0 {
+            let size = 1u64 << (12 + 9 * level);
+            return Some(((entry & ADDRESS_MASK) | (vaddr & (size - 1)), entry));
+        }
+        frame = Frame::containing(entry & ADDRESS_MASK);
+        level -= 1;
+    }
+}
+
+/// One entry of the table in `frame`, read atomically.
+#[inline]
+fn load_entry(frame: Frame, slot: usize) -> u64 {
+    debug_assert!(slot < ENTRIES);
+    // SAFETY: `frame` is a page-table frame reached from a root this kernel
+    // built, mapped through the direct map, and `slot` is inside it. The load
+    // is atomic, so it is sound alongside a concurrent store of the same
+    // entry by the holder of the control lock.
+    unsafe {
+        (*(frame.hhdm_addr() as *const core::sync::atomic::AtomicU64).add(slot))
+            .load(core::sync::atomic::Ordering::Acquire)
+    }
+}
+
 fn leaf_flags(rights: Rights) -> u64 {
     let mut flags = PRESENT;
     if rights.write {
@@ -260,26 +313,7 @@ impl AddressSpace {
     /// Resolves a virtual address to `(physical address, leaf flags)`.
     #[must_use]
     pub fn translate(&self, vaddr: u64) -> Option<(u64, u64)> {
-        if !canonical(vaddr) {
-            return None;
-        }
-        let mut frame = self.root;
-        let mut level = 3;
-        loop {
-            let entry = table(frame)[index(vaddr, level)];
-            if entry & PRESENT == 0 {
-                return None;
-            }
-            if level == 0 {
-                return Some(((entry & ADDRESS_MASK) | (vaddr & 0xFFF), entry));
-            }
-            if entry & HUGE != 0 {
-                let size = 1u64 << (12 + 9 * level);
-                return Some(((entry & ADDRESS_MASK) | (vaddr & (size - 1)), entry));
-            }
-            frame = Frame::containing(entry & ADDRESS_MASK);
-            level -= 1;
-        }
+        translate_in(self.root.addr(), vaddr)
     }
 
     /// Removes one 4 KiB mapping and returns the frame it named.

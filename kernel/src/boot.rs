@@ -1030,19 +1030,26 @@ fn scheduling_summary() {
         crate::sched::QUANTUM_NS,
         crate::sched::TICK_HZ
     );
-    // What the control lock actually cost, so "the lock was the limit" stays
-    // an argument about a number.
-    let (acquisitions, waits, cycles, worst_wait) = crate::sync::contention();
-    event!(
-        "lock.control",
-        "acquisitions={acquisitions} contended={waits} waited_cycles={cycles} \
-         worst_wait_cycles={worst_wait} contended_fraction_ppm={}",
-        if acquisitions == 0 {
-            0
-        } else {
-            waits.saturating_mul(1_000_000) / acquisitions
-        }
-    );
+    // What each kind of lock actually cost, so "the lock was the limit" stays
+    // an argument about a number, and about which lock.
+    for (name, class) in [
+        ("lock.control", crate::sync::LockClass::Control),
+        ("lock.runqueue", crate::sync::LockClass::RunQueue),
+        ("lock.wait", crate::sync::LockClass::Wait),
+        ("lock.other", crate::sync::LockClass::Other),
+    ] {
+        let (acquisitions, waits, cycles, worst_wait) = crate::sync::contention(class);
+        event!(
+            name,
+            "acquisitions={acquisitions} contended={waits} waited_cycles={cycles} \
+             worst_wait_cycles={worst_wait} contended_fraction_ppm={}",
+            if acquisitions == 0 {
+                0
+            } else {
+                waits.saturating_mul(1_000_000) / acquisitions
+            }
+        );
+    }
 }
 
 fn summarize(terminal: sched::Terminal) {

@@ -17,10 +17,60 @@
 //! descriptor refers to. The bytes are a message from an adversary: every
 //! field, length, offset and reserved word is checked after the copy, and a
 //! buffer the descriptor points at is still free to change.
+//!
+//! # Copying without the control lock
+//!
+//! A copy walks page tables another processor may be changing, and copies to
+//! or from a frame another processor may be withdrawing, so the question is
+//! what keeps the frame from being handed to somebody else between the
+//! translation and the copy. Until K6 the answer was the control lock, taken
+//! for every descriptor in and every response out: the four extra
+//! acquisitions an IPC round trip paid for its two descriptors were a third
+//! of the lock's traffic, on a lock four processors were already queueing
+//! for.
+//!
+//! The answer now is the invalidation protocol itself, and the copy behaves
+//! exactly like the processor's own translation cache. The walk is performed
+//! by a processor executing in the space it walks -- the calling thread's own
+//! -- and that processor has been in the space's live set since it dispatched
+//! the thread. Interrupts are masked and no lock is taken between a
+//! translation and the copy of the page it resolved, so the processor cannot
+//! refresh in between. A frame comes back to the pool only once every
+//! processor that could hold a translation of it has flushed past the
+//! withdrawal -- the live set for an acknowledged unmap, every online
+//! processor for the quarantine -- and this one has not. A page unmapped
+//! before the walk reaches it is refused as unmapped, which is what a racing
+//! unmap deserves; a page unmapped after is copied, and the frame stays where
+//! it is until the copy is over. A seal is the same story: a page the walk
+//! saw as writable is written before the sealer, which waits for this
+//! processor's acknowledgement, can publish.
 
 use thalyx_boot_protocol::{PAGE_SIZE, USER_MAX_ADDR, USER_MIN_ADDR};
 
-use crate::arch::x86_64::paging::{AddressSpace, FLAG_USER, FLAG_WRITABLE};
+use crate::arch::x86_64::paging::{self, FLAG_USER, FLAG_WRITABLE};
+
+/// The page tables a copy walks: the space the calling thread executes in,
+/// named by its root.
+///
+/// Read from the thread's own record without a lock; the record does not
+/// change while the thread can run.
+#[derive(Clone, Copy, Debug)]
+pub struct UserSpace {
+    root: u64,
+}
+
+impl UserSpace {
+    /// The space the thread running on this processor executes in.
+    ///
+    /// The value is the one loaded in `CR3` right now: a thread runs with its
+    /// own root loaded and the kernel does not switch roots on the way in.
+    #[must_use]
+    pub fn current(thread: usize) -> Self {
+        Self {
+            root: crate::thread::get(thread).control().cr3,
+        }
+    }
+}
 
 /// Largest descriptor any assigned operation uses.
 ///
@@ -143,7 +193,7 @@ fn bounded(addr: u64, len: u64) -> Result<(), Fault> {
 
 /// Runs `f` over the range one page-bounded chunk at a time.
 fn walk(
-    space: &AddressSpace,
+    space: UserSpace,
     addr: u64,
     len: u64,
     writable: bool,
@@ -155,7 +205,7 @@ fn walk(
         let virt = addr + offset;
         let page_offset = virt % PAGE_SIZE;
         let chunk = (PAGE_SIZE - page_offset).min(len - offset);
-        let (phys, flags) = space.translate(virt).ok_or(Fault::Unmapped)?;
+        let (phys, flags) = paging::translate_in(space.root, virt).ok_or(Fault::Unmapped)?;
         if flags & FLAG_USER == 0 {
             return Err(Fault::NotUser);
         }
@@ -169,21 +219,15 @@ fn walk(
 }
 
 /// Copies `len` bytes from the domain's memory into `destination`.
-pub fn copy_in(
-    space: &AddressSpace,
-    addr: u64,
-    len: u64,
-    destination: &mut [u8],
-) -> Result<(), Fault> {
+pub fn copy_in(space: UserSpace, addr: u64, len: u64, destination: &mut [u8]) -> Result<(), Fault> {
     if (len as usize) > destination.len() {
         return Err(Fault::Range);
     }
     walk(space, addr, len, false, |phys, offset, chunk| {
         // SAFETY: `phys` came from this domain's page tables, so it names a
         // frame the direct map covers, and `chunk` stays inside that page. The
-        // destination slice was bounds-checked above. The machine lock is held
-        // and this is a uniprocessor kernel with interrupts masked, so nothing
-        // can unmap the page between the translation and the copy.
+        // destination slice was bounds-checked above. The frame stays mapped
+        // until the copy is over, by the argument in the module comment.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 (thalyx_boot_protocol::HHDM_BASE + phys) as *const u8,
@@ -195,7 +239,7 @@ pub fn copy_in(
 }
 
 /// Copies `source` into the domain's memory.
-pub fn copy_out(space: &AddressSpace, addr: u64, source: &[u8]) -> Result<(), Fault> {
+pub fn copy_out(space: UserSpace, addr: u64, source: &[u8]) -> Result<(), Fault> {
     let len = source.len() as u64;
     walk(space, addr, len, true, |phys, offset, chunk| {
         // SAFETY: as `copy_in`, with the additional check that the mapping is

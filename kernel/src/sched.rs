@@ -231,11 +231,14 @@ const IDLE_HALTED: u8 = 2;
 impl CpuState {
     const fn empty() -> Self {
         Self {
-            rq: SpinLock::new(RunQueue {
-                ready: 0,
-                cursor: 0,
-                hint: NO_THREAD,
-            }),
+            rq: SpinLock::of_class(
+                RunQueue {
+                    ready: 0,
+                    cursor: 0,
+                    hint: NO_THREAD,
+                },
+                crate::sync::LockClass::RunQueue,
+            ),
             deferred: [const { AtomicUsize::new(0) }; DEFERRED_WAKES],
             deferred_count: AtomicUsize::new(0),
             current: AtomicUsize::new(NO_THREAD),

@@ -399,4 +399,5 @@ impl Machine {
 pub type Receipt = ReceiptRecord;
 
 /// The control lock: what protects the tables above.
-pub static MACHINE: SpinLock<Machine> = SpinLock::new(Machine::new());
+pub static MACHINE: SpinLock<Machine> =
+    SpinLock::of_class(Machine::new(), crate::sync::LockClass::Control);

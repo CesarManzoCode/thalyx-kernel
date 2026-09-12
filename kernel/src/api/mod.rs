@@ -781,7 +781,7 @@ fn mark_reached(spec: &'static OpSpec) {
 /// once they are here, which is why the header is checked after the copy and
 /// never in the memory the caller can still write.
 fn read_descriptor(
-    machine: &Machine,
+    space: ucopy::UserSpace,
     domain: usize,
     operation: u32,
     spec: &OpSpec,
@@ -791,9 +791,6 @@ fn read_descriptor(
     if spec.descriptor_len == 0 {
         return Ok(());
     }
-    let Some(space) = machine.domains[domain].space.as_ref() else {
-        return Err(status::PEER_DEAD);
-    };
     if let Err(fault) = ucopy::copy_in(
         space,
         frame.rdx,
@@ -820,16 +817,13 @@ fn read_descriptor(
 
 /// Copies a response a handler wrote back into the caller's descriptor.
 fn write_response(
-    machine: &Machine,
+    space: ucopy::UserSpace,
     domain: usize,
     operation: u32,
     spec: &OpSpec,
     frame: &TrapFrame,
     staging: &Staging,
 ) -> Result<(), i64> {
-    let Some(space) = machine.domains[domain].space.as_ref() else {
-        return Err(status::PEER_DEAD);
-    };
     let bytes = &staging.bytes[..spec.descriptor_len as usize];
     if let Err(fault) = ucopy::copy_out(space, frame.rdx, bytes) {
         // The operation happened. A failed copy of its result is a delivery
@@ -906,23 +900,20 @@ pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64)
         crate::domain::reap_dead();
     }
 
-    // Whether the answer has already been copied back, which the operations
-    // that hold the lock for their whole run do on the way out of that hold.
-    let mut answered = false;
+    // The descriptor comes in and the response goes out without the control
+    // lock: the copies walk the calling thread's own space, and what keeps a
+    // page under them is the invalidation protocol, not the lock. See
+    // `ucopy`. An operation's hold of the lock is then the operation and
+    // nothing else, and the two operations that wait take it once each way
+    // instead of twice.
+    let space = ucopy::UserSpace::current(thread);
+    if let Err(code) = read_descriptor(space, domain, operation, spec, frame, &mut staging) {
+        return refuse(domain, operation, code);
+    }
 
     let outcome = if waits(operation) {
         // These own their locking: they may sleep, and a lock is never held
-        // across a context switch, so the descriptor is copied in under a hold
-        // of its own before the handler starts.
-        {
-            let machine = MACHINE.lock();
-            if let Err(code) =
-                read_descriptor(&machine, domain, operation, spec, frame, &mut staging)
-            {
-                drop(machine);
-                return refuse(domain, operation, code);
-            }
-        }
+        // across a context switch.
         match operation {
             op::ENDPOINT_CALL => ipcops::call(&ctx_base, spec, &mut staging),
             op::ENDPOINT_RECEIVE => ipcops::receive(&ctx_base, spec, &mut staging),
@@ -935,48 +926,33 @@ pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64)
             _ => Err(status::NOT_SUPPORTED),
         }
     } else {
-        // One acquisition for the whole operation. Copying a descriptor in and
-        // a response out both mean walking the calling domain's page tables,
-        // so both need the lock the operation itself needs; taking it three
-        // times in a row made most of this machine's lock traffic a handover
-        // of a lock the same processor was about to ask for again, and every
-        // handover is a cache line another processor has to be given.
+        // One acquisition for the whole operation, held for the operation
+        // alone: the resolution of the handle and the handler.
         let mut machine = MACHINE.lock();
-        let outcome = match read_descriptor(&machine, domain, operation, spec, frame, &mut staging)
-        {
-            Err(code) => Err(code),
-            Ok(()) => {
-                let resolved = if observes_lineage(operation) {
-                    resolve_observer(&machine, domain, frame.rdi, spec.object_type, spec.rights)
-                } else {
-                    resolve(
-                        &machine,
-                        domain,
-                        frame.rdi,
-                        spec.object_type,
-                        spec.rights,
-                        now,
-                    )
-                };
-                match resolved {
-                    Ok(cap) => {
-                        let ctx = Ctx { cap, ..ctx_base };
-                        simple(&mut machine, &ctx, &mut staging, operation)
-                    }
-                    Err(code) => Err(code),
-                }
-            }
+        let resolved = if observes_lineage(operation) {
+            resolve_observer(&machine, domain, frame.rdi, spec.object_type, spec.rights)
+        } else {
+            resolve(
+                &machine,
+                domain,
+                frame.rdi,
+                spec.object_type,
+                spec.rights,
+                now,
+            )
         };
-        if spec.writes_response && staging.filled {
-            answered = true;
-            if let Err(code) = write_response(&machine, domain, operation, spec, frame, &staging) {
-                drop(machine);
-                return refuse(domain, operation, code);
+        let outcome = match resolved {
+            Ok(cap) => {
+                let ctx = Ctx { cap, ..ctx_base };
+                simple(&mut machine, &ctx, &mut staging, operation)
             }
-        }
+            Err(code) => Err(code),
+        };
         drop(machine);
         // The wakes the operation claimed go out now, with the lock dropped:
-        // a reply's caller, a raised signal's waiters.
+        // a reply's caller, a raised signal's waiters. Before the response is
+        // copied back: the woken thread has a processor to reach, and the
+        // caller's own answer is the caller's to wait for.
         crate::sched::flush_wakes();
         outcome
     };
@@ -990,12 +966,11 @@ pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64)
     // ones that refuse with an explanation -- a retirement reporting what is
     // still outstanding -- would otherwise have their answer thrown away here,
     // which is the one place it cannot be recovered.
-    if !answered && spec.writes_response && staging.filled {
-        let machine = MACHINE.lock();
-        if let Err(code) = write_response(&machine, domain, operation, spec, frame, &staging) {
-            drop(machine);
-            return refuse(domain, operation, code);
-        }
+    if spec.writes_response
+        && staging.filled
+        && let Err(code) = write_response(space, domain, operation, spec, frame, &staging)
+    {
+        return refuse(domain, operation, code);
     }
 
     match outcome {

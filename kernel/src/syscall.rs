@@ -90,7 +90,7 @@ pub fn handle(frame: &mut TrapFrame) {
                 frame.rax = status::INVALID_ARGUMENT as u64;
                 return;
             }
-            limits_query(domain, frame);
+            limits_query(thread, frame);
         }
         entry::THREAD_POINTER_SET => {
             if domain == usize::MAX {
@@ -146,7 +146,7 @@ pub fn handle(frame: &mut TrapFrame) {
 /// it reads here, so the only two values the kernel supplies itself are the
 /// ones the schema cannot know: the page size it actually runs on and the epoch
 /// this boot started at.
-fn limits_query(domain: usize, frame: &mut TrapFrame) {
+fn limits_query(thread: usize, frame: &mut TrapFrame) {
     if frame.r10 != core::mem::size_of::<Limits>() as u64 {
         frame.rax = k2status::INVALID_ARGUMENT as u64;
         frame.rdx = 0;
@@ -190,15 +190,7 @@ fn limits_query(domain: usize, frame: &mut TrapFrame) {
             core::mem::size_of::<Limits>(),
         )
     };
-    let machine = MACHINE.lock();
-    let Some(space) = machine.domains[domain].space.as_ref() else {
-        drop(machine);
-        frame.rax = k2status::PEER_DEAD as u64;
-        frame.rdx = 0;
-        return;
-    };
-    let written = ucopy::copy_out(space, frame.rdx, bytes);
-    drop(machine);
+    let written = ucopy::copy_out(ucopy::UserSpace::current(thread), frame.rdx, bytes);
 
     match written {
         Ok(()) => {
