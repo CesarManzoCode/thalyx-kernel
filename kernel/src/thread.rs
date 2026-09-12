@@ -110,6 +110,8 @@ pub struct WaitRecord {
     pub wake_status: i64,
     /// Auxiliary value a woken thread returns.
     pub wake_aux: u64,
+    /// The sleeper's offer to the waker: where the answer may be laid out.
+    pub handoff: Handoff,
 }
 
 impl WaitRecord {
@@ -119,7 +121,56 @@ impl WaitRecord {
             deadline_ns: 0,
             wake_status: 0,
             wake_aux: 0,
+            handoff: Handoff::NONE,
         }
+    }
+}
+
+/// A sleeping thread's offer to whoever ends its wait: the staging buffer of
+/// the entry it sleeps in, and the handle it entered with.
+///
+/// A thread that blocks for a message or a reply leaves its staging buffer
+/// behind on its kernel stack, and the entry it is blocked in will lay the
+/// answer out there when it wakes. Offering the buffer lets the waker lay
+/// the answer out instead, in the hold of the control lock it already has:
+/// the sleeper then wakes with its answer and nothing left to lock for.
+///
+/// The buffer is valid for exactly as long as the wait is: it is a frame of
+/// the sleeping entry, and the thread cannot leave that entry until its wait
+/// is consumed. Whoever consumes it -- and only one waker can -- holds the
+/// only reference until it issues the wake, and issues the wake last.
+#[derive(Clone, Copy, Debug)]
+pub struct Handoff {
+    /// Address of the staging buffer, or zero for no offer.
+    staging: usize,
+    /// The handle the sleeper entered with, for the waker to resolve as the
+    /// sleeper itself would on waking.
+    pub handle: u64,
+}
+
+impl Handoff {
+    /// No offer.
+    pub const NONE: Self = Self {
+        staging: 0,
+        handle: 0,
+    };
+
+    /// The staging buffer offered, if any.
+    ///
+    /// # Safety
+    ///
+    /// The caller must have consumed the wait this offer came with, under
+    /// the control lock, and must not have issued the wake yet: the buffer
+    /// belongs to a frame of the sleeping thread's kernel stack, which is
+    /// stable exactly until the thread runs again.
+    #[allow(clippy::mut_from_ref)]
+    pub unsafe fn staging(&self) -> Option<&mut crate::ucopy::Staging> {
+        if self.staging == 0 {
+            return None;
+        }
+        // SAFETY: the caller's contract; the address was taken from a live
+        // `&mut Staging` by the sleeper itself.
+        Some(unsafe { &mut *(self.staging as *mut crate::ucopy::Staging) })
     }
 }
 
@@ -529,20 +580,47 @@ pub fn claim_wake(
     status: i64,
     aux: u64,
 ) -> bool {
+    claim_handoff(index, matches, status, aux).is_some()
+}
+
+/// [`claim_wake`], returning the sleeper's [`Handoff`] on success.
+///
+/// The offer is the waker's from here until it issues the wake: the wait it
+/// came with is consumed, so no other waker can take it, no deadline can end
+/// it, and the thread stays blocked until this processor's deferred wakes
+/// are flushed.
+pub fn claim_handoff(
+    index: usize,
+    matches: impl FnOnce(&WaitRecord) -> bool,
+    status: i64,
+    aux: u64,
+) -> Option<Handoff> {
     let cell = get(index);
     if cell.state() != ThreadState::Blocked {
-        return false;
+        return None;
     }
     let mut record = cell.wait.lock();
     if cell.state() != ThreadState::Blocked || !matches(&record) {
-        return false;
+        return None;
     }
+    let handoff = record.handoff;
     record.wait = Wait::None;
     record.deadline_ns = 0;
     record.wake_status = status;
     record.wake_aux = aux;
+    record.handoff = Handoff::NONE;
     cell.deadline_ns.store(0, Ordering::Relaxed);
-    true
+    Some(handoff)
+}
+
+/// Sets the auxiliary value a claimed thread will return, before its wake is
+/// issued.
+///
+/// For a waker that learns the value only after the claim -- a delivery whose
+/// ticket is installed once the sleeper is known to be taking it. Nothing
+/// else touches the record between the claim and the wake.
+pub fn set_wake_aux(index: usize, aux: u64) {
+    get(index).wait.lock().wake_aux = aux;
 }
 
 /// [`claim_wake`], with the wake deferred to the next flush of this
@@ -572,16 +650,39 @@ pub fn defer_wake_if(
 /// before calling this -- which every caller does, by registering the wait
 /// while still holding that lock.
 pub fn prepare_wait(index: usize, wait: Wait, deadline_ns: u64) {
+    prepare_wait_offering(index, wait, deadline_ns, Handoff::NONE);
+}
+
+/// [`prepare_wait`], offering the waker the sleeper's staging buffer.
+///
+/// `staging` must be the buffer of the entry the thread is about to block
+/// in, and `handle` the handle that entry was made with. A waker that takes
+/// the offer lays the answer out in the buffer and leaves a nonzero
+/// auxiliary value -- a handle or an object identifier, neither of which is
+/// ever zero -- for the sleeper to return; a wake with a zero one means the
+/// sleeper has to go and look for itself, as it did before offers existed.
+pub fn prepare_wait_offering(index: usize, wait: Wait, deadline_ns: u64, offer: Handoff) {
     let cell = get(index);
     let mut record = cell.wait.lock();
     record.wait = wait;
     record.deadline_ns = deadline_ns;
     record.wake_status = thalyx_abi::status::OK;
     record.wake_aux = 0;
+    record.handoff = offer;
     cell.deadline_ns.store(deadline_ns, Ordering::Relaxed);
     cell.set_state(ThreadState::Blocked);
     if deadline_ns != 0 {
         crate::sched::note_deadline(deadline_ns);
+    }
+}
+
+/// An offer of `staging`, entered with `handle`, for
+/// [`prepare_wait_offering`].
+#[must_use]
+pub fn offer(staging: &mut crate::ucopy::Staging, handle: u64) -> Handoff {
+    Handoff {
+        staging: core::ptr::from_mut(staging) as usize,
+        handle,
     }
 }
 

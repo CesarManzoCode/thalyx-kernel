@@ -20,7 +20,7 @@
 use thalyx_abi::generated::{
     CallResult, EffectRequest, EndpointCreateRequest, EndpointInfo, FaultReport, InvocationInfo,
     MessageHeader, OpSpec, ReceiveResult, ReplyRequest, ResolveRequest, SendRequest, cap_op,
-    message_kind, outcome as outcome_value, receipt_kind, right, status,
+    message_kind, object_type, op, outcome as outcome_value, receipt_kind, right, status,
 };
 
 use crate::api::{BODY, Ctx, begin_response, receipt, reserve_receipt, resolve};
@@ -529,7 +529,7 @@ fn admit(
     // that processor picks the receiver up on its way to idle; kicking another
     // one would turn a round trip on one processor into two interrupts across
     // two. A sender that keeps running has no free processor to offer.
-    wake_receiver(machine, endpoint, waiter.is_none());
+    hand_to_receiver(machine, endpoint, waiter.is_none(), ctx.now);
     Ok(Admitted {
         invocation: invocation_index as u16,
         generation,
@@ -537,7 +537,19 @@ fn admit(
     })
 }
 
-fn wake_receiver(machine: &mut Machine, endpoint: usize, kick: bool) {
+/// Wakes a thread waiting to receive on `endpoint`, delivering the head of
+/// the queue to it on the way if it offered its buffer.
+///
+/// The delivery is the one the receiver would perform on waking, done in the
+/// hold of the control lock the admission already has: the receiver's handle
+/// is resolved as the receiver would resolve it, the ticket is installed in
+/// the receiver's domain, and the message is laid out in the receiver's own
+/// staging buffer. What the receiver saves is a hold of the lock -- one
+/// handover fewer of a lock four processors queue for -- and it wakes with
+/// its message in hand. A receiver whose handle no longer resolves, or whose
+/// domain cannot take the ticket, is woken empty-handed and finds that out
+/// for itself, exactly as it would have.
+fn hand_to_receiver(machine: &mut Machine, endpoint: usize, kick: bool, now: u64) {
     let generation = machine.endpoints[endpoint].generation;
     // A caller that will block for the reply hands its processor to the
     // receiver; a sender that keeps running sends it to an idle one.
@@ -546,19 +558,43 @@ fn wake_receiver(machine: &mut Machine, endpoint: usize, kick: bool) {
     while waiting != 0 {
         let index = waiting.trailing_zeros() as usize;
         waiting &= waiting - 1;
-        if thread::defer_wake_if(
+        // Whether it was waiting here or not, the bit goes: a timeout, a
+        // cancellation or a message it already took has moved it on, and a
+        // wake moves it on now.
+        machine.endpoints[endpoint].receivers &= !(1u64 << index);
+        let Some(offer) = thread::claim_handoff(
             index,
             |record| record.wait == Wait::Receive(endpoint as u16, generation),
             status::OK,
             0,
-            hint,
-        ) {
-            machine.endpoints[endpoint].receivers &= !(1u64 << index);
-            return;
+        ) else {
+            continue;
+        };
+        // SAFETY: the wait was consumed just above, under the control lock,
+        // and the wake is issued only after this hold, at the end of this
+        // function.
+        if let Some(staging) = unsafe { offer.staging() } {
+            let receiver = machine.endpoints[endpoint].receiver_domain as usize;
+            let head = machine.endpoints[endpoint].head;
+            let resolved = resolve(
+                machine,
+                receiver,
+                offer.handle,
+                object_type::ENDPOINT,
+                right::ENDPOINT_RECEIVE,
+                now,
+            );
+            if head != NO_MESSAGE
+                && resolved.is_ok_and(|cap| cap.object.index as usize == endpoint)
+                && let Ok((ticket, result)) = deliver(machine, receiver, endpoint, head as usize)
+            {
+                begin_response(staging, op::ENDPOINT_RECEIVE);
+                staging.write(BODY, result);
+                thread::set_wake_aux(index, ticket);
+            }
         }
-        // It is not waiting here any more: a timeout, a cancellation or a
-        // message it already took. The bit goes with it.
-        machine.endpoints[endpoint].receivers &= !(1u64 << index);
+        crate::sched::defer_wake(index, hint);
+        return;
     }
 }
 
@@ -608,17 +644,25 @@ pub fn call(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
             message_kind::REQUEST,
             Some(ctx.thread),
         )?;
-        thread::prepare_wait(
+        // The buffer the reply will be laid out in, offered to the replier
+        // so it can lay it out itself.
+        thread::prepare_wait_offering(
             ctx.thread,
             Wait::Reply(admitted.invocation, admitted.generation),
             ctx.deadline,
+            thread::offer(staging, ctx.handle),
         );
         (admitted.invocation, admitted.generation)
     };
 
     crate::sched::block_current();
 
-    let (woken, _) = thread::take_wake_status(ctx.thread);
+    let (woken, delivered) = thread::take_wake_status(ctx.thread);
+    if woken == status::OK && delivered != 0 {
+        // The replier laid the reply out here and released the invocation;
+        // the value is its identifier. Nothing is left to lock for.
+        return Ok(delivered);
+    }
     let mut machine = MACHINE.lock();
     let index = invocation as usize;
     if machine.invocations[index].generation != generation {
@@ -711,7 +755,7 @@ pub fn receive(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i
 
             let head = machine.endpoints[endpoint].head;
             if head != NO_MESSAGE {
-                let delivered = deliver(&mut machine, ctx, endpoint, head as usize);
+                let delivered = deliver(&mut machine, ctx.domain, endpoint, head as usize);
                 drop(machine);
                 crate::sched::flush_wakes();
                 let (ticket, result) = delivered?;
@@ -724,19 +768,27 @@ pub fn receive(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i
             if ctx.flags & thalyx_abi::generated::flag::NONBLOCKING != 0 {
                 return Err(status::WOULD_BLOCK);
             }
-            thread::prepare_wait(
+            // The buffer the message will be laid out in, offered to the
+            // sender so it can lay it out itself.
+            thread::prepare_wait_offering(
                 ctx.thread,
                 Wait::Receive(endpoint as u16, machine.endpoints[endpoint].generation),
                 ctx.deadline,
+                thread::offer(staging, ctx.handle),
             );
             // Registered under the same lock as the wait, so a sender that
             // takes the lock after this finds the bit.
             machine.endpoints[endpoint].receivers |= 1u64 << ctx.thread;
         }
         crate::sched::block_current();
-        let (woken, _) = thread::take_wake_status(ctx.thread);
+        let (woken, ticket) = thread::take_wake_status(ctx.thread);
         if woken != status::OK {
             return Err(woken);
+        }
+        if ticket != 0 {
+            // The sender delivered on its way: the message is laid out here
+            // and the ticket is installed. Nothing is left to lock for.
+            return Ok(ticket);
         }
     }
 }
@@ -749,7 +801,7 @@ pub fn receive(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i
 /// slots is done under it.
 fn deliver(
     machine: &mut Machine,
-    ctx: &Ctx,
+    receiver: usize,
     endpoint: usize,
     message_index: usize,
 ) -> Result<(u64, ReceiveResult), i64> {
@@ -786,7 +838,7 @@ fn deliver(
         invocation_index as u16,
         machine.invocations[invocation_index].generation,
     );
-    let sponsor = machine.domains[ctx.domain].owner_scope;
+    let sponsor = machine.domains[receiver].owner_scope;
     let grant = crate::api::grant_alloc(
         machine,
         sponsor,
@@ -798,7 +850,7 @@ fn deliver(
         machine.invocations[invocation_index].facet,
     )
     .ok_or(status::LIMIT_EXHAUSTED)?;
-    let Some(ticket) = crate::api::cap_install(machine, ctx.domain, object, grant, None) else {
+    let Some(ticket) = crate::api::cap_install(machine, receiver, object, grant, None) else {
         crate::api::collect_grant(machine, grant);
         return Err(status::LIMIT_EXHAUSTED);
     };
@@ -817,7 +869,7 @@ fn deliver(
 
     machine.invocations[invocation_index].state = State::Delivered;
     machine.invocations[invocation_index].message = NO_MESSAGE;
-    machine.invocations[invocation_index].receiver_domain = ctx.domain as u16;
+    machine.invocations[invocation_index].receiver_domain = receiver as u16;
 
     let grant_id = {
         let grant = machine.invocations[invocation_index].grant;
@@ -872,7 +924,7 @@ fn deliver(
         "invocation={invocation_id} endpoint={} receiver_domain={} facet={invocation_facet} \
          caps={cap_count} payload_len={payload_len} cancel={} ticket=0x{ticket:x}",
         machine.endpoints[endpoint].id,
-        machine.domains[ctx.domain].id,
+        machine.domains[receiver].id,
         cancel.name()
     );
     Ok((ticket, result))
@@ -1014,11 +1066,6 @@ pub fn reply(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<
         }
     }
 
-    machine.invocations[index].reply_payload = request.payload;
-    machine.invocations[index].reply_len = request.payload_len;
-    machine.invocations[index].reply_caps = installed;
-    machine.invocations[index].reply_cap_count = request.cap_count;
-    machine.invocations[index].reply_result = request.result;
     machine.invocations[index].replied = true;
     machine.invocations[index].outcome = outcome_value::COMMITTED;
 
@@ -1031,8 +1078,65 @@ pub fn reply(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<
         request.cap_count,
         request.result
     );
-    wake_waiter(machine, index, status::OK, WakeHint::Sync);
+
+    // The caller is waiting for exactly this, and offered the buffer it will
+    // read the reply from. Laying the reply out there, and releasing the
+    // invocation the caller would otherwise come back for, is the work the
+    // caller's return would do under its own hold of the control lock; done
+    // here, the caller wakes with its reply and returns without one.
+    let generation = machine.invocations[index].generation;
+    let waiter = machine.invocations[index].waiter;
+    let taken = waiter.and_then(|waiter| {
+        thread::claim_handoff(
+            waiter,
+            |record| record.wait == Wait::Reply(index as u16, generation),
+            status::OK,
+            0,
+        )
+        .map(|offer| (waiter, offer))
+    });
+    match taken {
+        Some((waiter, offer)) => {
+            // SAFETY: the wait was consumed just above, under the control
+            // lock, and the wake is deferred to after this hold.
+            if let Some(staging) = unsafe { offer.staging() } {
+                begin_response(staging, op::ENDPOINT_CALL);
+                staging.write(
+                    BODY,
+                    CallResult {
+                        payload_len: request.payload_len,
+                        cap_count: request.cap_count,
+                        caps: installed,
+                        result: request.result,
+                        invocation_id,
+                        payload: request.payload,
+                    },
+                );
+                release_invocation(machine, index);
+                thread::set_wake_aux(waiter, invocation_id);
+            } else {
+                store_reply(machine, index, &request, installed);
+            }
+            crate::sched::defer_wake(waiter, WakeHint::Sync);
+        }
+        None => {
+            // Not waiting any more -- timed out, or cancelled -- or waiting
+            // without an offer. The reply is kept on the invocation, where a
+            // return that still finds it, or a query, reads it.
+            store_reply(machine, index, &request, installed);
+        }
+    }
     Ok(invocation_id)
+}
+
+/// Keeps a reply on its invocation for a caller that will read it from there.
+fn store_reply(machine: &mut Machine, index: usize, request: &ReplyRequest, installed: [u64; 4]) {
+    let slot = &mut machine.invocations[index];
+    slot.reply_payload = request.payload;
+    slot.reply_len = request.payload_len;
+    slot.reply_caps = installed;
+    slot.reply_cap_count = request.cap_count;
+    slot.reply_result = request.result;
 }
 
 /// Admits one effect against the lineage that admitted the request.
