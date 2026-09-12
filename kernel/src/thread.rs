@@ -205,6 +205,9 @@ pub struct Sched {
     pub dispatched: bool,
     /// Processor the thread last ran on.
     pub last_cpu: usize,
+    /// Counter reading when the thread was last made ready, for a hint not
+    /// to jump a queue that has waited past the grace.
+    pub enqueued_tsc: u64,
     /// Times the thread was dispatched on a processor other than the last one.
     pub migrations: u64,
     /// Times the timer ended the thread's dispatch: its reservation was taken
@@ -235,6 +238,7 @@ impl Sched {
             dispatch_recovery: false,
             dispatched: false,
             last_cpu: usize::MAX,
+            enqueued_tsc: 0,
             migrations: 0,
             preemptions: 0,
             preempt_records: 0,

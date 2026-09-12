@@ -626,7 +626,13 @@ fn pick_and_reserve(rq: &mut RunQueue, cpu: usize, current: usize, now: u64, fai
     if hint != NO_THREAD {
         rq.hint = NO_THREAD;
         CPUS[cpu].sync_since.store(0, Ordering::Relaxed);
-        if !fair && rq.ready & bit(hint) != 0 && eligible(cpu, hint) {
+        // The hint jumps the queue, but not a queue that has waited: a pair
+        // handing a processor back and forth would otherwise leave a third
+        // thread queued there for as long as the pair kept going -- the
+        // auditor, at four pairs, with the receipts it drains filling up
+        // behind it. A thread that has waited the grace goes first.
+        if !fair && rq.ready & bit(hint) != 0 && eligible(cpu, hint) && !aged(rq.ready & !bit(hint))
+        {
             if reserve_for(cpu, hint, now) {
                 rq.ready &= !bit(hint);
                 rq.cursor = next_slot(hint);
@@ -702,6 +708,27 @@ fn pick_and_reserve(rq: &mut RunQueue, cpu: usize, current: usize, now: u64, fai
         CPUS[cpu].throttled.store(true, Ordering::Release);
     }
     idle_thread(cpu)
+}
+
+/// Whether any thread in `queued` has waited longer than the wake grace.
+fn aged(queued: u64) -> bool {
+    if queued == 0 {
+        return false;
+    }
+    let now = cpu::rdtsc();
+    let grace = grace_cycles(WAKE_GRACE_NS);
+    let mut remaining = queued;
+    while remaining != 0 {
+        let index = remaining.trailing_zeros() as usize;
+        remaining &= remaining - 1;
+        // SAFETY: a read of one word of a queued thread's record, for a
+        // scheduling hint; the thread is ready and standing on no processor.
+        let enqueued = unsafe { thread::get(index).sched() }.enqueued_tsc;
+        if now.wrapping_sub(enqueued) >= grace {
+            return true;
+        }
+    }
+    false
 }
 
 /// The slot a round-robin cursor moves to after `index`, without a division.
@@ -1040,35 +1067,32 @@ fn schedule(cpu: usize) -> usize {
 
 // ------------------------------------------------------------------- wakes
 
-/// Chooses the processor a woken thread should run on when its waker keeps
-/// running: where it last ran if that is idle, else any idle processor, else
-/// where it last ran.
-fn select_cpu(index: usize, me: usize) -> usize {
+/// An idle processor with nothing queued, for a woken thread: where it last
+/// ran, if that is one and `last_only` asks for no other; else a polling
+/// one, else a halted one.
+///
+/// Idle *and* with nothing already waiting there. A processor stays in the
+/// idle set from the moment it stops running until it notices the work it
+/// has been given, so a burst of wakes that reads the set alone hands every
+/// one of them to the same processor -- which is how four benchmark pairs
+/// came to start life on one processor while three others idled.
+fn idle_cpu_for(index: usize, me: usize, last_only: bool) -> Option<usize> {
     // SAFETY: the thread is blocked and standing on no processor, so nothing
     // writes its scheduling record.
     let last = unsafe { thread::get(index).sched().last_cpu };
-    // Idle *and* with nothing already waiting there. A processor stays in the
-    // idle set from the moment it stops running until it notices the work it
-    // has been given, so a burst of wakes that reads the set alone hands every
-    // one of them to the same processor -- which is how four benchmark pairs
-    // came to start life on one processor while three others idled.
     let idle = IDLE_MASK.load(Ordering::Acquire);
     let free = |cpu: usize| {
-        cpu < MAX_CPUS && idle & bit(cpu) != 0 && CPUS[cpu].is_online() && queue_depth(cpu) == 0
+        cpu < MAX_CPUS
+            && cpu != me
+            && idle & bit(cpu) != 0
+            && CPUS[cpu].is_online()
+            && queue_depth(cpu) == 0
     };
     if free(last) {
-        return last;
+        return Some(last);
     }
-    // This processor, when the thread last ran here and nothing is queued.
-    // It is not idle -- it is running the thread doing the waking -- but the
-    // cache is warm here and, above all, no other processor has to be
-    // interrupted: an inter-processor interrupt costs about a microsecond and
-    // a half on this platform, measured, which is a third of an IPC round
-    // trip. The woken thread takes this processor at the waker's next kernel
-    // exit, which is what `need_resched` is for. Linux's `wake_affine` makes
-    // the same choice for the same reason.
-    if last == me && queue_depth(me) == 0 {
-        return me;
+    if last_only {
+        return None;
     }
     // A processor that is polling takes the work by looking; a processor that
     // has halted has to be interrupted, and an interrupt costs about a
@@ -1081,9 +1105,36 @@ fn select_cpu(index: usize, me: usize) -> usize {
             let candidate = candidates.trailing_zeros() as usize;
             candidates &= candidates - 1;
             if free(candidate) {
-                return candidate;
+                return Some(candidate);
             }
         }
+    }
+    None
+}
+
+/// Chooses the processor a woken thread should run on when its waker keeps
+/// running: where it last ran if that is idle, else any idle processor, else
+/// where it last ran.
+fn select_cpu(index: usize, me: usize) -> usize {
+    // SAFETY: the thread is blocked and standing on no processor, so nothing
+    // writes its scheduling record.
+    let last = unsafe { thread::get(index).sched().last_cpu };
+    if let Some(idle) = idle_cpu_for(index, me, true) {
+        return idle;
+    }
+    // This processor, when the thread last ran here and nothing is queued.
+    // It is not idle -- it is running the thread doing the waking -- but the
+    // cache is warm here and, above all, no other processor has to be
+    // interrupted: an inter-processor interrupt costs about a microsecond and
+    // a half on this platform, measured, which is a third of an IPC round
+    // trip. The woken thread takes this processor at the waker's next kernel
+    // exit, which is what `need_resched` is for. Linux's `wake_affine` makes
+    // the same choice for the same reason.
+    if last == me && queue_depth(me) == 0 {
+        return me;
+    }
+    if let Some(idle) = idle_cpu_for(index, me, false) {
+        return idle;
     }
     // Nothing is idle. The processor with the shortest queue then, and the
     // one it last ran on to break a tie: a wake that always returns to
@@ -1302,17 +1353,30 @@ pub fn wake(index: usize, hint: WakeHint) {
         // serialised on one processor while three others idle -- measured, at
         // `scale.ipc:4`. Linux draws the same line in `wake_affine`, from
         // `this_rq()->nr_running`.
+        //
+        // Sooner than an *idle* processor. When none is idle, the alternative
+        // is a busy one: an interrupt to send, a thread to displace there,
+        // and a pair that ran on one processor now running on two. Measured
+        // at four pairs on four processors: the auditor's wake lands in some
+        // pair's queue every sixteen admissions, and every synchronous wake
+        // that found it there went to another processor -- a tenth of them,
+        // each an interrupt. The thread stays here, with the hint, and runs
+        // when this processor blocks; if this processor does not block, the
+        // aged hint is delegated or honoured on the way out of the kernel.
         WakeHint::Sync if local_queue_empty(me) => me,
-        _ => select_cpu(index, me),
+        WakeHint::Sync => idle_cpu_for(index, me, false).unwrap_or(me),
+        WakeHint::Any => select_cpu(index, me),
     };
     {
         let mut rq = CPUS[target].rq.lock();
         rq.ready |= bit(index);
+        let now = cpu::rdtsc();
+        // SAFETY: the thread is blocked and standing on no processor, and it
+        // is claimed for `target`'s queue under that queue's lock.
+        unsafe { cell.sched() }.enqueued_tsc = now;
         if hint == WakeHint::Sync && target == me {
             rq.hint = index;
-            CPUS[target]
-                .sync_since
-                .store(cpu::rdtsc().max(1), Ordering::Relaxed);
+            CPUS[target].sync_since.store(now.max(1), Ordering::Relaxed);
         }
     }
     drop(record);
@@ -1411,7 +1475,10 @@ fn delegate_aged_sync(me: usize) {
     }
     let idle = IDLE_MASK.load(Ordering::Acquire);
     if idle == 0 {
-        // Nowhere to send it; it waits for this processor's next switch.
+        // Nowhere to send it. It has waited the grace already, so it takes
+        // this processor now, as it would have taken another one had there
+        // been one: the current thread returns to the queue behind it.
+        CPUS[me].need_resched.store(true, Ordering::Release);
         return;
     }
     let target = idle.trailing_zeros() as usize;
@@ -1481,6 +1548,10 @@ pub fn on_kernel_exit() {
     }
     if CPUS[me].sync_since.load(Ordering::Relaxed) != 0 {
         delegate_aged_sync(me);
+        // An aged hint with nowhere to go takes this processor instead.
+        if CPUS[me].need_resched.load(Ordering::Acquire) {
+            schedule(me);
+        }
     }
 }
 
