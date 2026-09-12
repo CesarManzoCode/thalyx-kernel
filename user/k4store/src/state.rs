@@ -203,6 +203,9 @@ pub struct Store {
     /// refused, and the run would carry on writing after the point it was
     /// supposed to be cut at.
     pub demanded: Option<Fault>,
+    /// The control log this service's admissions are recorded in, or zero
+    /// before the loop hands it over.
+    pub control_log: u64,
 
     pub uuid: [u8; 16],
     pub store_epoch: u64,
@@ -269,11 +272,15 @@ fn absolute(index: u64) -> u64 {
     geometry::STORE_BASE_BLOCK + index
 }
 
+/// Ordinary control-log cells the commit and its flush need between them.
+const COMMIT_CELLS: u32 = 6;
+
 impl Store {
     pub fn new(disk: Disk) -> Self {
         Self {
             disk,
             harness: Harness::default(),
+            control_log: 0,
             demanded: None,
             uuid: [0u8; 16],
             store_epoch: 0,
@@ -1600,6 +1607,23 @@ impl Store {
             Fault::Stop | Fault::Kill => return Err(store_status::UNAVAILABLE),
             _ => fault_mode::NONE,
         };
+        // The commit and the flush that publishes it are two more admissions
+        // the control plane has to cover, and they are the two that must not
+        // be separated: a commit on the medium that the flush never published
+        // is a version this service can never claim, and a reader of its log
+        // would have to guess. If the plane cannot cover the rest, nothing is
+        // written and the caller is told the service is unavailable -- which
+        // is the truth, and the one answer that leaves the medium as it was.
+        if self.control_log != 0 {
+            let room = k2::log_query(self.control_log).map_or(0, |info| {
+                info.capacity
+                    .saturating_sub(info.reserved_cells)
+                    .saturating_sub(info.used)
+            });
+            if room < COMMIT_CELLS {
+                return Err(store_status::UNAVAILABLE);
+            }
+        }
         let new_generation = self.published_generation + 1;
         let commit = CommitRecord {
             prepare_sequence,

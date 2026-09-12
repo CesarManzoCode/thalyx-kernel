@@ -1084,6 +1084,27 @@ pub fn begin_effect(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> 
         return Err(status::LIMIT_EXHAUSTED);
     }
 
+    // An effect admission is a covered event: the audited profile says a
+    // receipt exists for every one of them, and that is only true if the cell
+    // is bought before the effect is permitted. Without this the receipt was
+    // written afterwards and could be lost -- an effect admitted with nobody
+    // able to account for it, which is the one thing the profile claims
+    // cannot happen. A service told `LIMIT_EXHAUSTED` here has not begun
+    // anything, so there is nothing to reconcile.
+    if !crate::api::reserve_receipt(machine) {
+        let (used, capacity) = match machine.system_log {
+            Some(log) => {
+                let log = &machine.logs[log as usize];
+                (
+                    (log.count as u64).saturating_add(u64::from(log.pending_reservations)),
+                    log.ordinary_capacity() as u64,
+                )
+            }
+            None => (0, 0),
+        };
+        return Err(exhausted("receipt_cells", used, capacity));
+    }
+
     node.closure_reserved_ns
         .fetch_add(reserve, core::sync::atomic::Ordering::Relaxed);
     machine.invocations[index].effect = Effect::Admitted;
@@ -1114,7 +1135,7 @@ pub fn begin_effect(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> 
         status::OK,
         u64::from(request.effect_kind),
         reserve,
-        false,
+        true,
     );
     Ok(invocation.id)
 }

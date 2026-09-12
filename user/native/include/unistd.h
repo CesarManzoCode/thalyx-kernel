@@ -25,6 +25,14 @@
 /* Mapped files exist, in the bounded sense `sys/mman.h` documents. */
 #define _POSIX_MAPPED_FILES 200809L
 
+/* Range memory locking exists, and is the whole truth about this system's
+ * memory: a domain's pages are resident from the moment they are mapped and
+ * there is no paging to evict them, so a range is locked in memory before
+ * anyone asks and `mlock` has nothing to do but say so. Declared because
+ * llama.cpp keys `llama_supports_mmap` on this macro and not on the one above,
+ * which is where its own mapped-file support is actually decided. */
+#define _POSIX_MEMLOCK_RANGE 200809L
+
 #define STDIN_FILENO  0
 #define STDOUT_FILENO 1
 #define STDERR_FILENO 2

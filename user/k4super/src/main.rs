@@ -80,9 +80,17 @@ const STALL_LIMIT_NS: u64 = 30_000_000_000;
 /// The whole run, however it ends.
 const RUN_DEADLINE_NS: u64 = 60_000_000_000;
 
-/// Ordinary cells the control log had when the scenario that loses the
-/// control plane was written: sixty-four less eight reserved.
-const ORIGINAL_ORDINARY_CELLS: u32 = 56;
+/// Ordinary control-log cells left free when the scenario that loses the
+/// control plane starts.
+///
+/// A fixed number, not "what the sixty-four-cell log had left at this point".
+/// The second is computed from a counter the auditor is draining while the
+/// loop that fills the log runs, so the room the scenario starts with moved
+/// with the scheduling: on a kernel that reaches the publications sooner it
+/// left enough room for all three of them and the service was never refused.
+/// A little under one round of the service's protocol, so the room runs out
+/// inside a publication, which is the scenario.
+const FREE_AFTER_PREFILL: u32 = 10;
 
 /// Publications the publisher attempts when the scenario does not say.
 const DEFAULT_ROUNDS: u64 = 3;
@@ -972,8 +980,15 @@ fn run() -> ! {
         // against, filling part way through the publications with the
         // service's own admission the one refused. Not a change of what is
         // shown: a covered admission refused for want of a cell, named as such.
-        let used_before = k2::log_query(log).map_or(0, |info| info.used);
-        let free_then = ORIGINAL_ORDINARY_CELLS.saturating_sub(used_before);
+        // Brought to a fixed number of free ordinary cells rather than to
+        // "what the smaller log had left at this point". The second is
+        // computed from a counter the auditor is draining while the loop runs,
+        // so the room the scenario starts with moved with the scheduling; on a
+        // kernel that reaches the publications sooner it left enough room for
+        // all three of them and the service was never refused. The number
+        // below is a little under one round of this service's protocol, so the
+        // room runs out inside a publication -- which is the scenario.
+        let free_then = FREE_AFTER_PREFILL;
         let mut filled = 0u64;
         while let Ok(info) = k2::log_query(log) {
             if info.used + free_then >= ordinary_cells {

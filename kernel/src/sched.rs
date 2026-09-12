@@ -473,7 +473,13 @@ fn take_grant(cpu: usize, index: usize, now: u64) -> u64 {
         }
     }
     loop {
-        let grant = have.min(ceiling);
+        // A dispatch is promised a quantum at most, whatever the credit holds.
+        // The credit exists to keep the common dispatch off the shared
+        // counters, not to lengthen a turn: a thread that may run for two
+        // quanta without the scheduler looking at it again is a thread the
+        // preemption granularity no longer applies to, and the excess a late
+        // tick can produce grows with it.
+        let grant = have.min(ceiling).min(QUANTUM_NS);
         if grant == 0 {
             return 0;
         }
@@ -1286,6 +1292,20 @@ pub fn on_kernel_exit() {
     // a point where the reservation can be honoured exactly, and it costs one
     // counter read.
     if cpu::rdtsc() >= CPUS[me].deadline_tsc.load(Ordering::Relaxed) {
+        {
+            // The reservation ran out while the thread was in the kernel, so
+            // its dispatch ends here rather than at the next tick. Counted the
+            // same way: what the number means is "the timer ended my turn",
+            // and where the kernel noticed is not the thread's business. A
+            // thread that spends milliseconds inside one entry -- writing a
+            // diagnostic record, say -- has every one of its turns ended here
+            // and none of them at a tick.
+            let cell = thread::get(CPUS[me].current.load(Ordering::Relaxed));
+            if cell.is_user() {
+                // SAFETY: this processor's own current thread.
+                unsafe { cell.sched() }.preemptions += 1;
+            }
+        }
         schedule_with(me, true);
         return;
     }
@@ -1474,18 +1494,27 @@ pub fn on_tick(frame: &trap::TrapFrame) {
         }
     };
 
+    {
+        // The timer ended this thread's dispatch: the reservation it was
+        // running on was taken back, and it runs on again only if the
+        // scheduler grants it another. Counted here rather than after the
+        // switch, because "my turn was ended by the timer" is true whether or
+        // not another thread was waiting to take the processor -- and on a
+        // processor with nothing else to run, the old placement counted
+        // nothing at all and made a program that ran for thirteen
+        // milliseconds look as if it had never been scheduled.
+        //
+        // SAFETY: this processor's own current thread.
+        let sched = unsafe { cell.sched() };
+        sched.preemptions += 1;
+    }
     let next = schedule_with(cpu, expired || competition || starved);
     if next == current {
         return;
     }
 
-    {
-        // SAFETY: the thread is no longer this processor's current, but it is
-        // either in this processor's queue (preempted) or blocked; a counter
-        // bump on it races with nothing that matters for a diagnostic count.
-        let sched = unsafe { cell.sched() };
-        sched.preemptions += 1;
-    }
+    // The processor was taken away and given to another thread. That is the
+    // narrower fact, and the one the preemption records are about.
     CPUS[cpu].preemptions.fetch_add(1, Ordering::Relaxed);
     if let Some((domain, scope_id, used)) = record {
         trace!(

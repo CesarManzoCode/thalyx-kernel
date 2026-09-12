@@ -156,7 +156,14 @@ pub struct Sched {
     pub last_cpu: usize,
     /// Times the thread was dispatched on a processor other than the last one.
     pub migrations: u64,
-    /// Times the timer took the CPU away from the thread.
+    /// Times the timer ended the thread's dispatch: its reservation was taken
+    /// back and it ran on only if the scheduler granted it another.
+    ///
+    /// Not the same number as a processor's `preemptions`, which counts the
+    /// times the processor was taken away and given to somebody else. On a
+    /// processor with nothing else to run the two differ, and the difference
+    /// is the point: a thread whose turn the timer ends and who wins the next
+    /// turn was still scheduled.
     pub preemptions: u64,
     /// Detailed preemption records already emitted for this thread.
     pub preempt_records: u32,
