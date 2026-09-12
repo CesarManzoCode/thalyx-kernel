@@ -1,5 +1,18 @@
 # Historial del proyecto
 
+## 0.8.0 — 2026-09-12
+
+Campaña de rendimiento posterior a K6. Elimina los principales costes accidentales encontrados al comparar Thalyx-Kernel con Linux y deja medido el coste restante de las garantías propias del kernel.
+
+- El camino IPC deja de serializarse bajo un único `MACHINE` lock: el viaje de ida y vuelta toma la máquina en modo compartido y utiliza cerrojos finos por canal, invocación, mensaje, tabla de capacidades, grant y log.
+- `scale.ipc` pasa de 2 352 / 1 701 / 1 597 / 1 806 a 4 608 / 6 362 / 7 797 / 8 518 idas y vueltas por corte para uno a cuatro pares. Las tres primeras filas superan la referencia Linux; el techo artificial cercano a 7 400 desaparece.
+- La espera por cerrojos cae hasta aproximadamente el 4 % del tiempo de máquina. Una sonda que neutraliza la contabilidad jerárquica de ámbitos alcanza ~11 070 en `scale.ipc:4`, aislando esa garantía como la mayor parte del margen restante frente a Linux.
+- Se rechaza deliberadamente el carve-out per-CPU que podría producir agotamiento falso mientras existe capacidad global: no se debilita el contrato de recursos para ganar un microbenchmark.
+- También se reducen costes en TLB shootdown, cambios de dominio, caminos directos de IPC, afinidad de wakeups, entrada al kernel, conversión del reloj y carga del motor.
+- La historia técnica completa queda preservada en `vault/evidence/k6-performance-campaign.md`.
+
+K0–K6 siguen completos. Esta versión fija el baseline posterior a la campaña antes de la comparación end-to-end de Thalyx sobre Linux frente a Thalyx sobre Thalyx-Kernel.
+
 ## 0.7.0 — 2026-09-11
 
 K6 — Comparación, endurecimiento y primera referencia. Primera fase que mide en lugar de solo demostrar que un mecanismo existe.
