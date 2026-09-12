@@ -459,16 +459,16 @@ fn take_grant(cpu: usize, index: usize, now: u64) -> u64 {
     let mut have = credit.reserved_ns.load(Ordering::Relaxed);
     if have < QUANTUM_NS.min(window_left) {
         let available = scope::available_ns(scope, false);
-        // Never more than half of what the scope has left. A credit is a
-        // convenience for this processor and a refusal for every other one:
-        // taking the last of a budget into a local reserve makes a scope look
-        // exhausted to its siblings while the reserve sits unspent, and a
-        // sibling that is refused waits for the window rather than for a
-        // quantum.
-        let want = ceiling
-            .saturating_sub(have)
-            .min(available)
-            .min(available.div_ceil(2));
+        // Half of what the scope has left, and never less than a quantum. A
+        // credit is a convenience for this processor and a refusal for every
+        // other one: taking the last of a budget into a local reserve makes a
+        // scope look exhausted to its siblings while the reserve sits unspent,
+        // and a sibling that is refused waits for the window rather than for a
+        // quantum. But a reservation smaller than what one dispatch can spend
+        // is not a reservation, and a budget that is never taken to zero is a
+        // ceiling nothing is ever refused against.
+        let share = available.div_ceil(2).max(QUANTUM_NS).min(available);
+        let want = ceiling.saturating_sub(have).min(share);
         if want == 0 {
             if have == 0 {
                 return 0;
