@@ -641,9 +641,12 @@ pub fn call(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
             invocation_id: slot.id,
             payload: slot.reply_payload,
         };
+        release_invocation(&mut machine, index);
+        drop(machine);
+        // The reply is this thread's own from here; laying it out in the
+        // response is work nothing else waits for.
         begin_response(staging, ctx.operation);
         staging.write(BODY, result);
-        release_invocation(&mut machine, index);
         return Ok(id);
     }
     if state == State::Resolved {
@@ -708,10 +711,15 @@ pub fn receive(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i
 
             let head = machine.endpoints[endpoint].head;
             if head != NO_MESSAGE {
-                let delivered = deliver(&mut machine, ctx, endpoint, head as usize, staging);
+                let delivered = deliver(&mut machine, ctx, endpoint, head as usize);
                 drop(machine);
                 crate::sched::flush_wakes();
-                return delivered;
+                let (ticket, result) = delivered?;
+                // The message is this thread's own from here; laying it out
+                // in the response is work nothing else waits for.
+                begin_response(staging, ctx.operation);
+                staging.write(BODY, result);
+                return Ok(ticket);
             }
             if ctx.flags & thalyx_abi::generated::flag::NONBLOCKING != 0 {
                 return Err(status::WOULD_BLOCK);
@@ -733,13 +741,18 @@ pub fn receive(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i
     }
 }
 
+/// Takes the message at the head of `endpoint`'s queue for `ctx.domain`,
+/// returning the receiver's ticket and the response to lay out for it.
+///
+/// The response is returned rather than written: the caller lays it out in
+/// its staging after the control lock is dropped, and only the reading of the
+/// slots is done under it.
 fn deliver(
     machine: &mut Machine,
     ctx: &Ctx,
     endpoint: usize,
     message_index: usize,
-    staging: &mut Staging,
-) -> Result<u64, i64> {
+) -> Result<(u64, ReceiveResult), i64> {
     // The header fields, not the record: a message is three hundred and fifty
     // bytes and an invocation six hundred, and the delivery needs a dozen
     // numbers out of them.
@@ -841,10 +854,18 @@ fn deliver(
         result.header.rights_transferred |= machine.grants[caps[index].grant as usize].rights;
     }
     // The message's slot is free from here: everything it carried is in the
-    // response.
-    machine.messages[message_index] = Message::empty();
-    begin_response(staging, ctx.operation);
-    staging.write(BODY, result);
+    // response. Freed by its flag and its link, not by rewriting the whole
+    // record: an admission writes every field of a slot it takes, the payload
+    // included, and the readers of the table skip a slot that is not in use.
+    // Rewriting the three hundred and fifty bytes it holds is six lines of
+    // stores under the control lock for nothing that is ever read.
+    {
+        let slot = &mut machine.messages[message_index];
+        slot.used = false;
+        slot.next = NO_MESSAGE;
+        slot.cap_count = 0;
+        slot.payload_len = 0;
+    }
 
     trace!(
         "ipc.delivered",
@@ -854,7 +875,7 @@ fn deliver(
         machine.domains[ctx.domain].id,
         cancel.name()
     );
-    Ok(ticket)
+    Ok((ticket, result))
 }
 
 /// What releasing an invocation has to know about it.
