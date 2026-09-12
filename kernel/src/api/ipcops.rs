@@ -24,7 +24,7 @@ use thalyx_abi::generated::{
 };
 
 use crate::api::{BODY, Ctx, begin_response, receipt, reserve_receipt, resolve};
-use crate::ipc::{Cancel, DeliveredCap, Effect, Endpoint, Invocation, Message, NO_MESSAGE, State};
+use crate::ipc::{Cancel, DeliveredCap, Effect, Endpoint, Message, NO_MESSAGE, State};
 use crate::obj::{NO_GRANT, ObjKind, ObjRef, ScopeId};
 use crate::sched::WakeHint;
 use crate::scope::{self, Resource};
@@ -409,56 +409,76 @@ fn admit(
         .bound()
         .map_or(0, |(index, _)| machine.invocations[index as usize].id);
 
-    machine.invocations[invocation_index] = Invocation {
-        state: State::Admitted,
-        generation,
-        id,
-        endpoint: endpoint as u16,
-        endpoint_generation: machine.endpoints[endpoint].generation,
-        epoch: machine.endpoints[endpoint].epoch,
-        origin_domain: ctx.domain as u16,
-        origin_domain_generation: machine.domains[ctx.domain].generation,
-        origin_domain_id: machine.domains[ctx.domain].id,
-        origin_scope,
-        origin_scope_id: scope::table()[origin_scope as usize].id(),
-        waiter,
-        parent_id,
-        grant: ctx.cap.grant,
-        facet: ctx.cap.facet,
-        cancel: Cancel::Live,
-        effect: Effect::None,
-        closure_reserved_ns: 0,
-        closure_service: 0,
-        admitted_ns: ctx.now,
-        message: message_index as u16,
-        receiver_domain: receiver as u16,
-        charged_bytes: charged,
-        refs: 0,
-        replied: false,
-        outcome: 0,
-        reply_payload: [0; 256],
-        reply_len: 0,
-        reply_caps: [0; 4],
-        reply_cap_count: 0,
-        reply_result: 0,
+    // Written into the slot field by field rather than assembled and copied.
+    // Building the record on the stack and moving it is six hundred bytes of
+    // memory traffic per admission, most of it a reply payload nothing has
+    // written yet, and all of it under the control lock.
+    let (endpoint_generation, epoch) = {
+        let slot = &machine.endpoints[endpoint];
+        (slot.generation, slot.epoch)
     };
+    let (origin_domain_generation, origin_domain_id) = {
+        let slot = &machine.domains[ctx.domain];
+        (slot.generation, slot.id)
+    };
+    {
+        let slot = &mut machine.invocations[invocation_index];
+        slot.state = State::Admitted;
+        slot.generation = generation;
+        slot.id = id;
+        slot.endpoint = endpoint as u16;
+        slot.endpoint_generation = endpoint_generation;
+        slot.epoch = epoch;
+        slot.origin_domain = ctx.domain as u16;
+        slot.origin_domain_generation = origin_domain_generation;
+        slot.origin_domain_id = origin_domain_id;
+        slot.origin_scope = origin_scope;
+        slot.origin_scope_id = scope::table()[origin_scope as usize].id();
+        slot.waiter = waiter;
+        slot.parent_id = parent_id;
+        slot.grant = ctx.cap.grant;
+        slot.facet = ctx.cap.facet;
+        slot.cancel = Cancel::Live;
+        slot.effect = Effect::None;
+        slot.closure_reserved_ns = 0;
+        slot.closure_service = 0;
+        slot.admitted_ns = ctx.now;
+        slot.message = message_index as u16;
+        slot.receiver_domain = receiver as u16;
+        slot.charged_bytes = charged;
+        slot.refs = 0;
+        slot.replied = false;
+        slot.outcome = 0;
+        // The reply payload is not cleared: `reply_len` says how much of it is
+        // a reply, it is zero here, and the only writer of those bytes is a
+        // reply that sets the length with them.
+        slot.reply_len = 0;
+        slot.reply_caps = [0; 4];
+        slot.reply_cap_count = 0;
+        slot.reply_result = 0;
+    }
     machine.grants[ctx.cap.grant as usize].refs += 1;
 
-    let mut message = Message::empty();
-    message.used = true;
-    message.next = NO_MESSAGE;
-    message.endpoint = endpoint as u16;
-    message.endpoint_generation = machine.endpoints[endpoint].generation;
-    message.invocation = invocation_index as u16;
-    message.reserved_cell = !ordinary;
-    message.kind = kind;
-    message.payload_len = request.payload_len;
-    message.payload[..request.payload_len as usize]
-        .copy_from_slice(&request.payload[..request.payload_len as usize]);
-    message.caps = installed;
-    message.cap_count = request.cap_count;
-    message.charged_bytes = charged;
-    machine.messages[message_index] = message;
+    {
+        let length = request.payload_len as usize;
+        let slot = &mut machine.messages[message_index];
+        slot.used = true;
+        slot.next = NO_MESSAGE;
+        slot.endpoint = endpoint as u16;
+        slot.endpoint_generation = endpoint_generation;
+        slot.invocation = invocation_index as u16;
+        slot.reserved_cell = !ordinary;
+        slot.kind = kind;
+        slot.payload_len = request.payload_len;
+        slot.payload[..length].copy_from_slice(&request.payload[..length]);
+        // Everything past the significant bytes is cleared, because the whole
+        // array crosses to the receiver and the slot has held another domain's
+        // message before.
+        slot.payload[length..].fill(0);
+        slot.caps = installed;
+        slot.cap_count = request.cap_count;
+        slot.charged_bytes = charged;
+    }
 
     let tail = machine.endpoints[endpoint].tail;
     if tail == NO_MESSAGE {
@@ -604,24 +624,30 @@ pub fn call(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
     if machine.invocations[index].generation != generation {
         return Err(status::PEER_DEAD);
     }
-    let invocation = machine.invocations[index];
-    if invocation.replied {
-        let mut result = CallResult {
-            payload_len: invocation.reply_len,
-            cap_count: invocation.reply_cap_count,
-            caps: invocation.reply_caps,
-            result: invocation.reply_result,
-            invocation_id: invocation.id,
-            payload: invocation.reply_payload,
+    // Read as fields rather than as a record. An invocation is six hundred
+    // bytes, most of them the reply payload, and copying the whole of it to
+    // look at four of them is done with the control lock held.
+    let (replied, state, outcome, id) = {
+        let slot = &machine.invocations[index];
+        (slot.replied, slot.state, slot.outcome, slot.id)
+    };
+    if replied {
+        let slot = &machine.invocations[index];
+        let result = CallResult {
+            payload_len: slot.reply_len,
+            cap_count: slot.reply_cap_count,
+            caps: slot.reply_caps,
+            result: slot.reply_result,
+            invocation_id: slot.id,
+            payload: slot.reply_payload,
         };
-        result.payload_len = invocation.reply_len;
         begin_response(staging, ctx.operation);
         staging.write(BODY, result);
         release_invocation(&mut machine, index);
-        return Ok(invocation.id);
+        return Ok(id);
     }
-    if invocation.state == State::Resolved {
-        let code = match invocation.outcome {
+    if state == State::Resolved {
+        let code = match outcome {
             outcome_value::COMMITTED => status::OK,
             outcome_value::UNKNOWN => status::PENDING,
             _ => status::CANCELLED,
@@ -629,7 +655,7 @@ pub fn call(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
         release_invocation(&mut machine, index);
         if code == status::OK {
             begin_response(staging, ctx.operation);
-            return Ok(invocation.id);
+            return Ok(id);
         }
         return Err(code);
     }
@@ -711,8 +737,18 @@ fn deliver(
     message_index: usize,
     staging: &mut Staging,
 ) -> Result<u64, i64> {
-    let message = machine.messages[message_index];
-    let invocation_index = message.invocation as usize;
+    // The header fields, not the record: a message is three hundred and fifty
+    // bytes and an invocation six hundred, and the delivery needs a dozen
+    // numbers out of them.
+    let (invocation_index, message_next, message_reserved, message_kind) = {
+        let slot = &machine.messages[message_index];
+        (
+            slot.invocation as usize,
+            slot.next,
+            slot.reserved_cell,
+            slot.kind,
+        )
+    };
 
     // Admission recorded which endpoint the work arrived on. Delivering it from
     // a different one would mean the queue and the invocation had drifted
@@ -731,7 +767,7 @@ fn deliver(
     // what "the message is kept if the delivery cannot be prepared" means.
     let object = ObjRef::new(
         ObjKind::Invocation,
-        message.invocation,
+        invocation_index as u16,
         machine.invocations[invocation_index].generation,
     );
     let sponsor = machine.domains[ctx.domain].owner_scope;
@@ -752,23 +788,28 @@ fn deliver(
     };
 
     // Dequeue only now that the delivery is certain.
-    machine.endpoints[endpoint].head = message.next;
+    machine.endpoints[endpoint].head = message_next;
     if machine.endpoints[endpoint].head == NO_MESSAGE {
         machine.endpoints[endpoint].tail = NO_MESSAGE;
     }
     machine.endpoints[endpoint].queued -= 1;
-    if message.reserved_cell {
+    if message_reserved {
         machine.endpoints[endpoint].reserved_used =
             machine.endpoints[endpoint].reserved_used.saturating_sub(1);
     }
     machine.endpoints[endpoint].delivered += 1;
-    machine.messages[message_index] = Message::empty();
 
-    let invocation = machine.invocations[invocation_index];
     machine.invocations[invocation_index].state = State::Delivered;
     machine.invocations[invocation_index].message = NO_MESSAGE;
     machine.invocations[invocation_index].receiver_domain = ctx.domain as u16;
 
+    let grant_id = {
+        let grant = machine.invocations[invocation_index].grant;
+        machine.grants[grant as usize].id
+    };
+    let invocation = &machine.invocations[invocation_index];
+    let (invocation_id, invocation_facet) = (invocation.id, invocation.facet);
+    let message = &machine.messages[message_index];
     let mut result = ReceiveResult {
         header: MessageHeader {
             epoch: invocation.epoch,
@@ -777,11 +818,11 @@ fn deliver(
             sender_scope_id: invocation.origin_scope_id,
             parent_invocation_id: invocation.parent_id,
             facet: invocation.facet,
-            grant_id: machine.grants[invocation.grant as usize].id,
+            grant_id,
             sent_ns: invocation.admitted_ns,
             rights_transferred: 0,
             cancel_state: invocation.cancel.abi(),
-            kind: message.kind,
+            kind: message_kind,
             payload_len: message.payload_len,
         },
         cap_count: message.cap_count,
@@ -789,32 +830,56 @@ fn deliver(
         caps: [0; 4],
         payload: message.payload,
     };
-    for index in 0..message.cap_count as usize {
-        result.caps[index] = message.caps[index].handle;
-        result.header.rights_transferred |=
-            machine.grants[message.caps[index].grant as usize].rights;
+    let (cap_count, payload_len, cancel) =
+        (message.cap_count, message.payload_len, invocation.cancel);
+    let caps = message.caps;
+    for index in 0..cap_count as usize {
+        result.caps[index] = caps[index].handle;
+        result.header.rights_transferred |= machine.grants[caps[index].grant as usize].rights;
     }
+    // The message's slot is free from here: everything it carried is in the
+    // response.
+    machine.messages[message_index] = Message::empty();
     begin_response(staging, ctx.operation);
     staging.write(BODY, result);
 
     trace!(
         "ipc.delivered",
-        "invocation={} endpoint={} receiver_domain={} facet={} caps={} payload_len={} \
-         cancel={} ticket=0x{ticket:x}",
-        invocation.id,
+        "invocation={invocation_id} endpoint={} receiver_domain={} facet={invocation_facet} \
+         caps={cap_count} payload_len={payload_len} cancel={} ticket=0x{ticket:x}",
         machine.endpoints[endpoint].id,
         machine.domains[ctx.domain].id,
-        invocation.facet,
-        message.cap_count,
-        message.payload_len,
-        invocation.cancel.name()
+        cancel.name()
     );
     Ok(ticket)
 }
 
+/// What releasing an invocation has to know about it.
+struct ReleaseFacts {
+    state: State,
+    charged_bytes: u64,
+    origin_scope: ScopeId,
+    effect: Effect,
+    closure_service: ScopeId,
+    closure_reserved_ns: u64,
+    grant: crate::obj::GrantId,
+}
+
 /// Releases everything an invocation held once it is discharged.
 fn release_invocation(machine: &mut Machine, index: usize) {
-    let invocation = machine.invocations[index];
+    // The seven fields this needs, not the six hundred bytes the record is.
+    let invocation = {
+        let slot = &machine.invocations[index];
+        ReleaseFacts {
+            state: slot.state,
+            charged_bytes: slot.charged_bytes,
+            origin_scope: slot.origin_scope,
+            effect: slot.effect,
+            closure_service: slot.closure_service,
+            closure_reserved_ns: slot.closure_reserved_ns,
+            grant: slot.grant,
+        }
+    };
     if invocation.state == State::Empty {
         return;
     }
@@ -856,11 +921,21 @@ fn release_invocation(machine: &mut Machine, index: usize) {
 pub fn reply(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u64, i64> {
     let request: ReplyRequest = staging.read(BODY);
     let index = ctx.cap.object.index as usize;
-    let invocation = machine.invocations[index];
-    if invocation.state == State::Resolved || invocation.replied {
+    let (state, replied, has_waiter, origin_domain, origin_generation, invocation_id) = {
+        let slot = &machine.invocations[index];
+        (
+            slot.state,
+            slot.replied,
+            slot.waiter.is_some(),
+            slot.origin_domain,
+            slot.origin_domain_generation,
+            slot.id,
+        )
+    };
+    if state == State::Resolved || replied {
         return Err(status::ALREADY_RESOLVED);
     }
-    if invocation.waiter.is_none() {
+    if !has_waiter {
         return Err(status::STATE_CONFLICT);
     }
     if u64::from(request.payload_len) > thalyx_abi::limit::MAX_INLINE_PAYLOAD
@@ -869,8 +944,8 @@ pub fn reply(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<
         return Err(status::INVALID_ARGUMENT);
     }
 
-    let caller = invocation.origin_domain as usize;
-    if machine.domains[caller].generation != invocation.origin_domain_generation {
+    let caller = origin_domain as usize;
+    if machine.domains[caller].generation != origin_generation {
         return Err(status::PEER_DEAD);
     }
     let count = request.cap_count as usize;
@@ -926,14 +1001,14 @@ pub fn reply(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<
     trace!(
         "ipc.replied",
         "invocation={} responder_domain={} payload_len={} caps={} result=0x{:x}",
-        invocation.id,
+        invocation_id,
         machine.domains[ctx.domain].id,
         request.payload_len,
         request.cap_count,
         request.result
     );
     wake_waiter(machine, index, status::OK, WakeHint::Sync);
-    Ok(invocation.id)
+    Ok(invocation_id)
 }
 
 /// Admits one effect against the lineage that admitted the request.

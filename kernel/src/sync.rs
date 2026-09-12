@@ -94,8 +94,21 @@ impl<T> SpinLock<T> {
             return SpinGuard { lock: self };
         }
         let began = crate::arch::x86_64::cpu::rdtsc();
+        let mut turn = 0u32;
         while self.serving.load(Ordering::Acquire) != ticket {
-            crate::tlb::refresh_local();
+            // The invalidation service is what keeps a processor waiting for
+            // this lock from being the reason another processor waits for an
+            // acknowledgement, and it only has to happen often enough for
+            // that. Doing it on every turn of the loop meant every waiting
+            // processor read the invalidation counter and its own record
+            // millions of times a second -- lines written by every unmap in
+            // the machine -- which made the wait itself the traffic that made
+            // the wait longer. Measured: eight thousand million cycles spent
+            // waiting for the control lock in one campaign.
+            if turn % 64 == 0 {
+                crate::tlb::refresh_local();
+            }
+            turn = turn.wrapping_add(1);
             core::hint::spin_loop();
         }
         let waited = crate::arch::x86_64::cpu::rdtsc().wrapping_sub(began);

@@ -944,13 +944,23 @@ fn select_cpu(index: usize, me: usize) -> usize {
     // SAFETY: the thread is blocked and standing on no processor, so nothing
     // writes its scheduling record.
     let last = unsafe { thread::get(index).sched().last_cpu };
+    // Idle *and* with nothing already waiting there. A processor stays in the
+    // idle set from the moment it stops running until it notices the work it
+    // has been given, so a burst of wakes that reads the set alone hands every
+    // one of them to the same processor -- which is how four benchmark pairs
+    // came to start life on one processor while three others idled.
     let idle = IDLE_MASK.load(Ordering::Acquire);
-    if last < MAX_CPUS && idle & bit(last) != 0 && CPUS[last].is_online() {
+    let free = |cpu: usize| {
+        cpu < MAX_CPUS && idle & bit(cpu) != 0 && CPUS[cpu].is_online() && queue_depth(cpu) == 0
+    };
+    if free(last) {
         return last;
     }
-    if idle != 0 {
-        let candidate = idle.trailing_zeros() as usize;
-        if candidate < MAX_CPUS && CPUS[candidate].is_online() {
+    let mut candidates = idle;
+    while candidates != 0 {
+        let candidate = candidates.trailing_zeros() as usize;
+        candidates &= candidates - 1;
+        if free(candidate) {
             return candidate;
         }
     }
