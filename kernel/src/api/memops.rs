@@ -63,7 +63,7 @@ pub fn create(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
         return Err(status::INVALID_ARGUMENT);
     }
     let sponsor = ctx.cap.object.index;
-    if machine.scopes[sponsor as usize].state != scope::State::Open {
+    if scope::table()[sponsor as usize].state() != scope::State::Open {
         return Err(status::SCOPE_CLOSED);
     }
 
@@ -72,16 +72,11 @@ pub fn create(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
         .iter()
         .position(|object| object.state == State::Empty)
         .ok_or(status::LIMIT_EXHAUSTED)?;
-    if !scope::reserve(&mut machine.scopes, sponsor, Resource::Metadata, 1) {
+    if !scope::reserve(sponsor, Resource::Metadata, 1) {
         return Err(status::LIMIT_EXHAUSTED);
     }
-    if !scope::reserve(
-        &mut machine.scopes,
-        sponsor,
-        Resource::MemoryPages,
-        request.pages,
-    ) {
-        scope::release(&mut machine.scopes, sponsor, Resource::Metadata, 1);
+    if !scope::reserve(sponsor, Resource::MemoryPages, request.pages) {
+        scope::release(sponsor, Resource::Metadata, 1);
         return Err(status::LIMIT_EXHAUSTED);
     }
     let base = match machine
@@ -90,13 +85,8 @@ pub fn create(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
     {
         Ok(base) => base,
         Err(_) => {
-            scope::release(&mut machine.scopes, sponsor, Resource::Metadata, 1);
-            scope::release(
-                &mut machine.scopes,
-                sponsor,
-                Resource::MemoryPages,
-                request.pages,
-            );
+            scope::release(sponsor, Resource::Metadata, 1);
+            scope::release(sponsor, Resource::MemoryPages, request.pages);
             return Err(status::LIMIT_EXHAUSTED);
         }
     };
@@ -150,7 +140,7 @@ pub fn create(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
         machine.memories[index].label_str(),
         request.pages,
         request.max_rights,
-        machine.scopes[sponsor as usize].id,
+        scope::table()[sponsor as usize].id(),
         base.addr()
     );
     Ok(handle)
@@ -167,7 +157,7 @@ pub fn query(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<
         writable_maps: object.writable_maps,
         pages: u64::from(object.pages),
         object_id: object.id,
-        sponsor_scope_id: machine.scopes[object.sponsor as usize].id,
+        sponsor_scope_id: scope::table()[object.sponsor as usize].id(),
         label: object.label,
     };
     begin_response(staging, ctx.operation);
@@ -303,17 +293,8 @@ pub fn read(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u
 /// only the second one is about the race this mechanism exists for.
 #[must_use]
 pub fn cpus_in_space(machine: &Machine, cr3: u64) -> u32 {
-    let mut count = 0;
-    for cpu in 0..crate::limits::MAX_CPUS {
-        let slot = machine.cpus[cpu];
-        if !slot.online || slot.current == usize::MAX || slot.current >= machine.threads.len() {
-            continue;
-        }
-        if machine.threads[slot.current].cr3 == cr3 {
-            count += 1;
-        }
-    }
-    count
+    let _ = machine;
+    crate::sched::cpus_in_space(cr3)
 }
 
 /// Withdraws one mapping, invalidates it here and publishes it everywhere.
@@ -373,10 +354,8 @@ pub fn withdraw_map(machine: &mut Machine, map_index: usize) -> u32 {
         }
     }
     let scope = record.scope;
-    machine.scopes[scope as usize].maps_pending = machine.scopes[scope as usize]
-        .maps_pending
-        .saturating_sub(1);
-    scope::release(&mut machine.scopes, scope, Resource::Metadata, 1);
+    scope::decrement(&scope::table()[scope as usize].maps_pending);
+    scope::release(scope, Resource::Metadata, 1);
     let grant = record.grant;
     machine.maps[map_index] = crate::memobj::MapRecord::empty();
     // The reference the mapping held on its authorising grant. Releasing it
@@ -426,7 +405,7 @@ pub fn collect_memory(machine: &mut Machine, index: usize) {
     }
     let sponsor = object.sponsor;
     if !matches!(
-        machine.scopes[sponsor as usize].state,
+        scope::table()[sponsor as usize].state(),
         scope::State::Open | scope::State::Fenced | scope::State::Quiescent
     ) {
         return;
@@ -453,8 +432,8 @@ pub fn collect_memory(machine: &mut Machine, index: usize) {
             machine.allocator().retire(frame, Owner::Scope(sponsor));
         }
     }
-    scope::release(&mut machine.scopes, sponsor, Resource::MemoryPages, pages);
-    scope::release(&mut machine.scopes, sponsor, Resource::Metadata, 1);
+    scope::release(sponsor, Resource::MemoryPages, pages);
+    scope::release(sponsor, Resource::Metadata, 1);
     machine.memories[index] = MemoryObject::empty();
     machine.memories[index].generation = generation;
     trace!(
@@ -462,7 +441,7 @@ pub fn collect_memory(machine: &mut Machine, index: usize) {
         "object={id} pages={pages} state_at_release={} sponsor_scope={} reason=unreferenced \
          release={}",
         state.name(),
-        machine.scopes[sponsor as usize].id,
+        scope::table()[sponsor as usize].id(),
         if immediate { "immediate" } else { "deferred" }
     );
 }
@@ -477,7 +456,7 @@ fn describe(machine: &Machine, index: usize) -> MemoryInfo {
         writable_maps: object.writable_maps,
         pages: u64::from(object.pages),
         object_id: object.id,
-        sponsor_scope_id: machine.scopes[object.sponsor as usize].id,
+        sponsor_scope_id: scope::table()[object.sponsor as usize].id(),
         label: object.label,
     }
 }
@@ -581,7 +560,7 @@ pub fn seal(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
             if let Some(space) = machine.domains[domain].space.as_ref() {
                 live += cpus_in_space(&machine, space.cr3());
             }
-            mask |= machine.domains[domain].cpu_mask;
+            mask |= crate::tlb::space_mask(domain);
         }
         (index, id, generation, withdrawn, pages, live, mask)
     };

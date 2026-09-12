@@ -72,6 +72,32 @@ impl<T> SpinLock<T> {
         SpinGuard { lock: self }
     }
 
+    /// Acquires the lock only if nobody holds it or waits for it.
+    ///
+    /// A ticket lock has no notion of "free" beyond "the next ticket is the
+    /// one being served"; taking that ticket atomically is the acquisition,
+    /// and losing the race is the refusal. Used where a processor may not
+    /// wait for another -- an idle processor taking work from a busy one's
+    /// queue -- because waiting is the one thing two such processors must not
+    /// do to each other.
+    pub fn try_lock(&self) -> Option<SpinGuard<'_, T>> {
+        let serving = self.serving.load(Ordering::Acquire);
+        if self
+            .next
+            .compare_exchange(
+                serving,
+                serving.wrapping_add(1),
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            Some(SpinGuard { lock: self })
+        } else {
+            None
+        }
+    }
+
     /// Raw pointer to the protected value.
     ///
     /// Used where a reference derived from a guard would outlive the guard: the

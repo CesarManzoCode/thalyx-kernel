@@ -92,23 +92,33 @@ pub fn monotonic_ns() -> Option<u64> {
     Some(((u128::from(delta) * 1_000_000_000u128) / u128::from(hz)) as u64)
 }
 
-/// Publishes one reading and reports whether it went backwards relative to the
-/// newest reading any processor has published.
+/// Publishes one reading and reports whether it went backwards relative to a
+/// reading another processor had already published *before this one was
+/// taken*.
 ///
-/// The check is the cross-processor half of the clock contract. It costs one
-/// read-modify-write and it is the only thing standing between "the counter
-/// looked fine on the processor that measured it" and a claim about all of
-/// them.
+/// The check is the cross-processor half of the clock contract, and the order
+/// of the two lines below is the whole of it. The published value is read
+/// first, with acquire, and the counter second: a value seen by that load was
+/// stored before it, so the reading that produced it is ordered before the
+/// reading taken here, and a smaller result is a counter that went backwards
+/// between two processors. Reading the counter first and comparing against
+/// whatever is published afterwards compares two readings that nothing orders
+/// -- two processors observing at the same instant, in which case the lower of
+/// the two is not a regression at all, it is concurrency. That is what a
+/// scheduler which no longer serialises its clock reads through one lock made
+/// visible: hundreds of thousands of "regressions" a run, none of them a
+/// violation of anything.
 pub fn observe() -> u64 {
+    let published = HIGH_WATER_NS.load(Ordering::Acquire);
     let Some(now) = monotonic_ns() else {
         return 0;
     };
     OBSERVATIONS.fetch_add(1, Ordering::Relaxed);
-    let previous = HIGH_WATER_NS.fetch_max(now, Ordering::AcqRel);
-    if previous > now {
+    if published > now {
         REGRESSIONS.fetch_add(1, Ordering::Relaxed);
-        WORST_REGRESSION_NS.fetch_max(previous - now, Ordering::AcqRel);
+        WORST_REGRESSION_NS.fetch_max(published - now, Ordering::AcqRel);
     }
+    HIGH_WATER_NS.fetch_max(now, Ordering::Release);
     now
 }
 

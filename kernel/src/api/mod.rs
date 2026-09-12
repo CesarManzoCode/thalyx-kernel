@@ -95,10 +95,10 @@ pub fn now_ns() -> u64 {
 pub fn object_alive(machine: &Machine, object: ObjRef) -> bool {
     let index = object.index as usize;
     match object.kind {
-        ObjKind::Scope => machine
-            .scopes
-            .get(index)
-            .is_some_and(|s| s.state != scope::State::Empty && s.generation == object.generation),
+        ObjKind::Scope => scope::table().get(index).is_some_and(|s| {
+            s.state() != scope::State::Empty
+                && s.generation.load(core::sync::atomic::Ordering::Relaxed) == object.generation
+        }),
         ObjKind::Domain => machine.domains.get(index).is_some_and(|d| {
             d.state != crate::state::DomainState::Empty && d.generation == object.generation
         }),
@@ -139,7 +139,7 @@ pub fn object_id(machine: &Machine, object: ObjRef) -> u64 {
     }
     let index = object.index as usize;
     match object.kind {
-        ObjKind::Scope => machine.scopes[index].id,
+        ObjKind::Scope => scope::table()[index].id(),
         ObjKind::Domain => machine.domains[index].id,
         ObjKind::Memory => machine.memories[index].id,
         ObjKind::Endpoint => machine.endpoints[index].id,
@@ -161,7 +161,15 @@ fn adjust_object_refs(machine: &mut Machine, object: ObjRef, delta: i32) {
         }
     };
     match object.kind {
-        ObjKind::Scope => apply(&mut machine.scopes[index].refs),
+        ObjKind::Scope => {
+            if delta >= 0 {
+                scope::table()[index]
+                    .refs
+                    .fetch_add(delta as u32, core::sync::atomic::Ordering::Relaxed);
+            } else {
+                scope::subtract32(&scope::table()[index].refs, (-delta) as u32);
+            }
+        }
         ObjKind::Domain => apply(&mut machine.domains[index].refs),
         ObjKind::Memory => apply(&mut machine.memories[index].refs),
         ObjKind::Endpoint => apply(&mut machine.endpoints[index].refs),
@@ -186,7 +194,7 @@ pub fn cap_install(
     slot: Option<usize>,
 ) -> Option<u64> {
     let owner = machine.domains[domain].owner_scope;
-    if !scope::reserve(&mut machine.scopes, owner, scope::Resource::Metadata, 1) {
+    if !scope::reserve(owner, scope::Resource::Metadata, 1) {
         return None;
     }
     let handle = match slot {
@@ -208,7 +216,7 @@ pub fn cap_install(
             Some(handle)
         }
         None => {
-            scope::release(&mut machine.scopes, owner, scope::Resource::Metadata, 1);
+            scope::release(owner, scope::Resource::Metadata, 1);
             None
         }
     }
@@ -234,7 +242,7 @@ pub fn cap_release_slot(machine: &mut Machine, domain: usize, slot: usize) -> bo
 
 fn release_entry(machine: &mut Machine, domain: usize, entry: crate::obj::CapEntry) {
     let owner = machine.domains[domain].owner_scope;
-    scope::release(&mut machine.scopes, owner, scope::Resource::Metadata, 1);
+    scope::release(owner, scope::Resource::Metadata, 1);
     if entry.grant != NO_GRANT {
         let node = &mut machine.grants[entry.grant as usize];
         node.refs = node.refs.saturating_sub(1);
@@ -297,7 +305,7 @@ pub fn collect_grant(machine: &mut Machine, grant: GrantId) {
         let parent = node.parent;
         let sponsor = node.sponsor;
         machine.grants[current as usize] = crate::obj::Grant::empty();
-        scope::release(&mut machine.scopes, sponsor, scope::Resource::Metadata, 1);
+        scope::release(sponsor, scope::Resource::Metadata, 1);
         if parent != NO_GRANT {
             let node = &mut machine.grants[parent as usize];
             node.children = node.children.saturating_sub(1);
@@ -344,11 +352,11 @@ pub fn grant_alloc(
         );
         return None;
     };
-    if !scope::reserve(&mut machine.scopes, sponsor, scope::Resource::Metadata, 1) {
+    if !scope::reserve(sponsor, scope::Resource::Metadata, 1) {
         return None;
     }
     let Some(id) = machine.next_id() else {
-        scope::release(&mut machine.scopes, sponsor, scope::Resource::Metadata, 1);
+        scope::release(sponsor, scope::Resource::Metadata, 1);
         return None;
     };
     machine.grants[index] = crate::obj::Grant {
@@ -397,7 +405,7 @@ pub fn lineage_status(machine: &Machine, grant: GrantId, now: u64) -> i64 {
             return status::EXPIRED;
         }
         if let Some(life) = node.life_scope
-            && !scope::is_open(&machine.scopes, life)
+            && !scope::is_open(life)
         {
             return status::SCOPE_CLOSED;
         }
@@ -407,7 +415,7 @@ pub fn lineage_status(machine: &Machine, grant: GrantId, now: u64) -> i64 {
         // acting through a handle it happens to still hold, and through every
         // handle it had already given away. This is the check that makes the
         // barrier reach a capability the closed domain moved to someone else.
-        if !scope::is_open(&machine.scopes, node.sponsor) {
+        if !scope::is_open(node.sponsor) {
             return status::SCOPE_CLOSED;
         }
         current = node.parent;
@@ -911,10 +919,9 @@ pub fn receipt(
         .domains
         .get(origin_domain)
         .map_or(0, |domain| domain.id);
-    let scope_id = machine
-        .scopes
+    let scope_id = crate::scope::table()
         .get(origin_scope as usize)
-        .map_or(0, |scope| scope.id);
+        .map_or(0, |scope| scope.id());
     let record = crate::state::Receipt {
         schema: crate::ctrl::RECEIPT_SCHEMA,
         kind,

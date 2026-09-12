@@ -36,16 +36,23 @@ use crate::{event, trace};
 pub fn handle(frame: &mut TrapFrame) {
     crate::trap::note_user_entry(frame);
 
+    // No lock is taken to find out who entered: the current thread of this
+    // processor is this processor's own, and the counter is its own. The
+    // machine lock is taken by the operations that need it, which is what
+    // makes an entry that needs nothing -- a version query -- cost an entry
+    // and a return rather than a lock acquisition on a line every other
+    // processor is also writing.
     let (domain, thread) = {
-        let mut machine = MACHINE.lock();
-        let current = machine.current();
-        machine.threads[current].syscalls += 1;
-        if machine.threads[current].kind != ThreadKind::User {
+        let current = crate::sched::current_thread();
+        let cell = crate::thread::get(current);
+        cell.syscalls
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if cell.kind() != ThreadKind::User {
             // Ring 0 cannot execute `syscall` in this kernel; reaching here
             // would mean the entry was taken from a context that has no domain.
             (usize::MAX, current)
         } else {
-            (machine.threads[current].domain, current)
+            (cell.domain(), current)
         }
     };
 
@@ -120,7 +127,7 @@ pub fn handle(frame: &mut TrapFrame) {
     }
     // This thread keeps running: a thread it woke and nobody picked up is
     // handed to an idle processor here, on the way out.
-    crate::sched::flush_wake();
+    crate::sched::on_kernel_exit();
 
     // Every return to ring 3 passes here. A thread whose domain was terminated
     // by authority while it was inside this entry does not get the return.
@@ -143,7 +150,7 @@ fn limits_query(domain: usize, frame: &mut TrapFrame) {
 
     let (boot_epoch, cpus_online) = {
         let machine = MACHINE.lock();
-        (machine.boot_epoch, machine.cpus_online as u32)
+        (machine.boot_epoch, crate::sched::cpus_online() as u32)
     };
     let limits = Limits {
         major: thalyx_abi::VERSION_MAJOR,
@@ -225,10 +232,11 @@ fn thread_pointer_set(domain: usize, thread: usize, frame: &mut TrapFrame) {
         return;
     }
     let first = {
-        let mut machine = MACHINE.lock();
-        let first = machine.threads[thread].fs_base == 0 && value != 0;
-        machine.threads[thread].fs_base = value;
-        first
+        let cell = crate::thread::get(thread);
+        let previous = cell
+            .fs_base
+            .swap(value, core::sync::atomic::Ordering::Relaxed);
+        previous == 0 && value != 0
     };
     // The thread is running on this processor now, so the value takes effect on
     // the return to ring 3. If it was preempted between the store above and this
@@ -257,11 +265,18 @@ fn diag_note(domain: usize, thread: usize, frame: &mut TrapFrame) {
     let (sequence, cpu_ns, preemptions, syscalls) = {
         let mut machine = MACHINE.lock();
         machine.domains[domain].notes += 1;
+        let cell = crate::thread::get(thread);
+        // SAFETY: the scheduler fields of the thread running on this
+        // processor, read by that thread itself.
+        let (cpu_ns, preemptions) = unsafe {
+            let sched = cell.sched();
+            (sched.cpu_ns, sched.preemptions)
+        };
         (
             machine.domains[domain].notes,
-            machine.threads[thread].cpu_ns,
-            machine.threads[thread].preemptions,
-            machine.threads[thread].syscalls,
+            cpu_ns,
+            preemptions,
+            cell.syscalls.load(core::sync::atomic::Ordering::Relaxed),
         )
     };
 

@@ -59,6 +59,56 @@ static MAX_SPINS: AtomicU64 = AtomicU64::new(0);
 /// reported instead of hanging the machine.
 const WAIT_SPIN_LIMIT: u64 = 200_000_000;
 
+/// Bit per processor each domain's address space has ever been dispatched
+/// on.
+///
+/// A count of who is in the space *right now* answers a different and much
+/// weaker question: an invalidation has to reach every processor that could
+/// hold a translation, and a processor that ran here a microsecond ago still
+/// could. The mask is what makes "reached everyone who could have cached it"
+/// checkable after the fact. Set by the scheduler at dispatch, without a
+/// lock; cleared when the domain's slot is reused.
+static SPACE_MASKS: [AtomicU64; crate::limits::MAX_DOMAINS] =
+    [const { AtomicU64::new(0) }; crate::limits::MAX_DOMAINS];
+
+/// Notes that `cpu` is dispatching a thread of `domain`.
+#[inline]
+pub fn note_dispatch(domain: usize, cpu: usize) {
+    if let Some(mask) = SPACE_MASKS.get(domain) {
+        if mask.load(Ordering::Relaxed) & (1u64 << cpu) == 0 {
+            mask.fetch_or(1u64 << cpu, Ordering::AcqRel);
+        }
+    }
+}
+
+/// Processors `domain`'s address space has ever been dispatched on.
+#[must_use]
+pub fn space_mask(domain: usize) -> u64 {
+    SPACE_MASKS
+        .get(domain)
+        .map_or(0, |mask| mask.load(Ordering::Acquire))
+}
+
+/// Forgets the mask of a domain whose slot is being reused.
+pub fn forget_space(domain: usize) {
+    if let Some(mask) = SPACE_MASKS.get(domain) {
+        mask.store(0, Ordering::Release);
+    }
+}
+
+/// Loads `cr3` on this processor if it is not the space already loaded.
+///
+/// # Safety
+///
+/// `cr3` must be the root of an address space that shares the kernel's upper
+/// half, so the code and stack executing here stay mapped across the write.
+pub unsafe fn switch_space(cr3: u64, _domain: usize) {
+    if cr3 != 0 && cr3 != cpu::read_cr3() {
+        // SAFETY: the caller's contract.
+        unsafe { cpu::write_cr3(cr3) };
+    }
+}
+
 /// Records that `cpu` participates in invalidation from now on.
 ///
 /// A processor is added only after it has flushed once, so it can never be

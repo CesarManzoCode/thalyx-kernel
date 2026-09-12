@@ -14,7 +14,7 @@ use crate::arch::x86_64::trap::{
     TLB_VECTOR, TrapFrame,
 };
 use crate::sched;
-use crate::state::{MACHINE, ThreadKind};
+use crate::state::ThreadKind;
 use crate::tlb;
 use crate::{event, trace};
 
@@ -29,16 +29,20 @@ pub fn note_user_entry(frame: &TrapFrame) {
     if !frame.from_user() {
         return;
     }
+    // Every entry from user mode passes here, so it takes no lock: the
+    // confirmation is a one-shot flag on this processor's own current thread,
+    // and the swap makes exactly one entry the announcing one.
     let announce = {
-        let mut machine = MACHINE.lock();
-        let current = machine.current();
-        if machine.threads[current].kind != ThreadKind::User
-            || machine.threads[current].ring3_confirmed
+        let current = crate::sched::current_thread();
+        let cell = crate::thread::get(current);
+        if cell.kind() != ThreadKind::User
+            || cell
+                .ring3_confirmed
+                .swap(true, core::sync::atomic::Ordering::Relaxed)
         {
             None
         } else {
-            machine.threads[current].ring3_confirmed = true;
-            Some((current, machine.threads[current].domain))
+            Some((current, cell.domain()))
         }
     };
     if let Some((thread, domain)) = announce {
@@ -129,12 +133,16 @@ pub fn handle(frame: &mut TrapFrame) {
             tlb::on_shootdown_interrupt();
         }
         vector if vector == u64::from(RESCHEDULE_VECTOR) => {
-            // Nothing to do beyond returning: the processor re-enters its idle
-            // loop, which is where it reconsiders what to run and whether the
-            // run is over.
+            // Acknowledged first: the switch below does not return to this
+            // frame, and a controller left waiting for an acknowledgement
+            // would deliver nothing else to this processor.
             if let Some(lapic) = lapic::current() {
                 lapic.end_of_interrupt();
             }
+            // A processor told to look again does so here rather than on its
+            // next timer tick. That is the difference between a wake taking
+            // effect in microseconds and taking effect in a tick.
+            sched::on_reschedule(frame);
         }
         vector
             if vector >= u64::from(DEVICE_VECTOR_BASE)
@@ -149,7 +157,7 @@ pub fn handle(frame: &mut TrapFrame) {
             crate::device::on_interrupt(vector as u8);
             // The interrupted thread keeps running; a driver thread the
             // interrupt woke is handed to an idle processor now.
-            sched::flush_wake();
+            sched::on_kernel_exit();
         }
         vector if vector == u64::from(SPURIOUS_VECTOR) => {
             // A spurious interrupt is not acknowledged.

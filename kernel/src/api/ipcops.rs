@@ -26,8 +26,10 @@ use thalyx_abi::generated::{
 use crate::api::{BODY, Ctx, begin_response, receipt, reserve_receipt, resolve};
 use crate::ipc::{Cancel, DeliveredCap, Effect, Endpoint, Invocation, Message, NO_MESSAGE, State};
 use crate::obj::{NO_GRANT, ObjKind, ObjRef, ScopeId};
+use crate::sched::WakeHint;
 use crate::scope::{self, Resource};
-use crate::state::{FaultRecord, MACHINE, Machine, ThreadState, Wait};
+use crate::state::{FaultRecord, MACHINE, Machine, Wait};
+use crate::thread;
 use crate::ucopy::Staging;
 use crate::{event, trace};
 
@@ -77,7 +79,7 @@ pub fn create_endpoint(
         return Err(status::INVALID_ARGUMENT);
     }
     let sponsor = ctx.cap.object.index;
-    if machine.scopes[sponsor as usize].state != scope::State::Open {
+    if scope::table()[sponsor as usize].state() != scope::State::Open {
         return Err(status::SCOPE_CLOSED);
     }
     let index = machine
@@ -85,11 +87,11 @@ pub fn create_endpoint(
         .iter()
         .position(|endpoint| !endpoint.used)
         .ok_or(status::LIMIT_EXHAUSTED)?;
-    if !scope::reserve(&mut machine.scopes, sponsor, Resource::Metadata, 1) {
+    if !scope::reserve(sponsor, Resource::Metadata, 1) {
         return Err(status::LIMIT_EXHAUSTED);
     }
     let Some(id) = machine.next_id() else {
-        scope::release(&mut machine.scopes, sponsor, Resource::Metadata, 1);
+        scope::release(sponsor, Resource::Metadata, 1);
         return Err(status::LIMIT_EXHAUSTED);
     };
     let generation = machine.endpoints[index].generation.saturating_add(1);
@@ -136,7 +138,7 @@ pub fn create_endpoint(
         "endpoint={id} label={} epoch={id} capacity={} scope={}",
         machine.endpoints[index].label_str(),
         request.queue_capacity,
-        machine.scopes[sponsor as usize].id
+        scope::table()[sponsor as usize].id()
     );
     Ok(handle)
 }
@@ -318,20 +320,15 @@ fn admit(
         }
     };
 
-    let origin_scope = machine.threads[ctx.thread].effective_scope;
+    let origin_scope = thread::get(ctx.thread).effective_scope();
     let charged = if ordinary {
         let bytes = MESSAGE_OVERHEAD_BYTES + u64::from(request.payload_len);
-        if !scope::reserve(
-            &mut machine.scopes,
-            origin_scope,
-            Resource::QueueBytes,
-            bytes,
-        ) {
-            let scope = &machine.scopes[origin_scope as usize];
+        if !scope::reserve(origin_scope, Resource::QueueBytes, bytes) {
+            let scope = &scope::table()[origin_scope as usize];
             return Err(exhausted(
                 "queue_bytes",
-                scope.queue_bytes.saturating_add(bytes),
-                scope.limits.queue_bytes,
+                scope.used(Resource::QueueBytes).saturating_add(bytes),
+                scope.limits.load().queue_bytes,
             ));
         }
         bytes
@@ -341,12 +338,7 @@ fn admit(
 
     if !reserve_receipt(machine) {
         if charged != 0 {
-            scope::release(
-                &mut machine.scopes,
-                origin_scope,
-                Resource::QueueBytes,
-                charged,
-            );
+            scope::release(origin_scope, Resource::QueueBytes, charged);
         }
         let (used, capacity) = match machine.system_log {
             Some(index) => {
@@ -393,12 +385,7 @@ fn admit(
         }
         crate::api::release_receipt(machine);
         if charged != 0 {
-            scope::release(
-                &mut machine.scopes,
-                origin_scope,
-                Resource::QueueBytes,
-                charged,
-            );
+            scope::release(origin_scope, Resource::QueueBytes, charged);
         }
         return Err(status::LIMIT_EXHAUSTED);
     }
@@ -417,8 +404,8 @@ fn admit(
     let generation = machine.invocations[invocation_index]
         .generation
         .saturating_add(1);
-    let parent_id = machine.threads[ctx.thread]
-        .bound_invocation
+    let parent_id = thread::get(ctx.thread)
+        .bound()
         .map_or(0, |(index, _)| machine.invocations[index as usize].id);
 
     machine.invocations[invocation_index] = Invocation {
@@ -432,7 +419,7 @@ fn admit(
         origin_domain_generation: machine.domains[ctx.domain].generation,
         origin_domain_id: machine.domains[ctx.domain].id,
         origin_scope,
-        origin_scope_id: machine.scopes[origin_scope as usize].id,
+        origin_scope_id: scope::table()[origin_scope as usize].id(),
         waiter,
         parent_id,
         grant: ctx.cap.grant,
@@ -484,7 +471,9 @@ fn admit(
         machine.endpoints[endpoint].reserved_used += 1;
     }
     machine.endpoints[endpoint].admitted += 1;
-    machine.scopes[origin_scope as usize].invocations_pending += 1;
+    scope::table()[origin_scope as usize]
+        .invocations_pending
+        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
     trace!(
         "ipc.admitted",
@@ -496,7 +485,7 @@ fn admit(
         ctx.cap.facet,
         machine.grants[ctx.cap.grant as usize].id,
         machine.domains[ctx.domain].id,
-        machine.scopes[origin_scope as usize].id,
+        scope::table()[origin_scope as usize].id(),
         request.payload_len,
         request.cap_count,
         machine.endpoints[endpoint].queued
@@ -529,35 +518,34 @@ fn admit(
 
 fn wake_receiver(machine: &mut Machine, endpoint: usize, kick: bool) {
     let generation = machine.endpoints[endpoint].generation;
-    for index in 0..machine.threads.len() {
-        if machine.threads[index].state != ThreadState::Blocked {
-            continue;
-        }
-        if machine.threads[index].wait == Wait::Receive(endpoint as u16, generation) {
-            machine.threads[index].wait = Wait::None;
-            machine.threads[index].wait_deadline_ns = 0;
-            machine.threads[index].wake_status = status::OK;
-            machine.threads[index].state = ThreadState::Ready;
-            if kick {
-                crate::sched::kick_idle(machine);
-            }
+    // A caller that will block for the reply hands its processor to the
+    // receiver; a sender that keeps running sends it to an idle one.
+    let hint = if kick { WakeHint::Any } else { WakeHint::Sync };
+    for (index, _) in thread::iter() {
+        if thread::wake_if(
+            index,
+            |record| record.wait == Wait::Receive(endpoint as u16, generation),
+            status::OK,
+            0,
+            hint,
+        ) {
             return;
         }
     }
 }
 
-fn wake_waiter(machine: &mut Machine, invocation: usize, code: i64) {
-    let Some(thread) = machine.invocations[invocation].waiter else {
+fn wake_waiter(machine: &mut Machine, invocation: usize, code: i64, hint: WakeHint) {
+    let Some(waiter) = machine.invocations[invocation].waiter else {
         return;
     };
-    if machine.threads[thread].state != ThreadState::Blocked {
-        return;
-    }
-    machine.threads[thread].wait = Wait::None;
-    machine.threads[thread].wait_deadline_ns = 0;
-    machine.threads[thread].wake_status = code;
-    machine.threads[thread].state = ThreadState::Ready;
-    crate::sched::kick_idle(machine);
+    let generation = machine.invocations[invocation].generation;
+    thread::wake_if(
+        waiter,
+        |record| record.wait == Wait::Reply(invocation as u16, generation),
+        code,
+        0,
+        hint,
+    );
 }
 
 /// Admits a message without waiting for a reply.
@@ -592,20 +580,19 @@ pub fn call(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
             message_kind::REQUEST,
             Some(ctx.thread),
         )?;
-        let thread = ctx.thread;
-        machine.threads[thread].wait = Wait::Reply(admitted.invocation, admitted.generation);
-        machine.threads[thread].wait_deadline_ns = ctx.deadline;
-        machine.threads[thread].wake_status = status::OK;
-        machine.threads[thread].state = ThreadState::Blocked;
+        thread::prepare_wait(
+            ctx.thread,
+            Wait::Reply(admitted.invocation, admitted.generation),
+            ctx.deadline,
+        );
         (admitted.invocation, admitted.generation)
     };
 
     crate::sched::block_current();
 
+    let (woken, _) = thread::take_wake_status(ctx.thread);
     let mut machine = MACHINE.lock();
     let index = invocation as usize;
-    let woken = machine.threads[ctx.thread].wake_status;
-    machine.threads[ctx.thread].wake_status = status::OK;
     if machine.invocations[index].generation != generation {
         return Err(status::PEER_DEAD);
     }
@@ -692,18 +679,14 @@ pub fn receive(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i
             if ctx.flags & thalyx_abi::generated::flag::NONBLOCKING != 0 {
                 return Err(status::WOULD_BLOCK);
             }
-            let thread = ctx.thread;
-            machine.threads[thread].wait =
-                Wait::Receive(endpoint as u16, machine.endpoints[endpoint].generation);
-            machine.threads[thread].wait_deadline_ns = ctx.deadline;
-            machine.threads[thread].wake_status = status::OK;
-            machine.threads[thread].state = ThreadState::Blocked;
+            thread::prepare_wait(
+                ctx.thread,
+                Wait::Receive(endpoint as u16, machine.endpoints[endpoint].generation),
+                ctx.deadline,
+            );
         }
         crate::sched::block_current();
-        let mut machine = MACHINE.lock();
-        let woken = machine.threads[ctx.thread].wake_status;
-        machine.threads[ctx.thread].wake_status = status::OK;
-        drop(machine);
+        let (woken, _) = thread::take_wake_status(ctx.thread);
         if woken != status::OK {
             return Err(woken);
         }
@@ -826,35 +809,26 @@ fn release_invocation(machine: &mut Machine, index: usize) {
     }
     if invocation.charged_bytes != 0 {
         scope::release(
-            &mut machine.scopes,
             invocation.origin_scope,
             Resource::QueueBytes,
             invocation.charged_bytes,
         );
         machine.invocations[index].charged_bytes = 0;
     }
-    let scope_index = invocation.origin_scope as usize;
-    machine.scopes[scope_index].invocations_pending = machine.scopes[scope_index]
-        .invocations_pending
-        .saturating_sub(1);
+    let origin = &scope::table()[invocation.origin_scope as usize];
+    scope::decrement(&origin.invocations_pending);
     if invocation.effect == Effect::Admitted {
-        machine.scopes[scope_index].effects_pending = machine.scopes[scope_index]
-            .effects_pending
-            .saturating_sub(1);
+        scope::decrement(&origin.effects_pending);
         // The closing capacity this effect was holding goes back to the service
         // that reserved it. Holding a reservation past the obligation it was
         // taken for would shrink a service's reserve a little with every
         // request it ever answered.
-        let service = invocation.closure_service as usize;
-        machine.scopes[service].closure_reserved_ns = machine.scopes[service]
-            .closure_reserved_ns
-            .saturating_sub(invocation.closure_reserved_ns);
+        let service = &scope::table()[invocation.closure_service as usize];
+        scope::subtract(&service.closure_reserved_ns, invocation.closure_reserved_ns);
         machine.invocations[index].closure_reserved_ns = 0;
         machine.invocations[index].effect = Effect::Resolved;
     }
-    machine.scopes[scope_index].last_progress_ns = crate::api::now_ns();
-    machine.scopes[scope_index].drain_token =
-        machine.scopes[scope_index].drain_token.wrapping_add(1);
+    scope::note_progress(invocation.origin_scope, crate::api::now_ns());
     if invocation.grant != NO_GRANT {
         machine.grants[invocation.grant as usize].refs = machine.grants[invocation.grant as usize]
             .refs
@@ -947,7 +921,7 @@ pub fn reply(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<
         request.cap_count,
         request.result
     );
-    wake_waiter(machine, index, status::OK);
+    wake_waiter(machine, index, status::OK, WakeHint::Sync);
     Ok(invocation.id)
 }
 
@@ -973,7 +947,7 @@ pub fn begin_effect(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> 
     }
 
     let lineage = crate::api::lineage_status(machine, invocation.grant, ctx.now);
-    let scope_open = scope::is_open(&machine.scopes, invocation.origin_scope);
+    let scope_open = scope::is_open(invocation.origin_scope);
     if lineage != status::OK || !scope_open {
         machine.invocations[index].effect = Effect::Refused;
         let code = if lineage != status::OK {
@@ -985,7 +959,7 @@ pub fn begin_effect(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> 
             "effect.refused",
             "invocation={} origin_scope={} grant={} status={code} reason=barrier_or_expiry",
             invocation.id,
-            machine.scopes[invocation.origin_scope as usize].id,
+            scope::table()[invocation.origin_scope as usize].id(),
             machine.grants[invocation.grant as usize].id
         );
         receipt(
@@ -1009,28 +983,37 @@ pub fn begin_effect(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> 
     // of the client that is being closed.
     let service = machine.domains[ctx.domain].owner_scope;
     let reserve = request.closure_reserve_ns;
-    let node = &machine.scopes[service as usize];
-    let limits = node.limits.closure_reserve_ns;
+    let node = &scope::table()[service as usize];
+    let limits = node.limits.closure_reserve_ns();
     // Spent, plus what other effects are still holding, plus this one. Checking
     // only what has been spent would let every outstanding effect pass the same
     // test and the reserve would be an advance reservation in name only.
-    if node.closure_used_ns + node.closure_reserved_ns + reserve > limits {
+    let used = node
+        .closure_used_ns
+        .load(core::sync::atomic::Ordering::Relaxed);
+    let held = node
+        .closure_reserved_ns
+        .load(core::sync::atomic::Ordering::Relaxed);
+    if used + held + reserve > limits {
         return Err(status::LIMIT_EXHAUSTED);
     }
 
-    machine.scopes[service as usize].closure_reserved_ns += reserve;
+    node.closure_reserved_ns
+        .fetch_add(reserve, core::sync::atomic::Ordering::Relaxed);
     machine.invocations[index].effect = Effect::Admitted;
     machine.invocations[index].closure_service = service;
     machine.invocations[index].closure_reserved_ns = reserve;
-    machine.scopes[invocation.origin_scope as usize].effects_pending += 1;
+    scope::table()[invocation.origin_scope as usize]
+        .effects_pending
+        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
     trace!(
         "effect.admitted",
         "invocation={} origin_scope={} service_scope={} grant={} closure_reserve_ns={reserve} \
          kind={}",
         invocation.id,
-        machine.scopes[invocation.origin_scope as usize].id,
-        machine.scopes[service as usize].id,
+        scope::table()[invocation.origin_scope as usize].id(),
+        scope::table()[service as usize].id(),
         machine.grants[invocation.grant as usize].id,
         request.effect_kind
     );
@@ -1088,9 +1071,9 @@ pub fn resolve_invocation(
         invocation.effect.name(),
         invocation.cancel.name(),
         request.detail,
-        machine.scopes[invocation.origin_scope as usize].id
+        scope::table()[invocation.origin_scope as usize].id()
     );
-    wake_waiter(machine, index, code);
+    wake_waiter(machine, index, code, WakeHint::Sync);
     release_invocation(machine, index);
     Ok(invocation.id)
 }
@@ -1157,10 +1140,11 @@ pub fn bind_worker(machine: &mut Machine, ctx: &Ctx) -> Result<u64, i64> {
         return Err(status::ALREADY_RESOLVED);
     }
     let thread = ctx.thread;
-    if machine.threads[thread].bound_invocation.is_some() {
+    let cell = thread::get(thread);
+    if cell.bound().is_some() {
         return Err(status::STATE_CONFLICT);
     }
-    let recovery = !scope::is_open(&machine.scopes, invocation.origin_scope);
+    let recovery = !scope::is_open(invocation.origin_scope);
 
     // Who pays. Ordinarily the origin does: the client asked for the work, so
     // the worker adopts the client's scope and competes against its budget
@@ -1182,17 +1166,19 @@ pub fn bind_worker(machine: &mut Machine, ctx: &Ctx) -> Result<u64, i64> {
 
     // A borrowed worker competes for the paying scope's parallelism slots like
     // any thread that scope owns.
-    if !recovery && !scope::has_parallelism(&machine.scopes, charged) {
+    if !recovery && !scope::has_parallelism(charged) {
         return Err(status::LIMIT_EXHAUSTED);
     }
-    if let Some(previous) = machine.threads[thread].parallelism_scope.take() {
-        scope::drop_parallelism(&mut machine.scopes, previous);
+    if let Some(previous) = cell.take_parallelism_scope() {
+        scope::drop_parallelism(previous);
     }
-    machine.threads[thread].effective_scope = charged;
-    machine.threads[thread].recovery = recovery;
-    machine.threads[thread].bound_invocation = Some((index as u16, invocation.generation));
-    scope::take_parallelism(&mut machine.scopes, charged);
-    machine.threads[thread].parallelism_scope = Some(charged);
+    cell.effective_scope
+        .store(charged, core::sync::atomic::Ordering::Relaxed);
+    cell.recovery
+        .store(recovery, core::sync::atomic::Ordering::Relaxed);
+    cell.set_bound(Some((index as u16, invocation.generation)));
+    scope::take_parallelism(charged);
+    cell.set_parallelism_scope(Some(charged));
     machine.invocations[index].refs += 1;
     trace!(
         "sched.bound",
@@ -1200,8 +1186,8 @@ pub fn bind_worker(machine: &mut Machine, ctx: &Ctx) -> Result<u64, i64> {
          account={} recovery={}",
         machine.domains[ctx.domain].id,
         invocation.id,
-        machine.scopes[charged as usize].id,
-        machine.scopes[invocation.origin_scope as usize].id,
+        scope::table()[charged as usize].id(),
+        scope::table()[invocation.origin_scope as usize].id(),
         if recovery {
             "closure_reserve"
         } else {
@@ -1214,22 +1200,25 @@ pub fn bind_worker(machine: &mut Machine, ctx: &Ctx) -> Result<u64, i64> {
 
 /// Returns the worker to the scope that owns its domain.
 pub fn unbind_worker(machine: &mut Machine, ctx: &Ctx) -> Result<u64, i64> {
-    let thread = ctx.thread;
-    let Some((index, generation)) = machine.threads[thread].bound_invocation.take() else {
+    let cell = thread::get(ctx.thread);
+    let Some((index, generation)) = cell.bound() else {
         return Err(status::STATE_CONFLICT);
     };
+    cell.set_bound(None);
     if machine.invocations[index as usize].generation == generation {
         machine.invocations[index as usize].refs =
             machine.invocations[index as usize].refs.saturating_sub(1);
     }
-    if let Some(previous) = machine.threads[thread].parallelism_scope.take() {
-        scope::drop_parallelism(&mut machine.scopes, previous);
+    if let Some(previous) = cell.take_parallelism_scope() {
+        scope::drop_parallelism(previous);
     }
-    let owner = machine.threads[thread].owner_scope;
-    machine.threads[thread].effective_scope = owner;
-    machine.threads[thread].recovery = false;
-    scope::take_parallelism(&mut machine.scopes, owner);
-    machine.threads[thread].parallelism_scope = Some(owner);
+    let owner = cell.control().owner_scope;
+    cell.effective_scope
+        .store(owner, core::sync::atomic::Ordering::Relaxed);
+    cell.recovery
+        .store(false, core::sync::atomic::Ordering::Relaxed);
+    scope::take_parallelism(owner);
+    cell.set_parallelism_scope(Some(owner));
     Ok(0)
 }
 
@@ -1254,7 +1243,7 @@ pub fn withdraw_undelivered(machine: &mut Machine, root: ScopeId, _now: u64) -> 
             let origin = machine.invocations[invocation].origin_scope;
             let next = message.next;
             if machine.invocations[invocation].state == State::Admitted
-                && scope::is_within(&machine.scopes, root, origin)
+                && scope::is_within(root, origin)
             {
                 if previous == NO_MESSAGE {
                     machine.endpoints[endpoint].head = next;
@@ -1277,9 +1266,11 @@ pub fn withdraw_undelivered(machine: &mut Machine, root: ScopeId, _now: u64) -> 
                 machine.messages[current as usize] = Message::empty();
                 machine.invocations[invocation].cancel = Cancel::OriginFenced;
                 machine.invocations[invocation].outcome = outcome_value::ABORTED;
-                wake_waiter(machine, invocation, status::CANCELLED);
+                wake_waiter(machine, invocation, status::CANCELLED, WakeHint::Any);
                 release_invocation(machine, invocation);
-                machine.scopes[origin as usize].undelivered_cancelled += 1;
+                scope::table()[origin as usize]
+                    .undelivered_cancelled
+                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 withdrawn += 1;
             } else {
                 previous = current;
@@ -1297,7 +1288,7 @@ pub fn mark_cancelled(machine: &mut Machine, root: ScopeId) {
         if invocation.state == State::Empty || invocation.state == State::Resolved {
             continue;
         }
-        if scope::is_within(&machine.scopes, root, invocation.origin_scope) {
+        if scope::is_within(root, invocation.origin_scope) {
             machine.invocations[index].cancel = Cancel::OriginFenced;
         }
     }
@@ -1367,7 +1358,7 @@ pub fn on_domain_death(machine: &mut Machine, domain: usize) {
         // is unknown, not aborted: the kernel never invents a rollback.
         if invocation.state == State::Delivered && invocation.receiver_domain as usize == domain {
             machine.invocations[index].outcome = outcome_value::UNKNOWN;
-            wake_waiter(machine, index, status::PEER_DEAD);
+            wake_waiter(machine, index, status::PEER_DEAD, WakeHint::Any);
             release_invocation(machine, index);
         }
     }
@@ -1421,7 +1412,7 @@ pub fn deliver_fault(
     let facet = machine.domains[domain].fault_facet;
     let report = FaultReport {
         domain_id: machine.domains[domain].id,
-        thread_id: machine.threads[thread].id,
+        thread_id: thread::get(thread).control().id,
         generation: u64::from(machine.domains[domain].generation),
         vector: record.vector,
         error_code: record.error_code,

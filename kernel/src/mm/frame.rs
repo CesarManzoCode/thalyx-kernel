@@ -24,6 +24,16 @@ use thalyx_boot_protocol::{MemoryRegion, PAGE_SIZE, region_kind};
 
 use super::{Frame, Owner};
 
+/// Whether any frame is in quarantine, readable without the control lock so
+/// a tick can skip the drain when there is nothing to drain.
+static QUARANTINE_PENDING: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+/// Whether the quarantine holds anything.
+#[must_use]
+pub fn quarantine_pending() -> bool {
+    QUARANTINE_PENDING.load(core::sync::atomic::Ordering::Acquire) != 0
+}
+
 /// Owners the allocator can count separately: the kernel, every domain slot and
 /// every scope slot.
 const OWNER_SLOTS: usize = 1 + crate::limits::MAX_DOMAINS + crate::limits::MAX_SCOPES;
@@ -260,6 +270,7 @@ impl FrameAllocator {
     /// call — whether or not the caller published an invalidation of its own.
     pub fn retire(&mut self, frame: Frame, owner: Owner) {
         let generation = crate::tlb::retire_stamp();
+        QUARANTINE_PENDING.store(1, core::sync::atomic::Ordering::Release);
         for slot in &mut self.quarantine {
             if slot.used {
                 continue;
@@ -302,6 +313,9 @@ impl FrameAllocator {
             unsafe { self.release(slot.frame, slot.owner) };
         }
         self.quarantine_released += released;
+        if self.quarantined == 0 {
+            QUARANTINE_PENDING.store(0, core::sync::atomic::Ordering::Release);
+        }
         released
     }
 

@@ -21,14 +21,14 @@ use crate::arch::x86_64::paging::{AddressSpace, MapError};
 use crate::arch::x86_64::trap::TrapFrame;
 use crate::elf::{self, Reject};
 use crate::layout;
-use crate::limits::MAX_CPUS;
 use crate::mm::{Owner, Rights};
 use crate::obj::ScopeId;
 use crate::scope::{self, Resource};
 use crate::state::{
     Domain, DomainState, ExitReason, FaultRecord, MACHINE, MAX_DOMAINS, MAX_KSTACKS, MAX_THREADS,
-    Machine, ThreadKind, ThreadState, Wait,
+    Machine, ThreadKind, ThreadState,
 };
+use crate::thread;
 use crate::{event, trace};
 
 /// Why a domain could not be created.
@@ -221,13 +221,13 @@ pub fn create_in(
 ) -> Result<usize, CreateError> {
     let parsed = elf::parse_user_image(image).map_err(CreateError::Image)?;
 
-    if machine.scopes[owner_scope as usize].state != scope::State::Open {
+    if scope::table()[owner_scope as usize].state() != scope::State::Open {
         return Err(CreateError::ScopeClosed);
     }
     // A domain arrives with a thread, and that thread will charge this scope.
     // Refusing here rather than after the build keeps a scope at its
     // parallelism limit from being given a half-built domain to reject.
-    if !scope::has_parallelism(&machine.scopes, owner_scope) {
+    if !scope::has_parallelism(owner_scope) {
         return Err(CreateError::LimitExhausted);
     }
     let index = match machine
@@ -245,12 +245,7 @@ pub fn create_in(
             dead
         }
     };
-    let thread_index = machine
-        .threads
-        .iter()
-        .enumerate()
-        .position(|(slot, thread)| slot >= MAX_CPUS && thread.state == ThreadState::Empty)
-        .ok_or(CreateError::ThreadTableFull)?;
+    let thread_index = thread::find_empty().ok_or(CreateError::ThreadTableFull)?;
     let id = index as u16;
     let owner = Owner::Domain(id);
 
@@ -261,32 +256,17 @@ pub fn create_in(
     // credited with pages the domain actually holds.
     let reserved_pages =
         parsed.pages + layout::USER_STACK_PAGES + layout::KSTACK_PAGES + TABLE_RESERVE_PAGES;
-    if !scope::reserve(
-        &mut machine.scopes,
-        owner_scope,
-        Resource::MemoryPages,
-        reserved_pages,
-    ) {
+    if !scope::reserve(owner_scope, Resource::MemoryPages, reserved_pages) {
         return Err(CreateError::LimitExhausted);
     }
     // One object for the domain, one for its first thread.
-    if !scope::reserve(&mut machine.scopes, owner_scope, Resource::Metadata, 2) {
-        scope::release(
-            &mut machine.scopes,
-            owner_scope,
-            Resource::MemoryPages,
-            reserved_pages,
-        );
+    if !scope::reserve(owner_scope, Resource::Metadata, 2) {
+        scope::release(owner_scope, Resource::MemoryPages, reserved_pages);
         return Err(CreateError::LimitExhausted);
     }
     let Some(identity) = machine.next_id() else {
-        scope::release(
-            &mut machine.scopes,
-            owner_scope,
-            Resource::MemoryPages,
-            reserved_pages,
-        );
-        scope::release(&mut machine.scopes, owner_scope, Resource::Metadata, 2);
+        scope::release(owner_scope, Resource::MemoryPages, reserved_pages);
+        scope::release(owner_scope, Resource::Metadata, 2);
         return Err(CreateError::LimitExhausted);
     };
 
@@ -309,30 +289,23 @@ pub fn create_in(
 
     match build(machine, index, thread_index, owner, image, &parsed) {
         Ok(()) => {
-            machine.scopes[owner_scope as usize].threads += 1;
+            scope::table()[owner_scope as usize]
+                .threads
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            crate::tlb::forget_space(index);
             // The build is over, so the real charge is known. Returning the
             // surplus keeps the scope's accounting equal to what the domain
             // actually holds rather than to what it might have needed.
             let actual = machine.allocator().charged(owner) as u64 + layout::KSTACK_PAGES;
             let surplus = reserved_pages.saturating_sub(actual);
-            scope::release(
-                &mut machine.scopes,
-                owner_scope,
-                Resource::MemoryPages,
-                surplus,
-            );
+            scope::release(owner_scope, Resource::MemoryPages, surplus);
             machine.domains[index].reserved_pages = reserved_pages - surplus;
             Ok(index)
         }
         Err(error) => {
             demolish(machine, index, owner);
-            scope::release(
-                &mut machine.scopes,
-                owner_scope,
-                Resource::MemoryPages,
-                reserved_pages,
-            );
-            scope::release(&mut machine.scopes, owner_scope, Resource::Metadata, 2);
+            scope::release(owner_scope, Resource::MemoryPages, reserved_pages);
+            scope::release(owner_scope, Resource::Metadata, 2);
             machine.domains[index] = Domain::empty();
             machine.domains[index].generation = generation;
             Err(error)
@@ -463,46 +436,68 @@ fn build(
     let thread_id = machine.next_id().unwrap_or(0);
     let owner_scope = machine.domains[index].owner_scope;
     let domain_generation = machine.domains[index].generation;
-    let thread = &mut machine.threads[thread_index];
-    thread.state = ThreadState::Held; // allocated, unschedulable until activation
-    thread.kind = ThreadKind::User;
-    thread.domain = index;
-    thread.domain_generation = domain_generation;
-    thread.id = thread_id;
-    thread.owner_scope = owner_scope;
-    thread.effective_scope = owner_scope;
-    thread.recovery = false;
-    thread.bound_invocation = None;
-    thread.parallelism_scope = None;
-    thread.wait = Wait::None;
-    thread.wait_deadline_ns = 0;
-    thread.wake_status = 0;
-    thread.wake_aux = 0;
-    thread.kstack_slot = kstack_slot;
-    thread.kstack_top = kstack_top;
-    thread.saved_rsp = saved_rsp;
-    thread.cr3 = cr3;
-    thread.fpu = fpu::initial();
-    thread.cpu_ns = 0;
-    thread.dispatched_ns = 0;
-    thread.quantum_ticks = 0;
-    thread.preemptions = 0;
-    thread.syscalls = 0;
-    thread.ring3_confirmed = false;
-    // A slot is reused across domains. A thread pointer left by the previous
-    // occupant would be an address in someone else's space.
-    thread.fs_base = 0;
+    initialise_thread(
+        thread_index,
+        index,
+        domain_generation,
+        thread_id,
+        owner_scope,
+        kstack_slot,
+        kstack_top,
+        saved_rsp,
+        cr3,
+    );
     machine.domains[index].threads[0] = Some(thread_index);
 
     // The thread charges its owner scope from here, so it holds one of that
     // scope's parallelism slots. The limit bounds how many threads may charge
     // one scope at all -- a domain's own and any worker borrowed into it -- and
     // it is only a limit if every one of them is counted.
-    let owner_scope = machine.domains[index].owner_scope;
-    scope::take_parallelism(&mut machine.scopes, owner_scope);
-    machine.threads[thread_index].parallelism_scope = Some(owner_scope);
+    scope::take_parallelism(owner_scope);
+    thread::get(thread_index).set_parallelism_scope(Some(owner_scope));
 
     Ok(())
+}
+
+/// Writes a fresh thread into an empty slot, `Held` until activation.
+///
+/// A slot is reused across domains. Everything the previous occupant left --
+/// a thread pointer that would be an address in someone else's space, a
+/// counter, a wait -- is reset before the new identity is written.
+#[allow(clippy::too_many_arguments)]
+fn initialise_thread(
+    thread_index: usize,
+    domain: usize,
+    domain_generation: u32,
+    thread_id: u64,
+    owner_scope: ScopeId,
+    kstack_slot: usize,
+    kstack_top: u64,
+    saved_rsp: u64,
+    cr3: u64,
+) {
+    let cell = thread::get(thread_index);
+    cell.reset();
+    cell.set_kind(ThreadKind::User);
+    cell.effective_scope
+        .store(owner_scope, core::sync::atomic::Ordering::Relaxed);
+    // SAFETY: the slot is empty and under the machine lock; no processor
+    // stands on it and no run queue holds it.
+    unsafe {
+        let control = cell.control_mut();
+        control.domain = domain;
+        control.domain_generation = domain_generation;
+        control.id = thread_id;
+        control.owner_scope = owner_scope;
+        control.kstack_slot = kstack_slot;
+        control.kstack_top = kstack_top;
+        control.cr3 = cr3;
+        let sched = cell.sched();
+        sched.saved_rsp = saved_rsp;
+        sched.fpu = fpu::initial();
+    }
+    // Allocated, unschedulable until activation.
+    cell.set_state(ThreadState::Held);
 }
 
 fn demolish(machine: &mut Machine, index: usize, owner: Owner) {
@@ -510,10 +505,11 @@ fn demolish(machine: &mut Machine, index: usize, owner: Owner) {
         let Some(thread_index) = machine.domains[index].threads[slot].take() else {
             continue;
         };
-        let kstack = machine.threads[thread_index].kstack_slot;
+        let cell = thread::get(thread_index);
+        let kstack = cell.control().kstack_slot;
         release_kernel_stack(machine, kstack);
-        machine.threads[thread_index].state = ThreadState::Empty;
-        machine.threads[thread_index].kstack_slot = usize::MAX;
+        // Never scheduled: the slot goes back untouched by any processor.
+        cell.reset();
     }
     if let Some(mut space) = machine.domains[index].space.take() {
         let allocator = machine
@@ -555,7 +551,7 @@ pub fn activate_in(machine: &mut Machine, index: usize) -> Result<(), Activation
     let Some(thread_index) = machine.domains[index].first_thread() else {
         return Err(ActivationRefusal::NoThread);
     };
-    if thread_index >= MAX_THREADS || machine.threads[thread_index].kstack_top == 0 {
+    if thread_index >= MAX_THREADS || thread::get(thread_index).control().kstack_top == 0 {
         return Err(ActivationRefusal::NoThread);
     }
 
@@ -573,17 +569,18 @@ pub fn activate_in(machine: &mut Machine, index: usize) -> Result<(), Activation
         return Err(ActivationRefusal::NoFaultChannel);
     }
     let owner = machine.domains[index].owner_scope;
-    if machine.scopes[owner as usize].state != scope::State::Open {
+    if scope::table()[owner as usize].state() != scope::State::Open {
         return Err(ActivationRefusal::ScopeClosed);
     }
 
     machine.domains[index].state = DomainState::Runnable;
     for slot in 0..crate::state::MAX_THREADS_PER_DOMAIN {
         if let Some(thread) = machine.domains[index].threads[slot] {
-            machine.threads[thread].state = ThreadState::Ready;
+            // The activator keeps running; the new thread goes to an idle
+            // processor, or waits its turn on a busy one.
+            crate::sched::start_thread(thread);
         }
     }
-    crate::sched::kick_idle(machine);
     let _ = thread_index;
     Ok(())
 }
@@ -600,14 +597,15 @@ pub fn terminate_on_fault(frame: &TrapFrame, cr2: u64) -> ! {
     };
 
     let (domain_index, thread_index) = {
+        let thread_index = crate::sched::current_thread();
+        let cell = thread::get(thread_index);
+        let domain_index = cell.domain();
         let mut machine = MACHINE.lock();
-        let thread_index = machine.current();
-        let domain_index = machine.threads[thread_index].domain;
         // A thread that was stopped by authority while it was running, and
         // whose withdrawn mappings caught up with it before the kick did. It
         // has not done anything its program should be charged with; it leaves,
         // and the fault is not counted against a domain already terminated.
-        if machine.threads[thread_index].state == ThreadState::Dead {
+        if cell.stop.load(core::sync::atomic::Ordering::Acquire) {
             let name = machine.domains[domain_index].name_str();
             event!(
                 "thread.stopped_late",
@@ -627,7 +625,8 @@ pub fn terminate_on_fault(frame: &TrapFrame, cr2: u64) -> ! {
         machine.domains[domain_index].faults += 1;
 
         let name = machine.domains[domain_index].name_str();
-        let cpu_ns = machine.threads[thread_index].cpu_ns;
+        // SAFETY: the faulting thread is this processor's current thread.
+        let cpu_ns = unsafe { cell.sched().cpu_ns };
         event!(
             "user.fault",
             "domain={domain_index} name={name} thread={thread_index} vector={} error=0x{:x} \
@@ -657,9 +656,9 @@ pub fn terminate_on_fault(frame: &TrapFrame, cr2: u64) -> ! {
 /// Stops the running domain at its own request, and does not return.
 pub fn terminate_voluntarily(code: u64) -> ! {
     {
+        let thread_index = crate::sched::current_thread();
+        let domain_index = thread::get(thread_index).domain();
         let mut machine = MACHINE.lock();
-        let thread_index = machine.current();
-        let domain_index = machine.threads[thread_index].domain;
         terminate_in(&mut machine, domain_index, ExitReason::Voluntary, code);
     }
     crate::sched::switch_away_from_dead()
@@ -697,28 +696,7 @@ fn reapable(machine: &crate::state::Machine, index: usize) -> bool {
     let Some(space) = machine.domains[index].space.as_ref() else {
         return false;
     };
-    let cr3 = space.cr3();
-    for cpu in 0..crate::limits::MAX_CPUS {
-        let slot = machine.cpus[cpu];
-        if !slot.online {
-            continue;
-        }
-        for thread in [slot.current, slot.previous] {
-            if thread == usize::MAX || thread >= machine.threads.len() {
-                continue;
-            }
-            let record = &machine.threads[thread];
-            if record.cr3 == cr3 {
-                return false;
-            }
-            if record.domain == index
-                && record.domain_generation == machine.domains[index].generation
-            {
-                return false;
-            }
-        }
-    }
-    true
+    !crate::sched::standing_on(index, machine.domains[index].generation, space.cr3())
 }
 
 /// Interrupts every other processor that is running a thread of `index`.
@@ -728,24 +706,7 @@ fn reapable(machine: &crate::state::Machine, index: usize) -> bool {
 /// left out: if it is running one of the threads, it is the caller itself, and
 /// the caller leaves on its own way out.
 fn kick_running_threads(machine: &Machine, index: usize) {
-    let me = crate::percpu::index();
-    let Some(controller) = crate::arch::x86_64::lapic::current() else {
-        return;
-    };
-    for cpu in 0..crate::limits::MAX_CPUS {
-        let slot = machine.cpus[cpu];
-        if cpu == me || !slot.online || slot.current == usize::MAX {
-            continue;
-        }
-        let thread = &machine.threads[slot.current];
-        if thread.domain != index || thread.domain_generation != machine.domains[index].generation {
-            continue;
-        }
-        let apic_id = crate::smp::apic_id_of(cpu);
-        if apic_id != u32::MAX {
-            controller.send_fixed(apic_id, crate::arch::x86_64::trap::RESCHEDULE_VECTOR);
-        }
-    }
+    crate::sched::kick_domain(index, machine.domains[index].generation);
 }
 
 /// Frees the table slot of a domain that has stopped, been reaped, and is
@@ -782,16 +743,36 @@ pub fn collect_dead(machine: &mut Machine, index: usize) -> bool {
     let name = domain.name_str();
     trace!(
         "domain.collected",
-        "domain={index} name={name} id={id} scope={}", machine.scopes[scope as usize].id
+        "domain={index} name={name} id={id} scope={}",
+        scope::table()[scope as usize].id()
     );
+    crate::tlb::forget_space(index);
     machine.domains[index] = Domain::empty();
     machine.domains[index].generation = generation;
     true
 }
 
+/// Set while at least one domain is `Faulted` or `Stopping`.
+///
+/// Every processor's idle loop asks whether there is anything to reclaim, and
+/// asking used to mean taking the machine lock -- on four processors, in a
+/// loop, competing with every entry that needs the control plane. The flag
+/// answers the common case, "nothing died", without touching it. It is set
+/// when a domain stops and cleared only by a sweep that found nothing left to
+/// reclaim, so it is never clear while a reapable domain exists.
+static DEAD_PENDING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Records that a domain has stopped and will need reclaiming.
+pub fn note_dead() {
+    DEAD_PENDING.store(true, core::sync::atomic::Ordering::Release);
+}
+
 /// Reclaims every domain that has stopped and that no processor is still
 /// standing on.
 pub fn reap_dead() {
+    if !DEAD_PENDING.load(core::sync::atomic::Ordering::Acquire) {
+        return;
+    }
     loop {
         let mut machine = MACHINE.lock();
         let candidate = (0..MAX_DOMAINS).find(|&index| {
@@ -800,7 +781,20 @@ pub fn reap_dead() {
                 DomainState::Faulted | DomainState::Stopping
             ) && reapable(&machine, index)
         });
-        let Some(index) = candidate else { return };
+        let Some(index) = candidate else {
+            // Cleared only when no domain is waiting to be reclaimed at all,
+            // not merely when none is ready: one that is still standing on a
+            // processor must keep the flag set, or nobody would come back.
+            if !(0..MAX_DOMAINS).any(|index| {
+                matches!(
+                    machine.domains[index].state,
+                    DomainState::Faulted | DomainState::Stopping
+                )
+            }) {
+                DEAD_PENDING.store(false, core::sync::atomic::Ordering::Release);
+            }
+            return;
+        };
 
         let owner = Owner::Domain(index as u16);
         let charged_before = machine.allocator().charged(owner);
@@ -814,11 +808,12 @@ pub fn reap_dead() {
             let Some(thread_index) = machine.domains[index].threads[slot].take() else {
                 continue;
             };
-            let kstack = machine.threads[thread_index].kstack_slot;
+            let cell = thread::get(thread_index);
+            let kstack = cell.control().kstack_slot;
             release_kernel_stack(&mut machine, kstack);
-            machine.threads[thread_index].state = ThreadState::Empty;
-            machine.threads[thread_index].kstack_slot = usize::MAX;
-            machine.threads[thread_index].kstack_top = 0;
+            // Off every processor and out of every queue: `reapable` said so
+            // under this lock, and a dead thread is never enqueued again.
+            cell.reset();
         }
 
         let reclaimed = {
@@ -845,21 +840,12 @@ pub fn reap_dead() {
         let scope_index = machine.domains[index].owner_scope;
         let pages = machine.domains[index].reserved_pages;
         let metadata = machine.domains[index].reserved_metadata;
-        scope::release(
-            &mut machine.scopes,
-            scope_index,
-            Resource::MemoryPages,
-            pages,
+        scope::release(scope_index, Resource::MemoryPages, pages);
+        scope::release(scope_index, Resource::Metadata, metadata);
+        scope::subtract32(
+            &scope::table()[scope_index as usize].threads,
+            threads.max(1),
         );
-        scope::release(
-            &mut machine.scopes,
-            scope_index,
-            Resource::Metadata,
-            metadata,
-        );
-        machine.scopes[scope_index as usize].threads = machine.scopes[scope_index as usize]
-            .threads
-            .saturating_sub(threads.max(1));
         machine.domains[index].reserved_pages = 0;
         machine.domains[index].reserved_metadata = 0;
         machine.domains[index].state = DomainState::Dead;
@@ -901,45 +887,25 @@ pub fn add_thread_in(
         .iter()
         .position(|thread| thread.is_none())
         .ok_or(CreateError::ThreadTableFull)?;
-    let thread_index = machine
-        .threads
-        .iter()
-        .enumerate()
-        .position(|(slot, thread)| slot >= MAX_CPUS && thread.state == ThreadState::Empty)
-        .ok_or(CreateError::ThreadTableFull)?;
+    let thread_index = thread::find_empty().ok_or(CreateError::ThreadTableFull)?;
 
     let owner_scope = machine.domains[index].owner_scope;
-    if !scope::has_parallelism(&machine.scopes, owner_scope) {
+    if !scope::has_parallelism(owner_scope) {
         return Err(CreateError::LimitExhausted);
     }
-    if !scope::reserve(
-        &mut machine.scopes,
-        owner_scope,
-        Resource::MemoryPages,
-        layout::KSTACK_PAGES,
-    ) {
+    if !scope::reserve(owner_scope, Resource::MemoryPages, layout::KSTACK_PAGES) {
         return Err(CreateError::LimitExhausted);
     }
-    if !scope::reserve(&mut machine.scopes, owner_scope, Resource::Metadata, 1) {
-        scope::release(
-            &mut machine.scopes,
-            owner_scope,
-            Resource::MemoryPages,
-            layout::KSTACK_PAGES,
-        );
+    if !scope::reserve(owner_scope, Resource::Metadata, 1) {
+        scope::release(owner_scope, Resource::MemoryPages, layout::KSTACK_PAGES);
         return Err(CreateError::LimitExhausted);
     }
 
     let (kstack_slot, kstack_top) = match allocate_kernel_stack(machine) {
         Ok(value) => value,
         Err(error) => {
-            scope::release(
-                &mut machine.scopes,
-                owner_scope,
-                Resource::MemoryPages,
-                layout::KSTACK_PAGES,
-            );
-            scope::release(&mut machine.scopes, owner_scope, Resource::Metadata, 1);
+            scope::release(owner_scope, Resource::MemoryPages, layout::KSTACK_PAGES);
+            scope::release(owner_scope, Resource::Metadata, 1);
             return Err(error);
         }
     };
@@ -955,38 +921,26 @@ pub fn add_thread_in(
         .cr3();
     let thread_id = machine.next_id().unwrap_or(0);
     let generation = machine.domains[index].generation;
-    let thread = &mut machine.threads[thread_index];
-    thread.state = ThreadState::Held;
-    thread.kind = ThreadKind::User;
-    thread.domain = index;
-    thread.domain_generation = generation;
-    thread.id = thread_id;
-    thread.owner_scope = owner_scope;
-    thread.effective_scope = owner_scope;
-    thread.recovery = false;
-    thread.bound_invocation = None;
-    thread.parallelism_scope = None;
-    thread.wait = Wait::None;
-    thread.wait_deadline_ns = 0;
-    thread.kstack_slot = kstack_slot;
-    thread.kstack_top = kstack_top;
-    thread.saved_rsp = saved_rsp;
-    thread.cr3 = cr3;
-    thread.fpu = fpu::initial();
-    thread.cpu_ns = 0;
-    thread.dispatched_ns = 0;
-    thread.quantum_ticks = 0;
-    thread.preemptions = 0;
-    thread.syscalls = 0;
-    thread.ring3_confirmed = false;
-    thread.fs_base = 0;
+    initialise_thread(
+        thread_index,
+        index,
+        generation,
+        thread_id,
+        owner_scope,
+        kstack_slot,
+        kstack_top,
+        saved_rsp,
+        cr3,
+    );
 
     machine.domains[index].threads[slot] = Some(thread_index);
     machine.domains[index].reserved_pages += layout::KSTACK_PAGES;
     machine.domains[index].reserved_metadata += 1;
-    machine.scopes[owner_scope as usize].threads += 1;
-    scope::take_parallelism(&mut machine.scopes, owner_scope);
-    machine.threads[thread_index].parallelism_scope = Some(owner_scope);
+    scope::table()[owner_scope as usize]
+        .threads
+        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    scope::take_parallelism(owner_scope);
+    thread::get(thread_index).set_parallelism_scope(Some(owner_scope));
     Ok(thread_index)
 }
 
@@ -1010,17 +964,13 @@ pub fn terminate_in(machine: &mut Machine, index: usize, reason: ExitReason, cod
     };
     machine.domains[index].exit_reason = Some(reason);
     machine.domains[index].exit_code = code;
+    note_dead();
 
     for slot in 0..crate::state::MAX_THREADS_PER_DOMAIN {
         let Some(thread) = machine.domains[index].threads[slot] else {
             continue;
         };
-        if let Some(scope) = machine.threads[thread].parallelism_scope.take() {
-            crate::scope::drop_parallelism(&mut machine.scopes, scope);
-        }
-        machine.threads[thread].state = ThreadState::Dead;
-        machine.threads[thread].wait = Wait::None;
-        machine.threads[thread].wait_deadline_ns = 0;
+        crate::sched::stop_thread(thread);
     }
 
     // A thread of this domain that is on another processor right now keeps
@@ -1051,7 +1001,7 @@ pub fn terminate_in(machine: &mut Machine, index: usize, reason: ExitReason, cod
         "domain={index} name={name} reason={} code=0x{code:x} scope={} threads={} \
          notes={} invocations={} refusals={}",
         reason.name(),
-        machine.scopes[scope as usize].id,
+        scope::table()[scope as usize].id(),
         machine.domains[index].thread_count(),
         machine.domains[index].notes,
         machine.domains[index].invocations,

@@ -900,12 +900,7 @@ fn assign(
 
     let mut machine = MACHINE.lock();
     let index = machine.devices.iter().position(|device| !device.used)?;
-    if !crate::scope::reserve(
-        &mut machine.scopes,
-        sponsor,
-        crate::scope::Resource::Metadata,
-        1,
-    ) {
+    if !crate::scope::reserve(sponsor, crate::scope::Resource::Metadata, 1) {
         return None;
     }
     let id = machine.next_id()?;

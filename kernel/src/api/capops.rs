@@ -43,7 +43,7 @@ pub fn inspect(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Resul
         deadline_ns: node.deadline_ns,
         life_scope_id: node
             .life_scope
-            .map_or(0, |scope| machine.scopes[scope as usize].id),
+            .map_or(0, |scope| crate::scope::table()[scope as usize].id()),
         object_id: crate::api::object_id(machine, ctx.cap.object),
         facet: node.facet,
     };
@@ -134,12 +134,7 @@ pub fn derive(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
                 .saturating_sub(1);
             let sponsor = machine.grants[child as usize].sponsor;
             machine.grants[child as usize] = crate::obj::Grant::empty();
-            crate::scope::release(
-                &mut machine.scopes,
-                sponsor,
-                crate::scope::Resource::Metadata,
-                1,
-            );
+            crate::scope::release(sponsor, crate::scope::Resource::Metadata, 1);
             Err(status::LIMIT_EXHAUSTED)
         }
     }

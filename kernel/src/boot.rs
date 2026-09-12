@@ -23,7 +23,7 @@ use crate::mm::frame::FrameAllocator;
 use crate::mm::{Frame, Owner, Rights};
 use crate::obj::ScopeId;
 use crate::percpu;
-use crate::state::{IDLE_THREAD, MACHINE, ThreadKind, ThreadState};
+use crate::state::{IDLE_THREAD, MACHINE};
 use crate::{domain, sched, smp, time, tlb};
 use crate::{event, trace};
 
@@ -469,9 +469,7 @@ fn report_memory_map() {
 /// run where they differ is a run whose scheduling evidence covers fewer
 /// processors than the machine has.
 fn report_smp(platform: &acpi::Platform) {
-    let machine = MACHINE.lock();
-    let online = machine.cpus_online;
-    drop(machine);
+    let online = sched::cpus_online();
     let (published, ipis, flushes, timeouts, spins) = tlb::counters();
     event!(
         "smp.online",
@@ -484,17 +482,15 @@ fn report_smp(platform: &acpi::Platform) {
         tlb::online_mask()
     );
     for cpu in 0..crate::limits::MAX_CPUS {
-        let machine = MACHINE.lock();
-        let slot = machine.cpus[cpu];
-        drop(machine);
-        if !slot.online {
+        let slot = sched::cpu_state(cpu);
+        if !slot.is_online() {
             continue;
         }
         event!(
             "smp.cpu",
             "cpu={cpu} apic_id={} idle_thread={} role={}",
-            slot.apic_id,
-            slot.idle_thread,
+            slot.apic_id.load(core::sync::atomic::Ordering::Relaxed),
+            crate::state::idle_thread(cpu),
             if cpu == 0 { "bootstrap" } else { "application" }
         );
     }
@@ -630,22 +626,14 @@ fn start_timer(lapic_phys: u64, backend: lapic::Backend) -> lapic::Calibration {
 
 fn establish_idle_thread(info: &BootInfo) {
     let stack_top = HHDM_BASE + info.boot_stack_phys + info.boot_stack_pages * PAGE_SIZE;
-    let mut machine = MACHINE.lock();
+    let machine = MACHINE.lock();
     let cr3 = machine
         .kernel_space
         .as_ref()
         .expect("kernel space built")
         .cr3();
-    let thread = &mut machine.threads[IDLE_THREAD];
-    thread.state = ThreadState::Running;
-    thread.kind = ThreadKind::Idle;
-    thread.kstack_top = stack_top;
-    thread.cr3 = cr3;
-    thread.fpu = fpu::initial();
-    thread.quantum_ticks = sched::QUANTUM_TICKS;
-    thread.dispatched_ns = time::monotonic_ns().unwrap_or(0);
-    machine.cpus[0].current = IDLE_THREAD;
     drop(machine);
+    sched::establish_idle(0, stack_top, cr3, time::monotonic_ns().unwrap_or(0));
 
     // SAFETY: bootstrap path with interrupts masked; the boot stack is mapped
     // through the direct map and is the stack this code is running on.
@@ -936,32 +924,32 @@ fn drain_quarantine() {
 /// "one processor ran everything while three idled" produce the same total, and
 /// only the first is evidence that the scheduling was multiprocessor.
 fn scheduling_summary() {
-    let machine = MACHINE.lock();
     // The processors that ran, not the ones still running: this summary is
     // written after the others have parked.
-    let online = machine.cpus_started;
-    let peak = crate::scope::peak_running(&machine.scopes);
+    let online = sched::cpus_started();
+    let peak = crate::scope::peak_running();
     let mut rows = [(0usize, 0u32, 0u64, 0u64, 0u64, 0u64, 0u64); crate::limits::MAX_CPUS];
     let mut count = 0usize;
     for cpu in 0..crate::limits::MAX_CPUS {
-        let slot = machine.cpus[cpu];
-        if slot.apic_id == u32::MAX {
+        let slot = sched::cpu_state(cpu);
+        let apic_id = slot.apic_id.load(core::sync::atomic::Ordering::Relaxed);
+        if apic_id == u32::MAX {
             continue;
         }
         rows[count] = (
             cpu,
-            slot.apic_id,
-            slot.ticks,
-            slot.dispatches,
-            slot.preemptions,
-            slot.budget_stalls,
-            slot.user_ns,
+            apic_id,
+            slot.ticks.load(core::sync::atomic::Ordering::Relaxed),
+            slot.dispatches.load(core::sync::atomic::Ordering::Relaxed),
+            slot.preemptions.load(core::sync::atomic::Ordering::Relaxed),
+            slot.budget_stalls
+                .load(core::sync::atomic::Ordering::Relaxed),
+            slot.user_ns.load(core::sync::atomic::Ordering::Relaxed),
         );
         count += 1;
     }
-    let migrations: u64 = machine.threads.iter().map(|thread| thread.migrations).sum();
-    let interval = machine.max_charge_interval_ns;
-    drop(machine);
+    let migrations = sched::migrations();
+    let (_, _, _, _, interval) = sched::totals();
 
     for slot in 0..count {
         let (cpu, apic_id, ticks, dispatches, preemptions, stalls, user_ns) = rows[slot];
@@ -975,39 +963,48 @@ fn scheduling_summary() {
     // charged in a closed window. A budget nothing was measured against is a
     // number, not a limit.
     for index in 0..crate::limits::MAX_SCOPES {
-        let machine = MACHINE.lock();
-        let node = &machine.scopes[index];
-        if node.state == crate::scope::State::Empty || node.limits.cpu_budget_ns == 0 {
+        let node = &crate::scope::table()[index];
+        let limits = node.limits.load();
+        if node.state() == crate::scope::State::Empty || limits.cpu_budget_ns == 0 {
             continue;
         }
         let (id, label, budget, parallelism) = (
-            node.id,
+            node.id(),
             node.label_str(),
-            node.limits.cpu_budget_ns,
-            node.limits.parallelism,
+            limits.cpu_budget_ns,
+            limits.parallelism,
         );
+        let load = |field: &core::sync::atomic::AtomicU64| {
+            field.load(core::sync::atomic::Ordering::Relaxed)
+        };
         let (windows, worst, overruns, worst_overrun, total, debt) = (
-            node.windows_closed,
-            node.max_window_ns,
-            node.overruns,
-            node.max_overrun_ns,
-            node.cpu_total_ns,
-            node.cpu_debt_ns,
+            load(&node.windows_closed),
+            load(&node.max_window_ns),
+            load(&node.overruns),
+            load(&node.max_overrun_ns),
+            load(&node.cpu_total_ns) + sched::pending_charges(index as u16),
+            load(&node.cpu_debt_ns),
         );
         // The peaks are recorded where the commitment happens, so they answer
         // the question a closed window cannot: how much was ever promised at
         // once, and how many threads ever held this scope at one instant.
         let (committed, peak, grants, refusals) = (
-            node.max_committed_ns,
-            node.max_running,
-            node.dispatch_grants,
-            node.dispatch_refusals,
+            load(&node.max_committed_ns),
+            node.max_running.load(core::sync::atomic::Ordering::Relaxed),
+            load(&node.dispatch_grants),
+            load(&node.dispatch_refusals),
         );
-        let (charged, excess) = (node.max_charged_in_window_ns, node.max_excess_ns);
+        let (charged, excess) = (
+            load(&node.max_charged_in_window_ns),
+            load(&node.max_excess_ns),
+        );
         // Every overrun was counted; only the first few were written out as
         // their own records. The difference is stated, so a reader of the
         // debt records knows how many windows they stand for.
-        let debt_records = u64::from(node.debt_records);
+        let debt_records = u64::from(
+            node.debt_records
+                .load(core::sync::atomic::Ordering::Relaxed),
+        );
         event!(
             "scope.accounting",
             "scope={index} id={id} label={label} budget_ns={budget} \
@@ -1019,7 +1016,6 @@ fn scheduling_summary() {
              debt_records={debt_records} debt_records_coalesced={}",
             overruns.saturating_sub(debt_records)
         );
-        drop(machine);
     }
 
     let (published, ipis, flushes, timeouts, spins) = tlb::counters();
@@ -1037,12 +1033,10 @@ fn scheduling_summary() {
 }
 
 fn summarize(terminal: sched::Terminal) {
+    let (ticks, preemptions, _, records, _) = sched::totals();
     let machine = MACHINE.lock();
-    let ticks = machine.ticks;
-    let preemptions = machine.preemptions;
     let faults = machine.user_faults;
     let rejected = machine.modules_rejected;
-    let records = machine.preempt_records;
     drop(machine);
 
     for index in 0..crate::state::MAX_DOMAINS {
@@ -1065,7 +1059,7 @@ fn summarize(terminal: sched::Terminal) {
             let machine = MACHINE.lock();
             (
                 machine.domains[index].caps.live(),
-                machine.scopes[machine.domains[index].owner_scope as usize].id,
+                crate::scope::table()[machine.domains[index].owner_scope as usize].id(),
             )
         };
         event!(

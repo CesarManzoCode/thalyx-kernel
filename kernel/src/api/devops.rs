@@ -84,7 +84,7 @@ fn describe(machine: &Machine, index: usize) -> DeviceInfo {
         group_members: device.group_members,
         reserved0: 0,
         object_id: device.id,
-        sponsor_scope_id: machine.scopes[device.sponsor as usize].id,
+        sponsor_scope_id: scope::table()[device.sponsor as usize].id(),
         label: device.label,
         regions,
     }
@@ -147,7 +147,7 @@ pub fn map_region(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Re
         .position(|record| !record.used)
         .ok_or(status::LIMIT_EXHAUSTED)?;
     let owner = machine.domains[domain].owner_scope;
-    if !scope::reserve(&mut machine.scopes, owner, Resource::Metadata, 1) {
+    if !scope::reserve(owner, Resource::Metadata, 1) {
         return Err(status::LIMIT_EXHAUSTED);
     }
 
@@ -191,7 +191,7 @@ pub fn map_region(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Re
                 space.unmap(request.vaddr + page * PAGE_SIZE);
             }
         }
-        scope::release(&mut machine.scopes, owner, Resource::Metadata, 1);
+        scope::release(owner, Resource::Metadata, 1);
         return Err(status::STATE_CONFLICT);
     }
 
@@ -295,7 +295,7 @@ pub fn withdraw_device_map(machine: &mut Machine, record_index: usize) -> u32 {
                 .saturating_sub(1);
         }
     }
-    scope::release(&mut machine.scopes, record.scope, Resource::Metadata, 1);
+    scope::release(record.scope, Resource::Metadata, 1);
     machine.device_maps[record_index] = device::MapRecord::empty();
     if removed != 0 {
         crate::tlb::publish();
@@ -355,7 +355,9 @@ pub fn bind_irq(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Resu
     // by the kernel through its own mapping of the table. A driver that could
     // write this would be choosing the address and the payload of a memory
     // write the machine performs for it.
-    let destination = machine.cpus[0].apic_id;
+    let destination = crate::sched::cpu_state(0)
+        .apic_id
+        .load(core::sync::atomic::Ordering::Acquire);
     let address = INTERRUPT_ADDRESS_BASE | (u64::from(destination) << 12);
     let data = u32::from(vector);
     let table = machine.devices[index].msix_table;
@@ -488,7 +490,7 @@ pub fn dma_map(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Resul
         .position(|grant| !grant.used)
         .ok_or(status::LIMIT_EXHAUSTED)?;
     let owner = machine.domains[ctx.domain].owner_scope;
-    if !scope::reserve(&mut machine.scopes, owner, Resource::Metadata, 1) {
+    if !scope::reserve(owner, Resource::Metadata, 1) {
         return Err(status::LIMIT_EXHAUSTED);
     }
 
@@ -590,7 +592,7 @@ fn revoke_grant(machine: &mut Machine, slot: usize) -> u32 {
     if machine.memories[object].generation == grant.memory_generation {
         machine.memories[object].dma_grants = machine.memories[object].dma_grants.saturating_sub(1);
     }
-    scope::release(&mut machine.scopes, grant.scope, Resource::Metadata, 1);
+    scope::release(grant.scope, Resource::Metadata, 1);
     machine.dma_grants[slot] = device::DmaGrant::empty();
     grant.pages
 }

@@ -16,7 +16,9 @@ use thalyx_abi::generated::{
 
 use crate::api::{BODY, Ctx, begin_response, resolve};
 use crate::event;
-use crate::state::{MACHINE, Machine, ThreadState, Wait};
+use crate::sched::WakeHint;
+use crate::state::{MACHINE, Machine, Wait};
+use crate::thread;
 use crate::ucopy::Staging;
 
 /// Receipts one read carries: the interface's batch.
@@ -39,7 +41,7 @@ pub fn read(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
     let mut final_pass = false;
     loop {
         {
-            let mut machine = MACHINE.lock();
+            let machine = MACHINE.lock();
             let now = crate::api::now_ns();
             let cap = resolve(
                 &machine,
@@ -67,17 +69,14 @@ pub fn read(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
             if ctx.flags & thalyx_abi::generated::flag::NONBLOCKING != 0 {
                 return Err(status::WOULD_BLOCK);
             }
-            let thread = ctx.thread;
-            machine.threads[thread].wait = Wait::Log(index as u16, cap.object.generation);
-            machine.threads[thread].wait_deadline_ns = ctx.deadline;
-            machine.threads[thread].wake_status = status::OK;
-            machine.threads[thread].state = ThreadState::Blocked;
+            thread::prepare_wait(
+                ctx.thread,
+                Wait::Log(index as u16, cap.object.generation),
+                ctx.deadline,
+            );
         }
         crate::sched::block_current();
-        let mut machine = MACHINE.lock();
-        let woken = machine.threads[ctx.thread].wake_status;
-        machine.threads[ctx.thread].wake_status = status::OK;
-        drop(machine);
+        let (woken, _) = thread::take_wake_status(ctx.thread);
         match woken {
             status::OK => {}
             // The deadline is an answer, not a failure: what the log holds at
@@ -93,16 +92,14 @@ pub fn wake_reader(machine: &mut Machine, index: usize, generation: u32) {
     if machine.logs[index].count < BATCH {
         return;
     }
-    for thread in 0..machine.threads.len() {
-        if machine.threads[thread].state != ThreadState::Blocked {
-            continue;
-        }
-        if machine.threads[thread].wait == Wait::Log(index as u16, generation) {
-            machine.threads[thread].wait = Wait::None;
-            machine.threads[thread].wait_deadline_ns = 0;
-            machine.threads[thread].wake_status = status::OK;
-            machine.threads[thread].state = ThreadState::Ready;
-            crate::sched::kick_idle(machine);
+    for (thread, _) in thread::iter() {
+        if thread::wake_if(
+            thread,
+            |record| record.wait == Wait::Log(index as u16, generation),
+            status::OK,
+            0,
+            WakeHint::Any,
+        ) {
             return;
         }
     }
@@ -114,7 +111,7 @@ pub fn append(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
     if request.reserved0 != 0 {
         return Err(status::INVALID_ARGUMENT);
     }
-    let scope = machine.threads[ctx.thread].effective_scope;
+    let scope = thread::get(ctx.thread).effective_scope();
     let claimed = request.claimed_origin_domain_id;
     let real = machine.domains[ctx.domain].id;
     if claimed != 0 && claimed != real {
@@ -134,8 +131,8 @@ pub fn append(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
         scope,
         u64::from(request.kind),
         0,
-        machine.threads[ctx.thread]
-            .bound_invocation
+        thread::get(ctx.thread)
+            .bound()
             .map_or(0, |(index, _)| machine.invocations[index as usize].id),
         status::OK,
         request.a,
