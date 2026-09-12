@@ -170,6 +170,9 @@ fn release_kernel_stack(machine: &mut Machine, slot: usize) {
     if slot >= MAX_KSTACKS || !machine.kstack_used[slot] {
         return;
     }
+    // One generation for the whole stack: every page of it has its entry
+    // cleared here, under one lock.
+    let stamp = crate::tlb::retire_stamp();
     let base = layout::kstack_slot_base(slot);
     for page in 0..layout::KSTACK_PAGES {
         let vaddr = base + (page + 1) * PAGE_SIZE;
@@ -180,7 +183,7 @@ fn release_kernel_stack(machine: &mut Machine, slot: usize) {
             // shared, so this address means the same thing everywhere. The
             // frame therefore goes to quarantine and comes back only once every
             // processor has invalidated past this point.
-            allocator.retire(frame, Owner::Kernel);
+            allocator.retire_at(frame, Owner::Kernel, stamp);
             // SAFETY: the entry was just removed from the address space this
             // processor is running in; invalidating it is what makes the
             // removal take effect here.

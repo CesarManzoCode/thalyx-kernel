@@ -269,7 +269,20 @@ impl FrameAllocator {
     /// only after every online processor has flushed at a point later than this
     /// call — whether or not the caller published an invalidation of its own.
     pub fn retire(&mut self, frame: Frame, owner: Owner) {
-        let generation = crate::tlb::retire_stamp();
+        self.retire_at(frame, owner, crate::tlb::retire_stamp());
+    }
+
+    /// Retires a frame at a generation the caller has already taken.
+    ///
+    /// Tearing a domain down retires hundreds of frames in one critical
+    /// section, and a generation taken for each of them is a generation every
+    /// processor in the machine has to notice: a processor that sees a newer
+    /// one flushes every translation it holds, and it looks at the counter
+    /// every time it waits for a lock. One stamp for the batch says the same
+    /// thing -- these frames must not come back until every processor has
+    /// flushed at a point after their entries were removed -- and says it
+    /// once.
+    pub fn retire_at(&mut self, frame: Frame, owner: Owner, generation: u64) {
         QUARANTINE_PENDING.store(1, core::sync::atomic::Ordering::Release);
         for slot in &mut self.quarantine {
             if slot.used {

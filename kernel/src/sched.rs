@@ -459,7 +459,16 @@ fn take_grant(cpu: usize, index: usize, now: u64) -> u64 {
     let mut have = credit.reserved_ns.load(Ordering::Relaxed);
     if have < QUANTUM_NS.min(window_left) {
         let available = scope::available_ns(scope, false);
-        let want = ceiling.saturating_sub(have).min(available);
+        // Never more than half of what the scope has left. A credit is a
+        // convenience for this processor and a refusal for every other one:
+        // taking the last of a budget into a local reserve makes a scope look
+        // exhausted to its siblings while the reserve sits unspent, and a
+        // sibling that is refused waits for the window rather than for a
+        // quantum.
+        let want = ceiling
+            .saturating_sub(have)
+            .min(available)
+            .min(available.div_ceil(2));
         if want == 0 {
             if have == 0 {
                 return 0;
@@ -729,13 +738,14 @@ fn charge(cpu: usize, index: usize, now: u64) {
     }
 }
 
-/// Returns the reservation a thread was holding.
-fn settle(cpu: usize, index: usize) {
+/// Returns the reservation a thread was holding, and names the scope it was
+/// charged to.
+fn settle(cpu: usize, index: usize) -> ScopeId {
     let cell = thread::get(index);
     // SAFETY: `index` is this processor's current thread.
     let sched = unsafe { cell.sched() };
     if !sched.dispatched {
-        return;
+        return scope::NO_SCOPE;
     }
     sched.dispatched = false;
     let reserved = sched.dispatch_reserved_ns;
@@ -750,15 +760,15 @@ fn settle(cpu: usize, index: usize) {
         // Ran beyond its promise, by the interrupt latency. "Committed"
         // keeps meaning "charged plus promised" only if the excess is added.
         scope::commit_excess(scope, charged - reserved, recovery);
-        return;
+        return scope;
     }
     let unused = reserved - charged;
     if unused == 0 {
-        return;
+        return scope;
     }
     if recovery {
         scope::return_cpu(scope, unused, true, window);
-        return;
+        return scope;
     }
     let credit = &CPUS[cpu].credits[scope as usize];
     if credit.window.load(Ordering::Relaxed) == window {
@@ -766,6 +776,7 @@ fn settle(cpu: usize, index: usize) {
     } else {
         scope::return_cpu(scope, unused, false, window);
     }
+    scope
 }
 
 /// Publishes the thread this processor switched away from.
@@ -826,13 +837,21 @@ fn plan(cpu: usize, fair: bool) -> Option<Plan> {
         CPUS[cpu].current.store(current, Ordering::Relaxed);
     }
     charge(cpu, current, now);
-    settle(cpu, current);
+    let settled = settle(cpu, current);
     CPUS[cpu].need_resched.store(false, Ordering::Relaxed);
     // The verdict is this decision's: `pick_and_reserve` sets it again if
     // every candidate is still throttled, and the idle loop reads it right
     // after.
     CPUS[cpu].throttled.store(false, Ordering::Relaxed);
     let next = pick_and_reserve(&mut rq, cpu, current, now, fair);
+    // A credit is held only while this processor is running that scope. A
+    // processor that ran a scope once and then moved on was holding two
+    // quanta of its budget until it went idle or the window turned, which is
+    // budget its siblings were being refused for -- and a scope waiting for
+    // it waits for the window, not for a quantum.
+    if settled != scope::NO_SCOPE && thread::get(next).effective_scope() != settled {
+        release_credit(cpu, settled);
+    }
     if next == current {
         return None;
     }

@@ -467,6 +467,12 @@ pub fn collect_memory_acked(machine: &mut Machine, index: usize, acknowledged: b
         || unmapped_at == 0
         || crate::tlb::flushed_by(unmapped_cpus, unmapped_at)
         || crate::tlb::safe_generation() >= unmapped_at;
+    let stamp = if immediate {
+        0
+    } else {
+        // One generation for the object's whole run of frames.
+        crate::tlb::retire_stamp()
+    };
     for page in 0..pages {
         let frame = Frame::containing(base.addr() + page * PAGE_SIZE);
         if immediate {
@@ -477,7 +483,9 @@ pub fn collect_memory_acked(machine: &mut Machine, index: usize, acknowledged: b
             // them.
             unsafe { machine.allocator().release(frame, Owner::Scope(sponsor)) };
         } else {
-            machine.allocator().retire(frame, Owner::Scope(sponsor));
+            machine
+                .allocator()
+                .retire_at(frame, Owner::Scope(sponsor), stamp);
         }
     }
     scope::release(sponsor, Resource::MemoryPages, pages);

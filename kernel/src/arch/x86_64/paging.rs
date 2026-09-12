@@ -317,6 +317,13 @@ impl AddressSpace {
     #[must_use]
     pub fn destroy_user_half(&mut self, alloc: &mut FrameAllocator, owner: Owner) -> Reclaimed {
         let mut counts = Reclaimed::default();
+        // One generation for the whole teardown. Every frame of this space has
+        // to stay out of the pool until every processor has flushed at a point
+        // after its entry was cleared, and the entries are all cleared here,
+        // under one lock: a generation for each of hundreds of frames would
+        // make every processor in the machine flush everything it holds,
+        // hundreds of times, to establish the same thing once.
+        let stamp = crate::tlb::retire_stamp();
         let root = table(self.root);
         for slot in 0..SLOT_HHDM {
             let entry = root[slot];
@@ -324,12 +331,13 @@ impl AddressSpace {
                 continue;
             }
             let pdpt = Frame::containing(entry & ADDRESS_MASK);
-            self.destroy_level(pdpt, 3, alloc, owner, &mut counts);
+            self.destroy_level(pdpt, 3, alloc, owner, &mut counts, stamp);
             root[slot] = 0;
         }
         counts
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn destroy_level(
         &self,
         frame: Frame,
@@ -337,6 +345,7 @@ impl AddressSpace {
         alloc: &mut FrameAllocator,
         owner: Owner,
         counts: &mut Reclaimed,
+        stamp: u64,
     ) {
         let entries = table(frame);
         for slot in 0..ENTRIES {
@@ -356,10 +365,10 @@ impl AddressSpace {
                 // processor may still hold a translation from before it died,
                 // and a translation is keyed by linear address rather than by
                 // address space.
-                alloc.retire(child, owner);
+                alloc.retire_at(child, owner, stamp);
                 counts.data_frames += 1;
             } else {
-                self.destroy_level(child, level - 1, alloc, owner, counts);
+                self.destroy_level(child, level - 1, alloc, owner, counts, stamp);
             }
             entries[slot] = 0;
         }
@@ -367,7 +376,7 @@ impl AddressSpace {
         // is unreachable from the inactive hierarchy. It still enters
         // quarantine: a paging-structure cache on another processor can hold an
         // interior entry as readily as a leaf.
-        alloc.retire(frame, owner);
+        alloc.retire_at(frame, owner, stamp);
         counts.table_frames += 1;
     }
 
@@ -385,7 +394,7 @@ impl AddressSpace {
         }
         // The caller guarantees the space is inactive and empty; quarantine
         // covers the paging-structure caches another processor may still hold.
-        alloc.retire(self.root, owner);
+        alloc.retire_at(self.root, owner, crate::tlb::retire_stamp());
     }
 }
 
