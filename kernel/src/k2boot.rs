@@ -26,6 +26,8 @@ use crate::limits::{CONTROL_LOG_CAPACITY, CONTROL_LOG_RESERVED, MAX_OBJECT_PAGES
 use crate::memobj::{MemoryObject, State as MemState};
 use crate::mm::Owner;
 use crate::obj::{NO_GRANT, ObjKind, ObjRef, ScopeId};
+use core::sync::atomic::Ordering;
+
 use crate::scope::{self, Limits, Resource, State};
 use crate::state::Machine;
 use crate::{event, trace};
@@ -63,22 +65,28 @@ pub fn establish_root(machine: &mut Machine) -> ScopeId {
     let free = machine.allocator().free_frames() as u64;
     let id = machine.next_id().expect("first identity");
     let budget = machine_budget_ns();
-    let node = &mut machine.scopes[0];
-    *node = scope::Scope::empty();
-    node.state = State::Open;
-    node.generation = 1;
-    node.id = id;
-    node.parent = None;
-    node.depth = 0;
-    node.label[..4].copy_from_slice(b"root");
-    node.limits = Limits {
+    let node = &scope::table()[0];
+    node.reset();
+    node.generation.store(1, Ordering::Relaxed);
+    node.id.store(id, Ordering::Relaxed);
+    node.set_parent(None);
+    node.depth.store(0, Ordering::Relaxed);
+    let mut label = [0u8; 16];
+    label[..4].copy_from_slice(b"root");
+    node.set_label(label);
+    node.limits.store(Limits {
         memory_pages: free,
         metadata_objects: ROOT_METADATA,
         cpu_budget_ns: budget,
         queue_bytes: ROOT_QUEUE_BYTES,
         closure_reserve_ns: ROOT_CLOSURE_RESERVE_NS,
         parallelism: MAX_THREADS as u32,
-    };
+    });
+    node.window_index.store(
+        crate::api::now_ns() / crate::limits::CPU_WINDOW_NS,
+        Ordering::Relaxed,
+    );
+    node.set_state(State::Open);
     machine.root_scope = Some(0);
     event!(
         "scope.root",
@@ -94,23 +102,23 @@ pub fn establish_root(machine: &mut Machine) -> ScopeId {
 
 /// Creates the system control log the kernel writes its receipts to.
 pub fn establish_control_log(machine: &mut Machine, sponsor: ScopeId) -> Option<u16> {
-    let index = machine.logs.iter().position(|log| !log.used)?;
-    if !scope::reserve(&mut machine.scopes, sponsor, Resource::Metadata, 1) {
+    let index = machine.logs.iter().position(|log| !log.lock().used)?;
+    if !scope::reserve(sponsor, Resource::Metadata, 1) {
         return None;
     }
     let id = machine.next_id()?;
-    let generation = machine.logs[index].generation.saturating_add(1);
-    machine.logs[index] = crate::ctrl::ControlLog::empty();
-    machine.logs[index].used = true;
-    machine.logs[index].generation = generation;
-    machine.logs[index].id = id;
-    machine.logs[index].owner_scope = sponsor;
+    let generation = machine.logs[index].get_mut().generation.saturating_add(1);
+    *machine.logs[index].get_mut() = crate::ctrl::ControlLog::empty();
+    machine.logs[index].get_mut().used = true;
+    machine.logs[index].get_mut().generation = generation;
+    machine.logs[index].get_mut().id = id;
+    machine.logs[index].get_mut().owner_scope = sponsor;
     machine.system_log = Some(index as u16);
     event!(
         "ctrl.log_established",
         "log={id} capacity={CONTROL_LOG_CAPACITY} reserved_cells={CONTROL_LOG_RESERVED} \
          profile=audited-control scope={}",
-        machine.scopes[sponsor as usize].id
+        scope::table()[sponsor as usize].id()
     );
     Some(index as u16)
 }
@@ -122,32 +130,38 @@ fn child_scope(
     label: &[u8],
     limits: Limits,
 ) -> Option<ScopeId> {
-    let index = machine
-        .scopes
-        .iter()
-        .position(|node| node.state == State::Empty)?;
-    if !scope::reserve(&mut machine.scopes, parent, Resource::Metadata, 1) {
+    let table = scope::table();
+    let index = table.iter().position(|node| node.state() == State::Empty)?;
+    if !scope::reserve(parent, Resource::Metadata, 1) {
         return None;
     }
     let id = machine.next_id()?;
-    let generation = machine.scopes[index].generation.saturating_add(1);
-    let depth = machine.scopes[parent as usize].depth + 1;
-    let node = &mut machine.scopes[index];
-    *node = scope::Scope::empty();
-    node.state = State::Open;
-    node.generation = generation;
-    node.id = id;
-    node.parent = Some(parent);
-    node.depth = depth;
+    let node = &table[index];
+    let generation = node.generation.load(Ordering::Relaxed).saturating_add(1);
+    let depth = table[parent as usize].depth.load(Ordering::Relaxed) + 1;
+    node.reset();
+    node.generation.store(generation, Ordering::Relaxed);
+    node.id.store(id, Ordering::Relaxed);
+    node.set_parent(Some(parent));
+    node.depth.store(depth, Ordering::Relaxed);
+    let mut text = [0u8; 16];
     let len = label.len().min(16);
-    node.label[..len].copy_from_slice(&label[..len]);
-    node.limits = limits;
-    machine.scopes[parent as usize].children += 1;
+    text[..len].copy_from_slice(&label[..len]);
+    node.set_label(text);
+    node.limits.store(limits);
+    node.window_index.store(
+        crate::api::now_ns() / crate::limits::CPU_WINDOW_NS,
+        Ordering::Relaxed,
+    );
+    node.set_state(State::Open);
+    table[parent as usize]
+        .children
+        .fetch_add(1, Ordering::Relaxed);
     trace!(
         "scope.created",
         "scope={index} id={id} label={} parent={parent} depth={depth} memory_pages={} \
          metadata={} cpu_budget_ns={} parallelism={} queue_bytes={} closure_reserve_ns={}",
-        machine.scopes[index].label_str(),
+        table[index].label_str(),
         limits.memory_pages,
         limits.metadata_objects,
         limits.cpu_budget_ns,
@@ -177,11 +191,11 @@ fn image_object(
         .memories
         .iter()
         .position(|object| object.state == MemState::Empty)?;
-    if !scope::reserve(&mut machine.scopes, sponsor, Resource::Metadata, 1) {
+    if !scope::reserve(sponsor, Resource::Metadata, 1) {
         return None;
     }
-    if !scope::reserve(&mut machine.scopes, sponsor, Resource::MemoryPages, pages) {
-        scope::release(&mut machine.scopes, sponsor, Resource::Metadata, 1);
+    if !scope::reserve(sponsor, Resource::MemoryPages, pages) {
+        scope::release(sponsor, Resource::Metadata, 1);
         return None;
     }
     let base = machine
@@ -208,8 +222,9 @@ fn image_object(
         writable_maps: 0,
         dma_grants: 0,
         label,
-        refs: 0,
+        refs: core::sync::atomic::AtomicU32::new(0),
         unmapped_at: 0,
+        unmapped_cpus: 0,
     };
 
     // SAFETY: the loader copied the module into reserved memory covered by the
@@ -253,7 +268,7 @@ fn install(
          grant={} rights=0x{rights:x}",
         object.kind.name(),
         crate::api::object_id(machine, object),
-        machine.grants[grant as usize].id
+        machine.grants.nodes[grant as usize].lock().id
     );
     Some(handle)
 }
@@ -274,7 +289,7 @@ pub fn establish_supervisor(
         root,
         b"system",
         Limits {
-            memory_pages: free.min(machine.scopes[root as usize].limits.memory_pages),
+            memory_pages: free.min(scope::table()[root as usize].limits.load().memory_pages),
             metadata_objects: ROOT_METADATA - 8,
             cpu_budget_ns: machine_budget_ns(),
             queue_bytes: ROOT_QUEUE_BYTES,
@@ -326,7 +341,9 @@ pub fn establish_supervisor(
     let self_scope = ObjRef::new(
         ObjKind::Scope,
         system,
-        machine.scopes[system as usize].generation,
+        scope::table()[system as usize]
+            .generation
+            .load(Ordering::Relaxed),
     );
     install(
         machine,
@@ -341,7 +358,7 @@ pub fn establish_supervisor(
     let log = ObjRef::new(
         ObjKind::ControlLog,
         log_index,
-        machine.logs[log_index as usize].generation,
+        machine.logs[log_index as usize].get_mut().generation,
     );
     install(
         machine,
@@ -425,8 +442,8 @@ pub fn establish_supervisor(
         "domain={index} id={} scope={} system_scope={} images={installed} \
          devices={devices} boot_slots={} fault_channel=absent role=root_supervisor",
         machine.domains[index].id,
-        machine.scopes[own as usize].id,
-        machine.scopes[system as usize].id,
+        scope::table()[own as usize].id(),
+        scope::table()[system as usize].id(),
         slot
     );
     Some(index)

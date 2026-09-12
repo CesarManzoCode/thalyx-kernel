@@ -35,7 +35,9 @@ pub mod logops;
 pub mod memops;
 pub mod scopeops;
 
-use thalyx_abi::generated::{DescriptorHeader, OpSpec, flag, object_type, op, spec, status};
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use thalyx_abi::generated::{DescriptorHeader, OPERATIONS, OpSpec, flag, object_type, op, status};
 
 use crate::arch::x86_64::trap::TrapFrame;
 use crate::obj::{GrantId, NO_GRANT, ObjKind, ObjRef, ScopeId};
@@ -95,10 +97,10 @@ pub fn now_ns() -> u64 {
 pub fn object_alive(machine: &Machine, object: ObjRef) -> bool {
     let index = object.index as usize;
     match object.kind {
-        ObjKind::Scope => machine
-            .scopes
-            .get(index)
-            .is_some_and(|s| s.state != scope::State::Empty && s.generation == object.generation),
+        ObjKind::Scope => scope::table().get(index).is_some_and(|s| {
+            s.state() != scope::State::Empty
+                && s.generation.load(core::sync::atomic::Ordering::Relaxed) == object.generation
+        }),
         ObjKind::Domain => machine.domains.get(index).is_some_and(|d| {
             d.state != crate::state::DomainState::Empty && d.generation == object.generation
         }),
@@ -106,10 +108,11 @@ pub fn object_alive(machine: &Machine, object: ObjRef) -> bool {
             m.state != crate::memobj::State::Empty && m.generation == object.generation
         }),
         ObjKind::Endpoint => machine
-            .endpoints
+            .endpoint_ids
             .get(index)
             .is_some_and(|e| e.used && e.generation == object.generation),
         ObjKind::Invocation => machine.invocations.get(index).is_some_and(|i| {
+            let i = i.lock();
             i.state != crate::ipc::State::Empty && i.generation == object.generation
         }),
         ObjKind::Signal => machine
@@ -120,10 +123,10 @@ pub fn object_alive(machine: &Machine, object: ObjRef) -> bool {
             .timers
             .get(index)
             .is_some_and(|t| t.used && t.generation == object.generation),
-        ObjKind::ControlLog => machine
-            .logs
-            .get(index)
-            .is_some_and(|l| l.used && l.generation == object.generation),
+        ObjKind::ControlLog => machine.logs.get(index).is_some_and(|l| {
+            let l = l.lock();
+            l.used && l.generation == object.generation
+        }),
         ObjKind::Device => machine
             .devices
             .get(index)
@@ -139,19 +142,19 @@ pub fn object_id(machine: &Machine, object: ObjRef) -> u64 {
     }
     let index = object.index as usize;
     match object.kind {
-        ObjKind::Scope => machine.scopes[index].id,
+        ObjKind::Scope => scope::table()[index].id(),
         ObjKind::Domain => machine.domains[index].id,
         ObjKind::Memory => machine.memories[index].id,
-        ObjKind::Endpoint => machine.endpoints[index].id,
-        ObjKind::Invocation => machine.invocations[index].id,
+        ObjKind::Endpoint => machine.endpoints[index].lock().id,
+        ObjKind::Invocation => machine.invocations[index].lock().id,
         ObjKind::Signal => machine.signals[index].id,
         ObjKind::Timer => machine.timers[index].id,
-        ObjKind::ControlLog => machine.logs[index].id,
+        ObjKind::ControlLog => machine.logs[index].lock().id,
         ObjKind::Device => machine.devices[index].id,
     }
 }
 
-fn adjust_object_refs(machine: &mut Machine, object: ObjRef, delta: i32) {
+fn adjust_object_refs(machine: &Machine, object: ObjRef, delta: i32) {
     let index = object.index as usize;
     let apply = |value: &mut u32| {
         if delta >= 0 {
@@ -160,16 +163,34 @@ fn adjust_object_refs(machine: &mut Machine, object: ObjRef, delta: i32) {
             *value = value.saturating_sub((-delta) as u32);
         }
     };
+    // The objects whose records the hot paths never lock keep their count
+    // atomic: two replies moving capabilities to the same object may adjust
+    // it from two shared holds of the machine at once.
+    let apply_atomic = |value: &core::sync::atomic::AtomicU32| {
+        if delta >= 0 {
+            value.fetch_add(delta as u32, core::sync::atomic::Ordering::Relaxed);
+        } else {
+            scope::subtract32(value, (-delta) as u32);
+        }
+    };
     match object.kind {
-        ObjKind::Scope => apply(&mut machine.scopes[index].refs),
-        ObjKind::Domain => apply(&mut machine.domains[index].refs),
-        ObjKind::Memory => apply(&mut machine.memories[index].refs),
-        ObjKind::Endpoint => apply(&mut machine.endpoints[index].refs),
-        ObjKind::Invocation => apply(&mut machine.invocations[index].refs),
-        ObjKind::Signal => apply(&mut machine.signals[index].refs),
-        ObjKind::Timer => apply(&mut machine.timers[index].refs),
-        ObjKind::ControlLog => apply(&mut machine.logs[index].refs),
-        ObjKind::Device => apply(&mut machine.devices[index].refs),
+        ObjKind::Scope => {
+            if delta >= 0 {
+                scope::table()[index]
+                    .refs
+                    .fetch_add(delta as u32, core::sync::atomic::Ordering::Relaxed);
+            } else {
+                scope::subtract32(&scope::table()[index].refs, (-delta) as u32);
+            }
+        }
+        ObjKind::Domain => apply_atomic(&machine.domains[index].refs),
+        ObjKind::Memory => apply_atomic(&machine.memories[index].refs),
+        ObjKind::Endpoint => apply_atomic(&machine.endpoint_ids[index].refs),
+        ObjKind::Invocation => apply(&mut machine.invocations[index].lock().refs),
+        ObjKind::Signal => apply_atomic(&machine.signals[index].refs),
+        ObjKind::Timer => apply_atomic(&machine.timers[index].refs),
+        ObjKind::ControlLog => apply(&mut machine.logs[index].lock().refs),
+        ObjKind::Device => apply_atomic(&machine.devices[index].refs),
     }
 }
 
@@ -179,44 +200,46 @@ fn adjust_object_refs(machine: &mut Machine, object: ObjRef, delta: i32) {
 /// accumulate handles for free can make the kernel's tables grow without ever
 /// exceeding a limit it was given.
 pub fn cap_install(
-    machine: &mut Machine,
+    machine: &Machine,
     domain: usize,
     object: ObjRef,
     grant: GrantId,
     slot: Option<usize>,
 ) -> Option<u64> {
     let owner = machine.domains[domain].owner_scope;
-    if !scope::reserve(&mut machine.scopes, owner, scope::Resource::Metadata, 1) {
+    if !scope::reserve(owner, scope::Resource::Metadata, 1) {
         return None;
     }
     let handle = match slot {
         Some(index) => machine.domains[domain]
             .caps
+            .lock()
             .install_at(index, object, grant),
         None => machine.domains[domain]
             .caps
+            .lock()
             .install(object, grant)
             .map(|(_, handle)| handle),
     };
     match handle {
         Some(handle) => {
             if grant != NO_GRANT {
-                machine.grants[grant as usize].refs =
-                    machine.grants[grant as usize].refs.saturating_add(1);
+                let mut node = machine.grants.nodes[grant as usize].lock();
+                node.refs = node.refs.saturating_add(1);
             }
             adjust_object_refs(machine, object, 1);
             Some(handle)
         }
         None => {
-            scope::release(&mut machine.scopes, owner, scope::Resource::Metadata, 1);
+            scope::release(owner, scope::Resource::Metadata, 1);
             None
         }
     }
 }
 
 /// Releases a capability entry and everything its presence was keeping alive.
-pub fn cap_release(machine: &mut Machine, domain: usize, handle: u64) -> bool {
-    let Some(entry) = machine.domains[domain].caps.release(handle) else {
+pub fn cap_release(machine: &Machine, domain: usize, handle: u64) -> bool {
+    let Some(entry) = machine.domains[domain].caps.lock().release(handle) else {
         return false;
     };
     release_entry(machine, domain, entry);
@@ -224,19 +247,19 @@ pub fn cap_release(machine: &mut Machine, domain: usize, handle: u64) -> bool {
 }
 
 /// Releases the entry in `slot` whatever generation it carries.
-pub fn cap_release_slot(machine: &mut Machine, domain: usize, slot: usize) -> bool {
-    let Some(entry) = machine.domains[domain].caps.release_slot(slot) else {
+pub fn cap_release_slot(machine: &Machine, domain: usize, slot: usize) -> bool {
+    let Some(entry) = machine.domains[domain].caps.lock().release_slot(slot) else {
         return false;
     };
     release_entry(machine, domain, entry);
     true
 }
 
-fn release_entry(machine: &mut Machine, domain: usize, entry: crate::obj::CapEntry) {
+fn release_entry(machine: &Machine, domain: usize, entry: crate::obj::CapEntry) {
     let owner = machine.domains[domain].owner_scope;
-    scope::release(&mut machine.scopes, owner, scope::Resource::Metadata, 1);
+    scope::release(owner, scope::Resource::Metadata, 1);
     if entry.grant != NO_GRANT {
-        let node = &mut machine.grants[entry.grant as usize];
+        let mut node = machine.grants.nodes[entry.grant as usize].lock();
         node.refs = node.refs.saturating_sub(1);
     }
     adjust_object_refs(machine, entry.object, -1);
@@ -247,16 +270,31 @@ fn release_entry(machine: &mut Machine, domain: usize, entry: crate::obj::CapEnt
     // again. Until K6 it stayed anyway, its pages charged and its table slot
     // held, until the scope that sponsored it retired: K6's first native run
     // created and closed objects in a loop and exhausted the kernel's table of
-    // them after forty-two iterations.
+    // them after forty-two iterations. Returning the frames needs the machine
+    // itself, which releasing a handle does not hold, so the object is noted
+    // here and reclaimed by the next operation that does.
     if entry.object.kind == ObjKind::Memory
         && machine
             .memories
             .get(entry.object.index as usize)
             .is_some_and(|object| object.generation == entry.object.generation)
     {
-        memops::collect_memory(machine, entry.object.index as usize);
+        machine.defer_memory(entry.object.index as usize);
     }
     collect_grant(machine, entry.grant);
+}
+
+/// Reclaims the memory objects whose last handle was released from a shared
+/// hold of the machine.
+pub fn drain_pending_memory(machine: &mut Machine) {
+    let pending = machine.take_pending_memory();
+    for (word, mut bits) in pending.into_iter().enumerate() {
+        while bits != 0 {
+            let bit = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            memops::collect_memory(machine, word * 64 + bit);
+        }
+    }
 }
 
 /// Frees an invocation record once it is discharged and nothing names it.
@@ -268,16 +306,22 @@ fn release_entry(machine: &mut Machine, domain: usize, entry: crate::obj::CapEnt
 /// and whichever is second is the one that reclaims it. Reclaiming only at
 /// discharge is what made a service that keeps its tickets exhaust the table
 /// with requests it had already answered.
-pub fn collect_invocation(machine: &mut Machine, index: usize) {
-    let Some(invocation) = machine.invocations.get(index) else {
+pub fn collect_invocation(machine: &Machine, index: usize) {
+    let Some(slot) = machine.invocations.get(index) else {
         return;
     };
+    let mut invocation = slot.lock();
     if invocation.state != crate::ipc::State::Resolved || invocation.refs != 0 {
         return;
     }
-    let generation = invocation.generation;
-    machine.invocations[index] = crate::ipc::Invocation::empty();
-    machine.invocations[index].generation = generation;
+    // Freed by its state, which every reader of the table checks first, and
+    // not by rewriting the record: an admission writes every field of the
+    // slot it takes, and the record is six hundred bytes. The generation
+    // stays, so a ticket that outlived the invocation names nothing.
+    invocation.state = crate::ipc::State::Empty;
+    invocation.waiter = None;
+    invocation.refs = 0;
+    machine.release_invocation(index);
 }
 
 /// Frees a grant node once nothing refers to it and it has no children.
@@ -285,25 +329,42 @@ pub fn collect_invocation(machine: &mut Machine, index: usize) {
 /// A fenced node stays as a tombstone while a descendant or a ticket still
 /// needs to walk through it: dropping it early would make a lineage check pass
 /// by forgetting the barrier rather than by observing it.
-pub fn collect_grant(machine: &mut Machine, grant: GrantId) {
+pub fn collect_grant(machine: &Machine, grant: GrantId) {
     let mut current = grant;
     let mut steps = 0;
     while current != NO_GRANT && steps < thalyx_abi::limit::MAX_DERIVE_DEPTH {
         steps += 1;
-        let node = machine.grants[current as usize];
-        if !node.used || node.refs > 0 || node.children > 0 {
-            return;
+        let sponsor;
+        let parent;
+        {
+            // The node itself, and then its parent: a lineage is only ever
+            // held from a node towards the root.
+            let mut node = machine.grants.nodes[current as usize].lock();
+            if !node.used || node.refs > 0 || node.children > 0 {
+                return;
+            }
+            parent = node.parent;
+            sponsor = node.sponsor;
+            *node = crate::obj::Grant::empty();
+            drop(node);
+            free_grant_hint(machine, current as usize);
+            if parent != NO_GRANT {
+                let mut node = machine.grants.nodes[parent as usize].lock();
+                node.children = node.children.saturating_sub(1);
+            }
         }
-        let parent = node.parent;
-        let sponsor = node.sponsor;
-        machine.grants[current as usize] = crate::obj::Grant::empty();
-        scope::release(&mut machine.scopes, sponsor, scope::Resource::Metadata, 1);
-        if parent != NO_GRANT {
-            let node = &mut machine.grants[parent as usize];
-            node.children = node.children.saturating_sub(1);
-        }
+        scope::release(sponsor, scope::Resource::Metadata, 1);
         current = parent;
     }
+}
+
+/// Notes that grant node `index` is free again, for the next allocation's
+/// search to start no later than it.
+pub fn free_grant_hint(machine: &Machine, index: usize) {
+    machine
+        .grants
+        .hint
+        .fetch_min(index, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Allocates a grant node charged to `sponsor`.
@@ -315,7 +376,7 @@ pub fn collect_grant(machine: &mut Machine, grant: GrantId) {
 /// it, and would let a caller forget a field instead of being made to state it.
 #[allow(clippy::too_many_arguments)]
 pub fn grant_alloc(
-    machine: &mut Machine,
+    machine: &Machine,
     sponsor: ScopeId,
     parent: GrantId,
     object: ObjRef,
@@ -324,34 +385,26 @@ pub fn grant_alloc(
     life_scope: Option<ScopeId>,
     facet: u64,
 ) -> Option<GrantId> {
+    use core::sync::atomic::Ordering;
     let depth = if parent == NO_GRANT {
         0
     } else {
-        machine.grants[parent as usize].depth + 1
+        machine.grants.nodes[parent as usize].lock().depth + 1
     };
     if u64::from(depth) > thalyx_abi::limit::MAX_DERIVE_DEPTH {
         return None;
     }
-    let Some(index) = machine.grants.iter().position(|node| !node.used) else {
-        // A refusal that says which resource ran out. Without this the caller
-        // sees only "exhausted" and has to guess between a scope ceiling it
-        // set and a machine-wide table it did not.
-        trace!(
-            "k2.grants_exhausted",
-            "used={} capacity={} sponsor={sponsor}",
-            machine.grants.iter().filter(|node| node.used).count(),
-            machine.grants.len()
-        );
-        return None;
-    };
-    if !scope::reserve(&mut machine.scopes, sponsor, scope::Resource::Metadata, 1) {
+    // Charged and named before a node is taken, so that the node is written
+    // whole in the one hold that claims it: a reader of the tree never meets a
+    // node that says it is in use and does not yet say what it authorises.
+    if !scope::reserve(sponsor, scope::Resource::Metadata, 1) {
         return None;
     }
     let Some(id) = machine.next_id() else {
-        scope::release(&mut machine.scopes, sponsor, scope::Resource::Metadata, 1);
+        scope::release(sponsor, scope::Resource::Metadata, 1);
         return None;
     };
-    machine.grants[index] = crate::obj::Grant {
+    let node = crate::obj::Grant {
         used: true,
         id,
         parent,
@@ -366,8 +419,37 @@ pub fn grant_alloc(
         children: 0,
         sponsor,
     };
+    let total = machine.grants.nodes.len();
+    let hint = machine.grants.hint.load(Ordering::Relaxed).min(total);
+    let mut claimed = None;
+    for index in (hint..total).chain(0..hint) {
+        let mut slot = machine.grants.nodes[index].lock();
+        if !slot.used {
+            *slot = node;
+            claimed = Some(index);
+            break;
+        }
+    }
+    let Some(index) = claimed else {
+        // A refusal that says which resource ran out. Without this the caller
+        // sees only "exhausted" and has to guess between a scope ceiling it
+        // set and a machine-wide table it did not.
+        scope::release(sponsor, scope::Resource::Metadata, 1);
+        let used = machine
+            .grants
+            .nodes
+            .iter()
+            .filter(|node| node.lock().used)
+            .count();
+        trace!(
+            "k2.grants_exhausted",
+            "used={used} capacity={total} sponsor={sponsor}"
+        );
+        return None;
+    };
+    machine.grants.hint.store(index + 1, Ordering::Relaxed);
     if parent != NO_GRANT {
-        machine.grants[parent as usize].children += 1;
+        machine.grants.nodes[parent as usize].lock().children += 1;
     }
     Some(index as GrantId)
 }
@@ -377,6 +459,11 @@ pub fn grant_alloc(
 /// The walk is bounded by the interface's derivation depth, so a corrupted
 /// parent link ends it rather than looping.
 pub fn lineage_status(machine: &Machine, grant: GrantId, now: u64) -> i64 {
+    walk_lineage(machine, grant, now)
+}
+
+/// The walk itself: one node held at a time, towards the root.
+fn walk_lineage(machine: &Machine, grant: GrantId, now: u64) -> i64 {
     let mut current = grant;
     let mut steps = 0;
     while current != NO_GRANT {
@@ -384,7 +471,12 @@ pub fn lineage_status(machine: &Machine, grant: GrantId, now: u64) -> i64 {
         if steps > thalyx_abi::limit::MAX_DERIVE_DEPTH + 1 {
             return status::INVALID_HANDLE;
         }
-        let Some(node) = machine.grants.get(current as usize) else {
+        let Some(node) = machine
+            .grants
+            .nodes
+            .get(current as usize)
+            .map(|node| *node.lock())
+        else {
             return status::INVALID_HANDLE;
         };
         if !node.used {
@@ -397,7 +489,7 @@ pub fn lineage_status(machine: &Machine, grant: GrantId, now: u64) -> i64 {
             return status::EXPIRED;
         }
         if let Some(life) = node.life_scope
-            && !scope::is_open(&machine.scopes, life)
+            && !scope::is_open(life)
         {
             return status::SCOPE_CLOSED;
         }
@@ -407,7 +499,7 @@ pub fn lineage_status(machine: &Machine, grant: GrantId, now: u64) -> i64 {
         // acting through a handle it happens to still hold, and through every
         // handle it had already given away. This is the check that makes the
         // barrier reach a capability the closed domain moved to someone else.
-        if !scope::is_open(&machine.scopes, node.sponsor) {
+        if !scope::is_open(node.sponsor) {
             return status::SCOPE_CLOSED;
         }
         current = node.parent;
@@ -424,12 +516,14 @@ pub fn resolve(
     required_rights: u32,
     now: u64,
 ) -> Result<Resolved, i64> {
-    let resolved = resolve_entry(machine, domain, handle, required_type, required_rights)?;
-    let lineage = lineage_status(machine, resolved.grant, now);
-    if lineage != status::OK {
-        return Err(lineage);
-    }
-    Ok(resolved)
+    resolve_entry(
+        machine,
+        domain,
+        handle,
+        required_type,
+        required_rights,
+        Some(now),
+    )
 }
 
 /// Resolves a handle whose lineage may already be fenced, expired or orphaned.
@@ -455,39 +549,67 @@ pub fn resolve_observer(
     required_type: u32,
     required_rights: u32,
 ) -> Result<Resolved, i64> {
-    resolve_entry(machine, domain, handle, required_type, required_rights)
+    resolve_entry(
+        machine,
+        domain,
+        handle,
+        required_type,
+        required_rights,
+        None,
+    )
 }
 
-/// The part of resolution that a barrier does not change.
+/// The part of resolution that a barrier does not change, with the lineage
+/// walk folded in when `now` says to make it.
+///
+/// One hold of the authority tree for both: the node's own facts and its
+/// ancestors' are read together, where reading them apart took the tree twice
+/// for every handle the interface resolves -- four or five times a round trip,
+/// on the one lock every domain's authority lives under.
 fn resolve_entry(
     machine: &Machine,
     domain: usize,
     handle: u64,
     required_type: u32,
     required_rights: u32,
+    now: Option<u64>,
 ) -> Result<Resolved, i64> {
     let entry = *machine.domains[domain]
         .caps
+        .lock()
         .lookup(handle)
         .ok_or(status::INVALID_HANDLE)?;
     if required_type != object_type::NONE && entry.object.kind.abi_type() != required_type {
         return Err(status::WRONG_TYPE);
     }
     let grant = entry.grant;
-    let node = machine
-        .grants
-        .get(grant as usize)
-        .filter(|node| node.used)
-        .ok_or(status::INVALID_HANDLE)?;
+    // The node's three facts, read in one hold of the tree and checked
+    // outside it: the object's own record is taken after, never inside.
+    let (object, rights, facet) = {
+        let node = machine
+            .grants
+            .nodes
+            .get(grant as usize)
+            .map(|node| *node.lock())
+            .filter(|node| node.used)
+            .ok_or(status::INVALID_HANDLE)?;
+        (node.object, node.rights, node.facet)
+    };
+    if let Some(now) = now {
+        let lineage = walk_lineage(machine, grant, now);
+        if lineage != status::OK {
+            return Err(lineage);
+        }
+    }
     // A capability entry and its grant each name the object. They are written
     // together and must stay together: an entry pointing at one object through
     // a grant that authorises another would be authority over the wrong thing,
     // and it is the kind of mistake a table of indices makes silently. Checking
     // it here costs a comparison and turns redundant state into a checked one.
-    if node.object != entry.object {
+    if object != entry.object {
         return Err(status::INVALID_HANDLE);
     }
-    if node.rights & required_rights != required_rights {
+    if rights & required_rights != required_rights {
         return Err(status::INSUFFICIENT_RIGHTS);
     }
     if !object_alive(machine, entry.object) {
@@ -497,8 +619,8 @@ fn resolve_entry(
         slot: thalyx_abi::handle_slot(handle) as usize,
         object: entry.object,
         grant,
-        rights: node.rights,
-        facet: node.facet,
+        rights,
+        facet,
     })
 }
 
@@ -507,17 +629,25 @@ fn resolve_entry(
 /// Every refusal is recorded up to a per-domain bound and counted afterwards,
 /// so an adversarial domain cannot flood the plane and a gate can still check
 /// that the refusal it expected is the refusal that happened.
-pub fn note_refusal(machine: &mut Machine, domain: usize, operation: u32, code: i64) {
+pub fn note_refusal(machine: &Machine, domain: usize, operation: u32, code: i64) {
+    use core::sync::atomic::Ordering;
     if domain >= machine.domains.len() {
         return;
     }
-    machine.domains[domain].refusals += 1;
+    let count = machine.domains[domain]
+        .refusals
+        .fetch_add(1, Ordering::Relaxed)
+        + 1;
     let name = operation_name(operation);
-    let count = machine.domains[domain].refusals;
-    if machine.domains[domain].refusal_records >= REFUSAL_RECORD_LIMIT {
+    if machine.domains[domain]
+        .refusal_records
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |emitted| {
+            (emitted < REFUSAL_RECORD_LIMIT).then_some(emitted + 1)
+        })
+        .is_err()
+    {
         return;
     }
-    machine.domains[domain].refusal_records += 1;
     let domain_name = machine.domains[domain].name_str();
     trace!(
         "k2.refused",
@@ -660,6 +790,68 @@ const fn waits(operation: u32) -> bool {
     )
 }
 
+/// Operation codes are a group in the upper half and a small ordinal in the
+/// lower, which is what makes a two-level table of them possible: `SPEC_INDEX`
+/// maps group and ordinal to the operation's position in `OPERATIONS`, or to
+/// `NO_SPEC`. Built once, at compile time, from the table the schema
+/// generates, and checked against it -- an operation whose code did not fit
+/// the shape would fail the assertion rather than become unreachable.
+const SPEC_GROUPS: usize = 16;
+const SPEC_ORDINALS: usize = 16;
+const NO_SPEC: u8 = u8::MAX;
+
+const SPEC_INDEX: [[u8; SPEC_ORDINALS]; SPEC_GROUPS] = {
+    let mut table = [[NO_SPEC; SPEC_ORDINALS]; SPEC_GROUPS];
+    let mut index = 0;
+    while index < OPERATIONS.len() {
+        let code = OPERATIONS[index].code;
+        let group = (code >> 16) as usize;
+        let ordinal = (code & 0xFFFF) as usize;
+        assert!(group < SPEC_GROUPS && ordinal < SPEC_ORDINALS);
+        assert!(table[group][ordinal] == NO_SPEC);
+        assert!(index < NO_SPEC as usize);
+        table[group][ordinal] = index as u8;
+        index += 1;
+    }
+    table
+};
+
+/// The specification of an operation code, or `None` for one the interface
+/// does not assign.
+///
+/// Two loads and a bounds check, where the generated table's search was a
+/// walk of up to fifty-nine entries on every entry of every processor.
+#[inline]
+#[must_use]
+pub fn spec(code: u32) -> Option<&'static OpSpec> {
+    let group = (code >> 16) as usize;
+    let ordinal = (code & 0xFFFF) as usize;
+    if group >= SPEC_GROUPS || ordinal >= SPEC_ORDINALS {
+        return None;
+    }
+    let index = SPEC_INDEX[group][ordinal];
+    if index == NO_SPEC {
+        return None;
+    }
+    let spec = &OPERATIONS[index as usize];
+    debug_assert!(spec.code == code);
+    Some(spec)
+}
+
+/// One bit per assigned operation, set when the dispatch reached it.
+///
+/// A static word and not a field of the machine. The bit says the same thing
+/// either way, and a field of the machine is a field written under the control
+/// lock: every entry of every processor took that lock once before doing
+/// anything, only to record that the interface had been used at all.
+static OPERATIONS_REACHED: AtomicU64 = AtomicU64::new(0);
+
+/// The operations this run has reached, one bit each.
+#[must_use]
+pub fn operations_reached() -> u64 {
+    OPERATIONS_REACHED.load(Ordering::Relaxed)
+}
+
 /// Marks an operation as having been reached, for the run's own coverage.
 ///
 /// A run that exercises a third of the interface and one that exercises all of
@@ -667,15 +859,92 @@ const fn waits(operation: u32) -> bool {
 /// reader needs to know before believing anything general about the whole.
 /// Counting here, where every operation passes, is the only place the number
 /// cannot be an estimate.
-fn mark_reached(machine: &mut Machine, operation: u32) {
-    let mut index = 0;
-    while index < thalyx_abi::generated::OPERATIONS.len() {
-        if thalyx_abi::generated::OPERATIONS[index].code == operation {
-            machine.operations_reached |= 1u64 << index;
-            return;
-        }
-        index += 1;
+fn mark_reached(spec: &'static OpSpec) {
+    // The index of the entry `spec` names, which is a reference into
+    // `OPERATIONS` itself: a subtraction, rather than a second search of the
+    // table on a path every entry of every processor takes.
+    let base = OPERATIONS.as_ptr();
+    let index = (core::ptr::from_ref(spec) as usize).wrapping_sub(base as usize)
+        / core::mem::size_of::<OpSpec>();
+    if index >= 64 {
+        return;
     }
+    let bit = 1u64 << index;
+    // Read first. After the first entry of each operation the bit is set and
+    // the line is shared, so the common case is a load of a line nobody is
+    // writing instead of a locked read-modify-write every processor contends
+    // for.
+    if OPERATIONS_REACHED.load(Ordering::Relaxed) & bit == 0 {
+        OPERATIONS_REACHED.fetch_or(bit, Ordering::Relaxed);
+    }
+}
+
+/// Copies an operation's descriptor into kernel memory and validates it there.
+///
+/// Reading a domain's memory means walking that domain's page tables, so the
+/// caller holds the control lock. The bytes are a message from an adversary
+/// once they are here, which is why the header is checked after the copy and
+/// never in the memory the caller can still write.
+fn read_descriptor(
+    space: ucopy::UserSpace,
+    domain: usize,
+    operation: u32,
+    spec: &OpSpec,
+    frame: &TrapFrame,
+    staging: &mut Staging,
+) -> Result<(), i64> {
+    if spec.descriptor_len == 0 {
+        return Ok(());
+    }
+    if let Err(fault) = ucopy::copy_in(
+        space,
+        frame.rdx,
+        u64::from(spec.descriptor_len),
+        &mut staging.bytes,
+    ) {
+        // Which way the range was wrong, not only that it was. A caller that
+        // passed an unmapped pointer and one that passed a kernel address get
+        // the same status, and telling them apart from the outside is
+        // otherwise guesswork.
+        trace!(
+            "user.copy_refused",
+            "domain={domain} op={} direction=in addr=0x{:x} len={} reason={}",
+            operation_name(operation),
+            frame.rdx,
+            spec.descriptor_len,
+            fault.name()
+        );
+        return Err(status::INVALID_ADDRESS);
+    }
+    let header: DescriptorHeader = staging.read(0);
+    validate_header(&header, operation, u64::from(spec.descriptor_len))
+}
+
+/// Copies a response a handler wrote back into the caller's descriptor.
+fn write_response(
+    space: ucopy::UserSpace,
+    domain: usize,
+    operation: u32,
+    spec: &OpSpec,
+    frame: &TrapFrame,
+    staging: &Staging,
+) -> Result<(), i64> {
+    let bytes = &staging.bytes[..spec.descriptor_len as usize];
+    if let Err(fault) = ucopy::copy_out(space, frame.rdx, bytes) {
+        // The operation happened. A failed copy of its result is a delivery
+        // failure, not an undo, and the interface says so.
+        trace!(
+            "user.copy_refused",
+            "domain={domain} op={} direction=out addr=0x{:x} len={} reason={} \
+             note=operation_already_happened",
+            operation_name(operation),
+            frame.rdx,
+            spec.descriptor_len,
+            fault.name()
+        );
+        return Err(status::INVALID_ADDRESS);
+    }
+    Ok(())
 }
 
 /// Handles one `INVOKE` entry.
@@ -687,7 +956,7 @@ pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64)
     let Some(spec) = spec(operation) else {
         return refuse(domain, operation, status::NOT_SUPPORTED);
     };
-    mark_reached(&mut MACHINE.lock(), operation);
+    mark_reached(spec);
     if frame.r8 & !flag::KNOWN != 0 {
         return refuse(domain, operation, status::INVALID_ARGUMENT);
     }
@@ -698,42 +967,11 @@ pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64)
     let mut staging = Staging::new();
     let now = now_ns();
 
-    // The descriptor is copied under the lock, because reading a domain's
-    // memory means walking that domain's page tables.
+    // The register length has to agree with the operation's before anything is
+    // read, and an operation with no descriptor is passed none.
     if spec.descriptor_len != 0 {
         if frame.r10 != u64::from(spec.descriptor_len) {
             return refuse(domain, operation, status::INVALID_ARGUMENT);
-        }
-        let machine = MACHINE.lock();
-        let Some(space) = machine.domains[domain].space.as_ref() else {
-            drop(machine);
-            return refuse(domain, operation, status::PEER_DEAD);
-        };
-        let copied = ucopy::copy_in(
-            space,
-            frame.rdx,
-            u64::from(spec.descriptor_len),
-            &mut staging.bytes,
-        );
-        drop(machine);
-        if let Err(fault) = copied {
-            // Which way the range was wrong, not only that it was. A caller
-            // that passed an unmapped pointer and one that passed a kernel
-            // address get the same status, and telling them apart from the
-            // outside is otherwise guesswork.
-            trace!(
-                "user.copy_refused",
-                "domain={domain} op={} direction=in addr=0x{:x} len={} reason={}",
-                operation_name(operation),
-                frame.rdx,
-                spec.descriptor_len,
-                fault.name()
-            );
-            return refuse(domain, operation, status::INVALID_ADDRESS);
-        }
-        let header: DescriptorHeader = staging.read(0);
-        if let Err(code) = validate_header(&header, operation, u64::from(spec.descriptor_len)) {
-            return refuse(domain, operation, code);
         }
     } else if frame.rdx != 0 || frame.r10 != 0 {
         return refuse(domain, operation, status::INVALID_ARGUMENT);
@@ -767,6 +1005,17 @@ pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64)
         crate::domain::reap_dead();
     }
 
+    // The descriptor comes in and the response goes out without the control
+    // lock: the copies walk the calling thread's own space, and what keeps a
+    // page under them is the invalidation protocol, not the lock. See
+    // `ucopy`. An operation's hold of the lock is then the operation and
+    // nothing else, and the two operations that wait take it once each way
+    // instead of twice.
+    let space = ucopy::UserSpace::current(thread);
+    if let Err(code) = read_descriptor(space, domain, operation, spec, frame, &mut staging) {
+        return refuse(domain, operation, code);
+    }
+
     let outcome = if waits(operation) {
         // These own their locking: they may sleep, and a lock is never held
         // across a context switch.
@@ -781,8 +1030,13 @@ pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64)
             op::DEVICE_RESET => devops::reset(&ctx_base, spec, &mut staging),
             _ => Err(status::NOT_SUPPORTED),
         }
+    } else if let Some(outcome) = shared(&ctx_base, spec, frame, &mut staging, operation) {
+        outcome
     } else {
-        let mut machine = MACHINE.lock();
+        // One acquisition for the whole operation, held for the operation
+        // alone: the resolution of the handle and the handler.
+        let mut machine = MACHINE.write();
+        drain_pending_memory(&mut machine);
         let resolved = if observes_lineage(operation) {
             resolve_observer(&machine, domain, frame.rdi, spec.object_type, spec.rights)
         } else {
@@ -795,13 +1049,23 @@ pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64)
                 now,
             )
         };
-        match resolved {
+        let outcome = match resolved {
             Ok(cap) => {
                 let ctx = Ctx { cap, ..ctx_base };
                 simple(&mut machine, &ctx, &mut staging, operation)
             }
             Err(code) => Err(code),
-        }
+        };
+        // What the operation released and could not reclaim from a shared
+        // hold is reclaimed here, in the hold it already has.
+        drain_pending_memory(&mut machine);
+        drop(machine);
+        // The wakes the operation claimed go out now, with the lock dropped:
+        // a reply's caller, a raised signal's waiters. Before the response is
+        // copied back: the woken thread has a processor to reach, and the
+        // caller's own answer is the caller's to wait for.
+        crate::sched::flush_wakes();
+        outcome
     };
 
     if operation == op::DOMAIN_TERMINATE {
@@ -813,29 +1077,11 @@ pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64)
     // ones that refuse with an explanation -- a retirement reporting what is
     // still outstanding -- would otherwise have their answer thrown away here,
     // which is the one place it cannot be recovered.
-    if spec.writes_response && staging.filled {
-        let machine = MACHINE.lock();
-        let Some(space) = machine.domains[domain].space.as_ref() else {
-            drop(machine);
-            return refuse(domain, operation, status::PEER_DEAD);
-        };
-        let bytes = &staging.bytes[..spec.descriptor_len as usize];
-        let written = ucopy::copy_out(space, frame.rdx, bytes);
-        drop(machine);
-        if let Err(fault) = written {
-            // The operation happened. A failed copy of its result is a delivery
-            // failure, not an undo, and the interface says so.
-            trace!(
-                "user.copy_refused",
-                "domain={domain} op={} direction=out addr=0x{:x} len={} reason={} \
-                 note=operation_already_happened",
-                operation_name(operation),
-                frame.rdx,
-                spec.descriptor_len,
-                fault.name()
-            );
-            return refuse(domain, operation, status::INVALID_ADDRESS);
-        }
+    if spec.writes_response
+        && staging.filled
+        && let Err(code) = write_response(space, domain, operation, spec, frame, &staging)
+    {
+        return refuse(domain, operation, code);
     }
 
     match outcome {
@@ -845,9 +1091,87 @@ pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64)
 }
 
 fn refuse(domain: usize, operation: u32, code: i64) -> (i64, u64) {
-    let mut machine = MACHINE.lock();
-    note_refusal(&mut machine, domain, operation, code);
+    let machine = MACHINE.read();
+    note_refusal(&machine, domain, operation, code);
     (code, 0)
+}
+
+/// Runs the operations whose whole effect is behind the fine locks, from a
+/// shared hold of the machine.
+///
+/// These are the operations of an IPC round trip: admitting a message,
+/// answering one, and letting go of the ticket that named it. What they touch
+/// -- a channel, an invocation, a message cell, a capability table, the
+/// authority tree, the control log -- has a lock of its own, so four pairs on
+/// four channels no longer queue behind each other for the machine. The rest
+/// of the interface rewrites the structure of the tables and keeps the
+/// exclusive hold.
+///
+/// Returns `None` when the operation is not one of these, or when the handle
+/// turned out to name something whose release needs the machine itself: a
+/// memory object's frames go back to the allocator, which no shared holder
+/// has. Nothing has been changed in that case, and the caller runs the
+/// operation again under the exclusive hold.
+fn shared(
+    ctx_base: &Ctx,
+    spec: &OpSpec,
+    frame: &TrapFrame,
+    staging: &mut Staging,
+    operation: u32,
+) -> Option<Result<u64, i64>> {
+    if !matches!(
+        operation,
+        op::INVOCATION_REPLY
+            | op::ENDPOINT_SEND
+            | op::CAP_CLOSE
+            | op::CAP_DERIVE
+            | op::CAP_COPY
+            | op::CAP_INSPECT
+    ) {
+        return None;
+    }
+    let machine = MACHINE.read();
+    let resolved = if observes_lineage(operation) {
+        resolve_observer(
+            &machine,
+            ctx_base.domain,
+            frame.rdi,
+            spec.object_type,
+            spec.rights,
+        )
+    } else {
+        resolve(
+            &machine,
+            ctx_base.domain,
+            frame.rdi,
+            spec.object_type,
+            spec.rights,
+            ctx_base.now,
+        )
+    };
+    let outcome = match resolved {
+        Ok(cap) => {
+            if operation == op::CAP_CLOSE && cap.object.kind == ObjKind::Memory {
+                return None;
+            }
+            let ctx = Ctx { cap, ..*ctx_base };
+            match operation {
+                op::INVOCATION_REPLY => ipcops::reply(&machine, &ctx, staging),
+                op::ENDPOINT_SEND => ipcops::send(&machine, &ctx, staging),
+                op::CAP_CLOSE => capops::close(&machine, &ctx),
+                op::CAP_DERIVE => capops::derive(&machine, &ctx, staging),
+                op::CAP_COPY => capops::copy(&machine, &ctx),
+                op::CAP_INSPECT => capops::inspect(&machine, &ctx, staging),
+                _ => Err(status::NOT_SUPPORTED),
+            }
+        }
+        Err(code) => Err(code),
+    };
+    drop(machine);
+    // The wakes the operation claimed go out now, with the hold dropped, for
+    // the reason the exclusive path gives.
+    crate::sched::flush_wakes();
+    Some(outcome)
 }
 
 /// Fills in the response header of a descriptor the kernel is writing back.
@@ -892,7 +1216,7 @@ pub fn begin_response(staging: &mut Staging, operation: u32) {
 /// capability; the mirror exists so a failure is visible without one.
 #[allow(clippy::too_many_arguments)]
 pub fn receipt(
-    machine: &mut Machine,
+    machine: &Machine,
     kind: u32,
     origin_domain: usize,
     origin_scope: ScopeId,
@@ -911,10 +1235,9 @@ pub fn receipt(
         .domains
         .get(origin_domain)
         .map_or(0, |domain| domain.id);
-    let scope_id = machine
-        .scopes
+    let scope_id = crate::scope::table()
         .get(origin_scope as usize)
-        .map_or(0, |scope| scope.id);
+        .map_or(0, |scope| scope.id());
     let record = crate::state::Receipt {
         schema: crate::ctrl::RECEIPT_SCHEMA,
         kind,
@@ -930,23 +1253,35 @@ pub fn receipt(
         a,
         b,
     };
-    let log = &mut machine.logs[log_index as usize];
-    let sequence = if reserved {
-        log.commit_reserved(record)
-    } else {
-        log.write(record)
+    let (sequence, lost, coalesced, used, generation, waiting) = {
+        let mut log = machine.logs[log_index as usize].lock();
+        let sequence = if reserved {
+            log.commit_reserved(record)
+        } else {
+            log.write(record)
+        };
+        // Whether a reader is owed a wake, decided in the hold that made the
+        // receipt rather than in a second one: the log is written on every
+        // admission, and no auditor is waiting on almost all of them.
+        let waiting = log.count >= logops::BATCH && log.readers != 0;
+        (
+            sequence,
+            log.lost,
+            log.coalesced,
+            log.count,
+            log.generation,
+            waiting,
+        )
     };
-    let lost = log.lost;
-    let coalesced = log.coalesced;
-    let used = log.count;
-    let generation = log.generation;
     trace!(
         "ctrl.receipt",
         "seq={sequence} kind={kind} origin_domain={domain_id} origin_scope={scope_id} \
          object={object} grant={grant} parent={parent_invocation} result={result} \
          a=0x{a:x} b=0x{b:x} used={used} lost={lost} coalesced={coalesced}"
     );
-    logops::wake_reader(machine, log_index as usize, generation);
+    if waiting {
+        logops::wake_reader(machine, log_index as usize, generation);
+    }
     sequence
 }
 
@@ -955,17 +1290,17 @@ pub fn receipt(
 /// The audited profile buys coverage in advance. If no cell can be reserved the
 /// operation is refused before it has an effect, which is the only way a claim
 /// that every covered admission was recorded can be true.
-pub fn reserve_receipt(machine: &mut Machine) -> bool {
+pub fn reserve_receipt(machine: &Machine) -> bool {
     match machine.system_log {
-        Some(index) => machine.logs[index as usize].reserve(),
+        Some(index) => machine.logs[index as usize].lock().reserve(),
         None => true,
     }
 }
 
 /// Returns a receipt reservation an operation did not use.
-pub fn release_receipt(machine: &mut Machine) {
+pub fn release_receipt(machine: &Machine) {
     if let Some(index) = machine.system_log {
-        machine.logs[index as usize].release_reservation();
+        machine.logs[index as usize].lock().release_reservation();
     }
 }
 
@@ -978,7 +1313,12 @@ pub fn grant_within(machine: &Machine, root: GrantId, candidate: GrantId) -> boo
         if current == root {
             return true;
         }
-        let Some(node) = machine.grants.get(current as usize) else {
+        let Some(node) = machine
+            .grants
+            .nodes
+            .get(current as usize)
+            .map(|node| *node.lock())
+        else {
             return false;
         };
         if !node.used {

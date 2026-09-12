@@ -119,7 +119,9 @@ int th_tls_install(unsigned index)
         th_note(TH_NOTE_TLS_BAD, 5);
         return 5;
     }
-    th_note(TH_NOTE_TLS_UP, ((uint64_t)index << 32) | memsz);
+    if (!th_quiet_startup()) {
+        th_note(TH_NOTE_TLS_UP, ((uint64_t)index << 32) | memsz);
+    }
     return 0;
 }
 
@@ -162,7 +164,7 @@ void th_run_constructors(void)
         (*fn)(0, no_arguments, no_arguments);
         ran++;
     }
-    th_note(TH_NOTE_CONSTRUCTORS, ran);
+    if (!th_quiet_startup()) { th_note(TH_NOTE_CONSTRUCTORS, ran); }
 }
 
 /* A fixed table, refused when full rather than grown: an `atexit` that could

@@ -948,7 +948,7 @@
         "mutable_files": false,
         "type_check": false,
         "engine_resident": true,
-        "engine_mmap": false,
+        "engine_mmap": true,
         "engine_compute_threads": 1,
         "cancellation": "scope_closure_between_tokens",
         "power_cut_durability": "unknown"

@@ -21,6 +21,7 @@ const USER: u64 = 1 << 2;
 const WRITE_THROUGH: u64 = 1 << 3;
 const CACHE_DISABLE: u64 = 1 << 4;
 const HUGE: u64 = 1 << 7;
+const GLOBAL: u64 = 1 << 8;
 const NO_EXECUTE: u64 = 1 << 63;
 
 /// Leaf flag reported by [`AddressSpace::translate`]: the page is writable.
@@ -99,6 +100,59 @@ fn table(frame: Frame) -> &'static mut [u64; ENTRIES] {
     unsafe { &mut *(frame.hhdm_addr() as *mut [u64; ENTRIES]) }
 }
 
+/// Resolves a virtual address to `(physical address, leaf flags)` in the
+/// hierarchy rooted at `root`, reading the tables the way the processor's own
+/// walker does: one entry at a time, each as it is at that moment.
+///
+/// This is the walk a descriptor copy performs without the control lock, so
+/// the entries are read atomically rather than through a table reference:
+/// another processor may be installing a mapping under the lock while this
+/// one walks, and what this walk must see is either the entry before or the
+/// entry after that store, never a torn one. An entry read as present names a
+/// table or a frame that was fully written before the entry was stored -- the
+/// order the hardware walker relies on too -- and the acquire load is what
+/// makes that order the reader's as well.
+///
+/// What the walk does *not* promise is that the frame stays mapped: that is
+/// the caller's argument, made in `ucopy`.
+#[must_use]
+pub fn translate_in(root: u64, vaddr: u64) -> Option<(u64, u64)> {
+    if !canonical(vaddr) {
+        return None;
+    }
+    let mut frame = Frame::containing(root);
+    let mut level = 3;
+    loop {
+        let entry = load_entry(frame, index(vaddr, level));
+        if entry & PRESENT == 0 {
+            return None;
+        }
+        if level == 0 {
+            return Some(((entry & ADDRESS_MASK) | (vaddr & 0xFFF), entry));
+        }
+        if entry & HUGE != 0 {
+            let size = 1u64 << (12 + 9 * level);
+            return Some(((entry & ADDRESS_MASK) | (vaddr & (size - 1)), entry));
+        }
+        frame = Frame::containing(entry & ADDRESS_MASK);
+        level -= 1;
+    }
+}
+
+/// One entry of the table in `frame`, read atomically.
+#[inline]
+fn load_entry(frame: Frame, slot: usize) -> u64 {
+    debug_assert!(slot < ENTRIES);
+    // SAFETY: `frame` is a page-table frame reached from a root this kernel
+    // built, mapped through the direct map, and `slot` is inside it. The load
+    // is atomic, so it is sound alongside a concurrent store of the same
+    // entry by the holder of the control lock.
+    unsafe {
+        (*(frame.hhdm_addr() as *const core::sync::atomic::AtomicU64).add(slot))
+            .load(core::sync::atomic::Ordering::Acquire)
+    }
+}
+
 fn leaf_flags(rights: Rights) -> u64 {
     let mut flags = PRESENT;
     if rights.write {
@@ -106,6 +160,16 @@ fn leaf_flags(rights: Rights) -> u64 {
     }
     if rights.user {
         flags |= USER;
+    } else {
+        // The kernel half is the same in every address space, so a switch
+        // between two spaces changes nothing in it; marking its entries
+        // global keeps them across the `CR3` write, where every switch
+        // between two domains used to retire the kernel's own translations
+        // and pay for their walks again on the way back in. What a switch
+        // must retire is the user half, and that stays non-global. A
+        // withdrawal in the kernel half is retired by `flush_tlb_all`, which
+        // flushes the global entries too.
+        flags |= GLOBAL;
     }
     if !rights.execute {
         flags |= NO_EXECUTE;
@@ -260,26 +324,7 @@ impl AddressSpace {
     /// Resolves a virtual address to `(physical address, leaf flags)`.
     #[must_use]
     pub fn translate(&self, vaddr: u64) -> Option<(u64, u64)> {
-        if !canonical(vaddr) {
-            return None;
-        }
-        let mut frame = self.root;
-        let mut level = 3;
-        loop {
-            let entry = table(frame)[index(vaddr, level)];
-            if entry & PRESENT == 0 {
-                return None;
-            }
-            if level == 0 {
-                return Some(((entry & ADDRESS_MASK) | (vaddr & 0xFFF), entry));
-            }
-            if entry & HUGE != 0 {
-                let size = 1u64 << (12 + 9 * level);
-                return Some(((entry & ADDRESS_MASK) | (vaddr & (size - 1)), entry));
-            }
-            frame = Frame::containing(entry & ADDRESS_MASK);
-            level -= 1;
-        }
+        translate_in(self.root.addr(), vaddr)
     }
 
     /// Removes one 4 KiB mapping and returns the frame it named.
@@ -317,6 +362,13 @@ impl AddressSpace {
     #[must_use]
     pub fn destroy_user_half(&mut self, alloc: &mut FrameAllocator, owner: Owner) -> Reclaimed {
         let mut counts = Reclaimed::default();
+        // One generation for the whole teardown. Every frame of this space has
+        // to stay out of the pool until every processor has flushed at a point
+        // after its entry was cleared, and the entries are all cleared here,
+        // under one lock: a generation for each of hundreds of frames would
+        // make every processor in the machine flush everything it holds,
+        // hundreds of times, to establish the same thing once.
+        let stamp = crate::tlb::retire_stamp();
         let root = table(self.root);
         for slot in 0..SLOT_HHDM {
             let entry = root[slot];
@@ -324,12 +376,13 @@ impl AddressSpace {
                 continue;
             }
             let pdpt = Frame::containing(entry & ADDRESS_MASK);
-            self.destroy_level(pdpt, 3, alloc, owner, &mut counts);
+            self.destroy_level(pdpt, 3, alloc, owner, &mut counts, stamp);
             root[slot] = 0;
         }
         counts
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn destroy_level(
         &self,
         frame: Frame,
@@ -337,6 +390,7 @@ impl AddressSpace {
         alloc: &mut FrameAllocator,
         owner: Owner,
         counts: &mut Reclaimed,
+        stamp: u64,
     ) {
         let entries = table(frame);
         for slot in 0..ENTRIES {
@@ -356,10 +410,10 @@ impl AddressSpace {
                 // processor may still hold a translation from before it died,
                 // and a translation is keyed by linear address rather than by
                 // address space.
-                alloc.retire(child, owner);
+                alloc.retire_at(child, owner, stamp);
                 counts.data_frames += 1;
             } else {
-                self.destroy_level(child, level - 1, alloc, owner, counts);
+                self.destroy_level(child, level - 1, alloc, owner, counts, stamp);
             }
             entries[slot] = 0;
         }
@@ -367,7 +421,7 @@ impl AddressSpace {
         // is unreachable from the inactive hierarchy. It still enters
         // quarantine: a paging-structure cache on another processor can hold an
         // interior entry as readily as a leaf.
-        alloc.retire(frame, owner);
+        alloc.retire_at(frame, owner, stamp);
         counts.table_frames += 1;
     }
 
@@ -385,7 +439,7 @@ impl AddressSpace {
         }
         // The caller guarantees the space is inactive and empty; quarantine
         // covers the paging-structure caches another processor may still hold.
-        alloc.retire(self.root, owner);
+        alloc.retire_at(self.root, owner, crate::tlb::retire_stamp());
     }
 }
 

@@ -195,6 +195,10 @@ pub fn bench_config(role: u64, helpers: u64, arg1: u64, shared: bool, seed: u64)
         arg1,
         arg2: 0,
         arg3: 0,
+        // Every domain this benchmark builds is one whose start something
+        // times. The runtime's own startup notes are K5's evidence, not K6's,
+        // and each one is a synchronous record on the diagnostic plane.
+        flags: native::flag::QUIET_STARTUP,
     }
 }
 

@@ -221,6 +221,7 @@ fn smoke_stage(system: u64, supervision: u64, seed: u64) -> bool {
         arg1: 0,
         arg2: 0,
         arg3: 0,
+        flags: 0,
     };
     config.arg0 = seed ^ 0x5A5A;
 

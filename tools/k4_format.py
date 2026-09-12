@@ -142,6 +142,7 @@ FAULTMODE = {
     "KILL_SERVICE": 5,
     "IO_ERROR": 6,
     "REORDER": 7,
+    "LOSE_CONTROL": 8,
 }
 FAULTMODE_NAME = {v: k for k, v in FAULTMODE.items()}
 

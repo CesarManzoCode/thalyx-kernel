@@ -17,6 +17,19 @@
 #define PRIO_PGRP    1
 #define PRIO_USER    2
 
+/* Resource identifiers. Named because ported code refers to them; `getrlimit`
+ * refuses whichever one is asked for, because a program's real limits are its
+ * scope's and a supervisor is who reads those. */
+#define RLIMIT_CPU        0
+#define RLIMIT_FSIZE      1
+#define RLIMIT_DATA       2
+#define RLIMIT_STACK      3
+#define RLIMIT_CORE       4
+#define RLIMIT_NOFILE     7
+#define RLIMIT_AS         9
+#define RLIMIT_MEMLOCK    8
+#define RLIM_INFINITY     (~0UL)
+
 typedef unsigned long rlim_t;
 struct rlimit {
     rlim_t rlim_cur;

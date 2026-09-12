@@ -123,7 +123,7 @@ void th_thread_body(uint64_t index)
     if (th_tls_install((unsigned)index) != 0) {
         for (;;) { th_yield_ns(1000000000ull); }
     }
-    th_note(TH_NOTE_THREAD_UP, index);
+    if (!th_quiet_startup()) { th_note(TH_NOTE_THREAD_UP, index); }
     __atomic_fetch_or(&th_threads_alive, 1u << index, __ATOMIC_RELEASE);
     for (;;) {
         if (th_signal_wait(TH_SLOT_SIGNAL_WORK, 1ull << index, 0) != THALYX_STATUS_OK) {

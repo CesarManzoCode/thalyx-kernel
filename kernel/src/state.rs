@@ -1,130 +1,84 @@
-//! Kernel object tables and the single lock that protects them.
+//! Kernel object tables and the lock that protects the control plane.
 //!
 //! Every kernel object lives in a fixed-capacity table. That is not a shortcut
 //! around the resource contract: refusing to create an object when its table is
 //! full is exactly the "reject before a partial object becomes visible" rule,
 //! and a fixed table makes the refusal path impossible to skip. What K2 adds on
-//! top is the accounting the contract requires — every object is charged to a
+//! top is the accounting the contract requires -- every object is charged to a
 //! scope, and the charge is checked against that scope and all of its ancestors
 //! before the object exists.
 //!
-//! There is one lock. The concurrency contract allows a single short global lock
-//! for metadata before SMP, and one lock cannot be acquired out of order. Its
-//! two rules are absolute: no context switch happens while it is held, and it is
-//! never taken from a context that can already hold it, which on a uniprocessor
-//! machine with every kernel path running at IF=0 means it is never contended.
+//! Until this revision there was one lock, and it was what K6 measured as the
+//! limit of the machine: four independent IPC pairs serialised on it. What
+//! remains under it is the **control plane**: creation and destruction of
+//! domains, memory objects, mappings, devices and timers; fences and
+//! retirements; anything that rewrites the *structure* of a table rather than
+//! moving a counter or a message. The hot paths -- scheduling, the thread
+//! table, scope accounting -- live in their own modules with their own rules
+//! (`crate::thread`, `crate::sched`, `crate::scope`), and the objects of the
+//! IPC path follow the same split. The lock order, outermost first, is the
+//! control lock, then one object lock, then one domain's capability table,
+//! then a thread's wait lock, then a run queue; `vault/architecture/
+//! concurrency.md` records it.
 //!
-//! The lock is also what makes the admission point of the authority contract
-//! real. Validating a grant, checking the clock, reserving the obligations and
-//! publishing the admission all happen inside one critical section, and a fence
-//! takes the same lock, so an admission either wins the race and is recorded
-//! before the barrier or loses it and fails.
+//! The control lock is still what makes a barrier linearisable against the
+//! admissions that race it: a fence changes a monotonic state under this lock
+//! and then sweeps the objects under theirs, and an admission re-reads that
+//! state after publishing under the object's lock, so it either loses the
+//! race and withdraws itself or wins it and is found by the sweep.
+
+use core::sync::atomic::Ordering;
 
 use thalyx_abi::generated::ReceiptRecord;
 
-use crate::arch::x86_64::fpu::FpuState;
 use crate::arch::x86_64::paging::AddressSpace;
 use crate::ctrl::ControlLog;
 use crate::device::{Device, DmaGrant, IrqBinding, MAX_DEVICE_MAPS};
 use crate::events::{Signal, Timer};
 use crate::ipc::{Endpoint, Invocation, Message};
 use crate::limits::{
-    MAX_CONTROL_LOGS, MAX_CPUS, MAX_DEVICES, MAX_DMA_GRANTS, MAX_ENDPOINTS, MAX_GRANTS,
-    MAX_INVOCATIONS, MAX_IRQ_BINDINGS, MAX_MAPS, MAX_MEMORY_OBJECTS, MAX_MESSAGES, MAX_SCOPES,
-    MAX_SIGNALS, MAX_TIMERS,
+    MAX_CONTROL_LOGS, MAX_DEVICES, MAX_DMA_GRANTS, MAX_ENDPOINTS, MAX_GRANTS, MAX_INVOCATIONS,
+    MAX_IRQ_BINDINGS, MAX_MAPS, MAX_MEMORY_OBJECTS, MAX_MESSAGES, MAX_SIGNALS, MAX_TIMERS,
 };
 use crate::memobj::{MapRecord, MemoryObject};
 use crate::mm::frame::FrameAllocator;
 use crate::obj::{CapTable, Grant, GrantId, NO_GRANT, ObjRef, ScopeId};
-use crate::scope::Scope;
-use crate::sync::SpinLock;
+use crate::sync::{BrLock, LockClass, SpinLock};
 
 /// Re-exported so the modules that predate the table split keep one name for
 /// each capacity.
 pub use crate::limits::{MAX_DOMAINS, MAX_THREADS, MAX_THREADS_PER_DOMAIN};
+/// Re-exported: the thread table moved to its own module, and these names are
+/// the ones the rest of the kernel uses.
+pub use crate::thread::{ThreadKind, ThreadState, Wait, idle_thread};
+
+/// What an endpoint slot is, outside the lock that protects its queue.
+pub struct EndpointId {
+    /// Whether the slot is in use.
+    pub used: bool,
+    /// Generation of this table slot.
+    pub generation: u32,
+    /// Capability entries naming this endpoint.
+    pub refs: core::sync::atomic::AtomicU32,
+}
+
+impl EndpointId {
+    /// A free slot.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            used: false,
+            generation: 0,
+            refs: core::sync::atomic::AtomicU32::new(0),
+        }
+    }
+}
 
 /// Kernel stack slots, one per thread.
 pub const MAX_KSTACKS: usize = MAX_THREADS;
 /// Table index of the bootstrap processor's idle thread, which is the
 /// bootstrap context itself.
 pub const IDLE_THREAD: usize = 0;
-
-/// Thread-table index of the idle thread of processor `cpu`.
-///
-/// The first [`MAX_CPUS`] slots are reserved for them. A processor's idle
-/// thread is the context it runs when nothing else is eligible **on that
-/// processor**, so there is one per processor and no domain owns any of them.
-#[must_use]
-pub const fn idle_thread(cpu: usize) -> usize {
-    cpu
-}
-
-/// What one processor is doing, as the scheduler sees it.
-///
-/// This is the half of per-processor state that is kernel metadata: it is read
-/// and written under the machine lock like every other object. The half the
-/// entry paths need before they can take a lock lives in [`crate::percpu`].
-#[derive(Clone, Copy, Debug)]
-pub struct CpuSlot {
-    /// Whether the processor completed its handshake and may be scheduled on.
-    pub online: bool,
-    /// Local APIC identifier, as the firmware reported it.
-    pub apic_id: u32,
-    /// The processor's own idle thread.
-    pub idle_thread: usize,
-    /// Thread currently dispatched here.
-    pub current: usize,
-    /// Round-robin cursor over the thread table.
-    pub cursor: usize,
-    /// Thread this processor switched away from and has not yet published as
-    /// ready again.
-    ///
-    /// A thread whose stopped context is still being written must not be
-    /// picked by another processor: it would resume from a stack pointer that
-    /// has not been stored yet. So the outgoing thread stays unpickable until
-    /// the incoming context on this processor publishes it.
-    pub previous: usize,
-    /// Timer interrupts this processor took.
-    pub ticks: u64,
-    /// Times this processor dispatched a user thread.
-    pub dispatches: u64,
-    /// Times this processor took a user thread away involuntarily.
-    pub preemptions: u64,
-    /// Dispatches this processor refused for want of budget or a parallelism
-    /// slot.
-    pub budget_stalls: u64,
-    /// Nanoseconds of user execution this processor charged.
-    pub user_ns: u64,
-    /// A thread was made runnable here and no processor has been told. Settled
-    /// when this processor next schedules or returns to a thread that keeps
-    /// running; see `sched::kick_idle`.
-    pub wake_pending: bool,
-    /// Time-stamp counter when the pending wake was noted.
-    pub wake_pending_at: u64,
-    /// Reschedule interrupts this processor sent to idle ones.
-    pub kicks: u64,
-}
-
-impl CpuSlot {
-    const fn empty() -> Self {
-        Self {
-            online: false,
-            apic_id: u32::MAX,
-            idle_thread: usize::MAX,
-            current: usize::MAX,
-            cursor: 0,
-            previous: usize::MAX,
-            ticks: 0,
-            dispatches: 0,
-            wake_pending: false,
-            wake_pending_at: 0,
-            kicks: 0,
-            preemptions: 0,
-            budget_stalls: 0,
-            user_ns: 0,
-        }
-    }
-}
 
 /// Lifecycle of a domain.
 ///
@@ -236,7 +190,11 @@ pub struct Domain {
     /// The domain's threads.
     pub threads: [Option<usize>; MAX_THREADS_PER_DOMAIN],
     /// The domain's capability table. Empty unless someone installed something.
-    pub caps: CapTable,
+    /// The domain's capability table, under a lock of its own: a shared
+    /// holder of the machine installs and releases entries in it -- a
+    /// receiver's ticket, a reply's capabilities -- and the control plane
+    /// reaches it through `get_mut`.
+    pub caps: SpinLock<CapTable>,
     /// Endpoint a fault of this domain is reported on.
     pub fault_endpoint: Option<ObjRef>,
     /// Grant the fault message is admitted under.
@@ -255,15 +213,6 @@ pub struct Domain {
     pub stack_mapped: bool,
     /// Whether the domain was built through the K2 capability path.
     pub managed: bool,
-    /// Bit per processor this domain's address space has ever been dispatched
-    /// on.
-    ///
-    /// A count of who is in the space *right now* answers a different and much
-    /// weaker question: an invalidation has to reach every processor that could
-    /// hold a translation, and a processor that ran here a microsecond ago
-    /// still could. The mask is what makes "reached everyone who could have
-    /// cached it" checkable after the fact.
-    pub cpu_mask: u64,
     /// Pages reserved in the owner scope for this domain's infrastructure.
     pub reserved_pages: u64,
     /// Metadata units reserved in the owner scope for this domain and its
@@ -281,12 +230,13 @@ pub struct Domain {
     pub notes: u64,
     /// Kernel entries this domain performed.
     pub invocations: u64,
-    /// Kernel entries this domain performed that were refused.
-    pub refusals: u64,
+    /// Kernel entries this domain performed that were refused. Atomic: a
+    /// refusal is noted from a shared hold of the machine.
+    pub refusals: core::sync::atomic::AtomicU64,
     /// Refusal records already emitted before the plane starts coalescing.
-    pub refusal_records: u32,
+    pub refusal_records: core::sync::atomic::AtomicU32,
     /// Capability entries naming this domain, wherever they are held.
-    pub refs: u32,
+    pub refs: core::sync::atomic::AtomicU32,
 }
 
 impl Domain {
@@ -302,7 +252,7 @@ impl Domain {
             owner_scope: 0,
             space: None,
             threads: [None; MAX_THREADS_PER_DOMAIN],
-            caps: CapTable::new(),
+            caps: SpinLock::of_class(CapTable::new(), crate::sync::LockClass::Caps),
             fault_endpoint: None,
             fault_grant: NO_GRANT,
             fault_facet: 0,
@@ -310,7 +260,6 @@ impl Domain {
             entry: 0,
             segments: 0,
             image_pages: 0,
-            cpu_mask: 0,
             stack_mapped: false,
             managed: false,
             reserved_pages: 0,
@@ -321,9 +270,9 @@ impl Domain {
             exit_code: 0,
             notes: 0,
             invocations: 0,
-            refusals: 0,
-            refusal_records: 0,
-            refs: 0,
+            refusals: core::sync::atomic::AtomicU64::new(0),
+            refusal_records: core::sync::atomic::AtomicU32::new(0),
+            refs: core::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -346,175 +295,20 @@ impl Domain {
     }
 }
 
-/// Lifecycle of a thread.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ThreadState {
-    /// Free table slot.
-    Empty,
-    /// Allocated to a domain that is still being built: it has a kernel stack
-    /// and an initial context, and it is not schedulable until the domain is
-    /// activated. Distinct from `Empty` because a slot that looked free while it
-    /// was held was handed out again: adding a thread to a domain under
-    /// construction reused that domain's own initial thread, overwrote its
-    /// context, and left `_start` never run. Found by K5's engine, the first
-    /// native domain built with a second thread.
-    Held,
-    /// Eligible to be dispatched.
-    Ready,
-    /// Currently on the CPU.
-    Running,
-    /// Waiting inside a kernel entry for a reply, a message or a signal.
-    Blocked,
-    /// Stopped; its stack may still be in use until the switch away completes.
-    Dead,
-}
-
-/// What a thread is for.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ThreadKind {
-    /// The bootstrap context, which becomes the idle thread. Never enters ring
-    /// 3 and belongs to no domain.
-    Idle,
-    /// A user thread of a domain.
-    User,
-}
-
-/// What a blocked thread is waiting for.
-///
-/// Every wait names the object it depends on **and** that object's generation,
-/// so a completion that arrives for a recycled slot wakes nobody.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Wait {
-    /// Not waiting.
-    None,
-    /// Waiting for the reply of an invocation.
-    Reply(u16, u32),
-    /// Waiting for a message on an endpoint.
-    Receive(u16, u32),
-    /// Waiting for any of a mask of signal bits.
-    Signal(u16, u32, u64),
-    /// Waiting for a control log to hold a receipt.
-    Log(u16, u32),
-}
-
-/// An execution context.
-pub struct Thread {
-    /// Lifecycle state.
-    pub state: ThreadState,
-    /// What the thread is for.
-    pub kind: ThreadKind,
-    /// Owning domain index; meaningless for the idle thread.
-    pub domain: usize,
-    /// Generation of the owning domain when the thread was created.
-    pub domain_generation: u32,
-    /// Diagnostic identity.
-    pub id: u64,
-    /// Scope that pays for the thread's own domain.
-    pub owner_scope: ScopeId,
-    /// Scope the thread's current work is charged to. Equal to `owner_scope`
-    /// except while the thread is bound to another scope's invocation.
-    pub effective_scope: ScopeId,
-    /// Whether the current work is charged to the closure reserve.
-    pub recovery: bool,
-    /// Invocation whose origin the thread adopted, if any.
-    pub bound_invocation: Option<(u16, u32)>,
-    /// Scope currently holding a parallelism slot for this thread.
-    pub parallelism_scope: Option<ScopeId>,
-    /// What the thread is waiting for.
-    pub wait: Wait,
-    /// Monotonic deadline of that wait, or zero for none.
-    pub wait_deadline_ns: u64,
-    /// Status a woken thread returns from its kernel entry.
-    pub wake_status: i64,
-    /// Auxiliary value a woken thread returns.
-    pub wake_aux: u64,
-    /// Kernel stack slot index.
-    pub kstack_slot: usize,
-    /// Top of the thread's kernel stack.
-    pub kstack_top: u64,
-    /// Stack pointer of the thread's stopped context.
-    pub saved_rsp: u64,
-    /// CR3 value for the thread's address space.
-    pub cr3: u64,
-    /// Eagerly saved x87/SSE state.
-    pub fpu: FpuState,
-    /// Nanoseconds of CPU charged to the thread.
-    pub cpu_ns: u64,
-    /// Monotonic time at which the thread was last dispatched.
-    pub dispatched_ns: u64,
-    /// Timer ticks left in the current quantum.
-    pub quantum_ticks: u32,
-    /// Execution reserved in the effective scope for the current dispatch.
-    pub dispatch_reserved_ns: u64,
-    /// Window that reservation belongs to.
-    pub dispatch_window: u64,
-    /// Scope the reservation was taken in. Held separately from
-    /// `effective_scope` because a thread may be rebound while it runs, and the
-    /// reservation must be returned where it was taken.
-    pub dispatch_scope: ScopeId,
-    /// Whether the reservation came from the closure reserve.
-    pub dispatch_recovery: bool,
-    /// Whether the thread currently holds a dispatch reservation.
-    pub dispatched: bool,
-    /// Processor the thread last ran on.
-    pub last_cpu: usize,
-    /// Times the thread was dispatched on a processor other than the last one.
-    pub migrations: u64,
-    /// Times the timer took the CPU away from the thread.
-    pub preemptions: u64,
-    /// Detailed preemption records already emitted for this thread.
-    pub preempt_records: u32,
-    /// Kernel entries the thread performed through `syscall`.
-    pub syscalls: u64,
-    /// Whether a frame from this thread has been observed at privilege level 3.
-    pub ring3_confirmed: bool,
-    /// The thread's own FS base, written to the processor on every dispatch.
-    ///
-    /// Register state of the thread, set only through `THREAD_POINTER_SET` and
-    /// never read by the kernel for anything else: nothing in ring 0 addresses
-    /// memory through FS. Zero for every thread that never set one.
-    pub fs_base: u64,
-}
-
-impl Thread {
-    const fn empty() -> Self {
-        Self {
-            state: ThreadState::Empty,
-            kind: ThreadKind::Idle,
-            domain: usize::MAX,
-            domain_generation: 0,
-            id: 0,
-            owner_scope: 0,
-            effective_scope: 0,
-            recovery: false,
-            bound_invocation: None,
-            parallelism_scope: None,
-            wait: Wait::None,
-            wait_deadline_ns: 0,
-            wake_status: 0,
-            wake_aux: 0,
-            kstack_slot: usize::MAX,
-            kstack_top: 0,
-            saved_rsp: 0,
-            cr3: 0,
-            fpu: FpuState::zeroed(),
-            cpu_ns: 0,
-            dispatched_ns: 0,
-            quantum_ticks: 0,
-            dispatch_reserved_ns: 0,
-            dispatch_window: 0,
-            dispatch_scope: 0,
-            dispatch_recovery: false,
-            dispatched: false,
-            last_cpu: usize::MAX,
-            migrations: 0,
-            preemptions: 0,
-            preempt_records: 0,
-            syscalls: 0,
-            ring3_confirmed: false,
-            fs_base: 0,
-        }
-    }
+/// The authority tree and where its free-node search starts.
+pub struct Grants {
+    /// The nodes, each under a lock of its own. A lineage is walked from a
+    /// node towards the root and never the other way, and no holder of one
+    /// node takes another except its parent, so the order the tree itself
+    /// gives is the lock order.
+    pub nodes: [SpinLock<Grant>; MAX_GRANTS],
+    /// Where the search for a free grant node starts. Every node below it is
+    /// in use, or was the last time the search passed; a release below it
+    /// moves it back. The search is still the whole table when it has to be,
+    /// so nothing is refused that a full scan would have found -- what the
+    /// hint removes is reading a hundred lines of nodes known to be taken to
+    /// find the one after them, on every derivation.
+    pub hint: core::sync::atomic::AtomicUsize,
 }
 
 /// Everything the kernel arbitrates.
@@ -525,28 +319,54 @@ pub struct Machine {
     pub kernel_space: Option<AddressSpace>,
     /// Domain table.
     pub domains: [Domain; MAX_DOMAINS],
-    /// Thread table.
-    pub threads: [Thread; MAX_THREADS],
-    /// Resource tree.
-    pub scopes: [Scope; MAX_SCOPES],
-    /// Authority tree.
-    pub grants: [Grant; MAX_GRANTS],
+    /// Authority tree, a lock per node: a holder takes the one node it reads
+    /// or changes, and a walk up a lineage takes them one at a time. One lock
+    /// over the whole tree was what four IPC pairs met once the channels
+    /// stopped meeting -- every resolution of a handle reads a node, and a
+    /// round trip resolves four.
+    pub grants: Grants,
     /// Memory objects.
     pub memories: [MemoryObject; MAX_MEMORY_OBJECTS],
     /// Reverse index of installed mappings.
     pub maps: [MapRecord; MAX_MAPS],
-    /// Endpoints.
-    pub endpoints: [Endpoint; MAX_ENDPOINTS],
-    /// Messages in flight.
-    pub messages: [Message; MAX_MESSAGES],
-    /// Admitted work.
-    pub invocations: [Invocation; MAX_INVOCATIONS],
+    /// Endpoints, each under a lock of its own: the channel lock of the IPC
+    /// hot paths; see `invocations`.
+    pub endpoints: [SpinLock<Endpoint>; MAX_ENDPOINTS],
+    /// What each endpoint slot is, as against what its queue holds.
+    ///
+    /// Outside the channel's own lock, and that is the point: resolving a
+    /// capability asks whether the object it names still exists, and an
+    /// admission resolves the capabilities a message carries while it holds
+    /// the channel it is admitting on -- which may be the very endpoint one of
+    /// them names. Existence and generation change only under the exclusive
+    /// hold of the machine, where no shared holder is reading them; the
+    /// reference count is atomic, because a message that carries an endpoint
+    /// capability adjusts it from a shared hold.
+    pub endpoint_ids: [EndpointId; MAX_ENDPOINTS],
+    /// Messages in flight, each cell under a lock of its own; see
+    /// `invocations`.
+    pub messages: [SpinLock<Message>; MAX_MESSAGES],
+    /// One bit per free message slot.
+    ///
+    /// The tables are searched on every admission, and a search of the
+    /// records themselves reads a line of each record it passes -- lines
+    /// other processors write -- to find the one that is free. The bits are
+    /// one word, kept beside the records they describe.
+    pub message_free: core::sync::atomic::AtomicU64,
+    /// Admitted work, each record under a lock of its own: a shared holder
+    /// of the machine takes one record at a time, and the control plane,
+    /// holding the machine exclusively, reaches them through `get_mut`.
+    pub invocations: [SpinLock<Invocation>; MAX_INVOCATIONS],
+    /// One bit per free invocation slot; see `message_free`.
+    pub invocation_free: core::sync::atomic::AtomicU64,
     /// Signals.
     pub signals: [Signal; MAX_SIGNALS],
     /// Timers.
     pub timers: [Timer; MAX_TIMERS],
     /// Control-receipt rings.
-    pub logs: [ControlLog; MAX_CONTROL_LOGS],
+    /// Control-receipt rings, each under a lock of its own: every admission
+    /// writes the system log, from a shared hold of the machine.
+    pub logs: [SpinLock<ControlLog>; MAX_CONTROL_LOGS],
     /// Assigned device functions.
     pub devices: [Device; MAX_DEVICES],
     /// Mappings of device register windows.
@@ -564,45 +384,20 @@ pub struct Machine {
     pub iommu_translating: bool,
     /// Occupancy of the kernel stack slots.
     pub kstack_used: [bool; MAX_KSTACKS],
-    /// Processors, dense-indexed. Slot zero is the bootstrap processor.
-    pub cpus: [CpuSlot; MAX_CPUS],
-    /// Processors that completed their handshake, the bootstrap processor
-    /// included.
-    pub cpus_online: usize,
-    /// Processors that ever completed it. Never decremented, so a summary
-    /// written after the others have parked still says how many ran.
-    pub cpus_started: usize,
-    /// Timer ticks since the timer was armed, summed over every processor.
-    pub ticks: u64,
-    /// Involuntary switches away from a user thread.
-    pub preemptions: u64,
-    /// Dispatches refused because a scope had no budget or no parallelism slot.
-    pub budget_stalls: u64,
-    /// Longest interval a single charge covered.
-    ///
-    /// A quantum bounds how long a thread is *scheduled* for; this is how long
-    /// it was actually charged for between two observations of the clock. Under
-    /// an emulated platform the two are not the same number, and a budget
-    /// overrun is only attributable if the difference is measured rather than
-    /// assumed.
-    pub max_charge_interval_ns: u64,
     /// Frames reclaimed from loader and module memory after bootstrap.
     pub reclaimed_frames: usize,
     /// User faults contained.
     pub user_faults: u64,
     /// Modules the loader offered that validation refused.
     pub modules_rejected: u32,
-    /// Detailed preemption records already emitted, before coalescing.
-    pub preempt_records: u32,
     /// Next diagnostic object identity. Never wraps: exhaustion refuses
-    /// creation instead.
-    pub next_object_id: u64,
+    /// creation instead. Atomic, so a shared holder of the machine can take
+    /// one.
+    pub next_object_id: core::sync::atomic::AtomicU64,
     /// Boot epoch from the loader. Not an identifier and not entropy.
     pub boot_epoch: u64,
     /// Whether the boot package selected the K2 supervisor path.
     pub managed_boot: bool,
-    /// One bit per assigned operation, set when the dispatch reached it.
-    pub operations_reached: u64,
     /// Root scope of the resource tree, once it exists.
     pub root_scope: Option<ScopeId>,
     /// The system control log, once it exists.
@@ -610,6 +405,17 @@ pub struct Machine {
     /// The first supervisor, once it exists. It has no supervisor of its own,
     /// so its fault ends the run rather than being reported to anyone.
     pub supervisor: Option<usize>,
+    /// Memory objects whose last capability was released from a shared hold
+    /// of the machine, waiting for an exclusive one to reclaim their frames.
+    ///
+    /// Releasing a handle takes the capability table's lock and nothing else;
+    /// returning frames to the allocator needs the machine itself. The two are
+    /// separated rather than merged, so that closing a handle -- which every
+    /// IPC round trip does -- never asks for the exclusive hold. The set is
+    /// drained by the next operation that holds the machine exclusively, and
+    /// the only operation that can exhaust the table of memory objects is the
+    /// creation of one, which is such an operation and drains it first.
+    pub pending_memory: [core::sync::atomic::AtomicU64; 2],
 }
 
 impl Machine {
@@ -618,17 +424,26 @@ impl Machine {
             memory: None,
             kernel_space: None,
             domains: [const { Domain::empty() }; MAX_DOMAINS],
-            threads: [const { Thread::empty() }; MAX_THREADS],
-            scopes: [const { Scope::empty() }; MAX_SCOPES],
-            grants: [Grant::empty(); MAX_GRANTS],
+            grants: Grants {
+                nodes: [const { SpinLock::of_class(Grant::empty(), LockClass::Grants) };
+                    MAX_GRANTS],
+                hint: core::sync::atomic::AtomicUsize::new(0),
+            },
             memories: [const { MemoryObject::empty() }; MAX_MEMORY_OBJECTS],
             maps: [MapRecord::empty(); MAX_MAPS],
-            endpoints: [const { Endpoint::empty() }; MAX_ENDPOINTS],
-            messages: [const { Message::empty() }; MAX_MESSAGES],
-            invocations: [Invocation::empty(); MAX_INVOCATIONS],
-            signals: [Signal::empty(); MAX_SIGNALS],
-            timers: [Timer::empty(); MAX_TIMERS],
-            logs: [const { ControlLog::empty() }; MAX_CONTROL_LOGS],
+            endpoints: [const { SpinLock::of_class(Endpoint::empty(), LockClass::Channel) };
+                MAX_ENDPOINTS],
+            endpoint_ids: [const { EndpointId::empty() }; MAX_ENDPOINTS],
+            messages: [const { SpinLock::of_class(Message::empty(), LockClass::Record) };
+                MAX_MESSAGES],
+            message_free: core::sync::atomic::AtomicU64::new((1u64 << MAX_MESSAGES) - 1),
+            invocations: [const { SpinLock::of_class(Invocation::empty(), LockClass::Record) };
+                MAX_INVOCATIONS],
+            invocation_free: core::sync::atomic::AtomicU64::new((1u64 << MAX_INVOCATIONS) - 1),
+            signals: [const { Signal::empty() }; MAX_SIGNALS],
+            timers: [const { Timer::empty() }; MAX_TIMERS],
+            logs: [const { SpinLock::of_class(ControlLog::empty(), LockClass::Log) };
+                MAX_CONTROL_LOGS],
             devices: [const { Device::empty() }; MAX_DEVICES],
             device_maps: [crate::device::MapRecord::empty(); MAX_DEVICE_MAPS],
             dma_grants: [DmaGrant::empty(); MAX_DMA_GRANTS],
@@ -637,41 +452,41 @@ impl Machine {
             iommu_described: false,
             iommu_translating: false,
             kstack_used: [false; MAX_KSTACKS],
-            cpus: [CpuSlot::empty(); MAX_CPUS],
-            cpus_online: 0,
-            cpus_started: 0,
-            ticks: 0,
-            preemptions: 0,
-            budget_stalls: 0,
-            max_charge_interval_ns: 0,
             reclaimed_frames: 0,
             user_faults: 0,
             modules_rejected: 0,
-            preempt_records: 0,
-            next_object_id: 1,
+            next_object_id: core::sync::atomic::AtomicU64::new(1),
             boot_epoch: 0,
             managed_boot: false,
-            operations_reached: 0,
             root_scope: None,
             system_log: None,
             supervisor: None,
+            pending_memory: [
+                core::sync::atomic::AtomicU64::new(0),
+                core::sync::atomic::AtomicU64::new(0),
+            ],
         }
     }
 
-    /// Thread dispatched on the processor executing this call.
-    ///
-    /// Reading the processor's own identity rather than a single global field
-    /// is the whole difference between a uniprocessor scheduler and this one:
-    /// there is no "the" running thread any more.
-    #[must_use]
-    pub fn current(&self) -> usize {
-        let cpu = crate::percpu::index();
-        let index = self.cpus[cpu.min(MAX_CPUS - 1)].current;
-        if index == usize::MAX {
-            idle_thread(cpu)
-        } else {
-            index
+    /// Notes that memory object `index` may now be collectable.
+    pub fn defer_memory(&self, index: usize) {
+        if index >= MAX_MEMORY_OBJECTS {
+            return;
         }
+        self.pending_memory[index / 64].fetch_or(1u64 << (index % 64), Ordering::AcqRel);
+    }
+
+    /// Takes the set of memory objects waiting to be collected.
+    pub fn take_pending_memory(&self) -> [u64; 2] {
+        if self.pending_memory[0].load(Ordering::Relaxed) == 0
+            && self.pending_memory[1].load(Ordering::Relaxed) == 0
+        {
+            return [0, 0];
+        }
+        [
+            self.pending_memory[0].swap(0, Ordering::AcqRel),
+            self.pending_memory[1].swap(0, Ordering::AcqRel),
+        ]
     }
 
     /// Frame allocator, which exists from the memory bootstrap onward.
@@ -681,22 +496,86 @@ impl Machine {
             .expect("frame allocator established during bootstrap")
     }
 
+    /// Claims a free message slot, if any.
+    pub fn claim_message(&self) -> Option<usize> {
+        loop {
+            let free = self.message_free.load(Ordering::Relaxed);
+            if free == 0 {
+                return None;
+            }
+            let index = free.trailing_zeros() as usize;
+            let bit = 1u64 << index;
+            if self.message_free.fetch_and(!bit, Ordering::AcqRel) & bit != 0 {
+                return Some(index);
+            }
+        }
+    }
+
+    /// Marks message slot `index` free, its record already marked so.
+    pub fn release_message(&self, index: usize) {
+        self.message_free.fetch_or(1u64 << index, Ordering::AcqRel);
+    }
+
+    /// Message slots in use.
+    #[must_use]
+    pub fn messages_used(&self) -> u64 {
+        MAX_MESSAGES as u64 - u64::from(self.message_free.load(Ordering::Relaxed).count_ones())
+    }
+
+    /// Claims a free invocation slot, if any.
+    pub fn claim_invocation(&self) -> Option<usize> {
+        loop {
+            let free = self.invocation_free.load(Ordering::Relaxed);
+            if free == 0 {
+                return None;
+            }
+            let index = free.trailing_zeros() as usize;
+            let bit = 1u64 << index;
+            if self.invocation_free.fetch_and(!bit, Ordering::AcqRel) & bit != 0 {
+                return Some(index);
+            }
+        }
+    }
+
+    /// Marks invocation slot `index` free, its record already marked so.
+    pub fn release_invocation(&self, index: usize) {
+        self.invocation_free
+            .fetch_or(1u64 << index, Ordering::AcqRel);
+    }
+
+    /// Invocation slots in use.
+    #[must_use]
+    pub fn invocations_used(&self) -> u64 {
+        MAX_INVOCATIONS as u64
+            - u64::from(self.invocation_free.load(Ordering::Relaxed).count_ones())
+    }
+
     /// Next diagnostic identity, or `None` once the space is exhausted.
     ///
     /// Exhaustion refuses creation. A silent wrap would make two objects share
     /// an identity that evidence is expected to distinguish.
-    pub fn next_id(&mut self) -> Option<u64> {
-        if self.next_object_id == u64::MAX {
-            return None;
+    pub fn next_id(&self) -> Option<u64> {
+        use core::sync::atomic::Ordering;
+        let mut current = self.next_object_id.load(Ordering::Relaxed);
+        loop {
+            if current == u64::MAX {
+                return None;
+            }
+            match self.next_object_id.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Some(current),
+                Err(seen) => current = seen,
+            }
         }
-        let id = self.next_object_id;
-        self.next_object_id += 1;
-        Some(id)
     }
 }
 
 /// A control receipt as the interface reports it.
 pub type Receipt = ReceiptRecord;
 
-/// The single lock protecting every kernel object.
-pub static MACHINE: SpinLock<Machine> = SpinLock::new(Machine::new());
+/// The control lock: what protects the tables above.
+pub static MACHINE: BrLock<Machine> = BrLock::new(Machine::new());

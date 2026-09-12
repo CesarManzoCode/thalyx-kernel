@@ -109,6 +109,16 @@ const _: () = assert!(core::mem::size_of::<TrapFrame>() == 176);
 /// the return path stands when it decides whether to exchange `GS`.
 const FRAME_CS_OFFSET: usize = 144;
 const _: () = assert!(core::mem::offset_of!(TrapFrame, cs) == FRAME_CS_OFFSET);
+const FRAME_RIP_OFFSET: usize = 136;
+const _: () = assert!(core::mem::offset_of!(TrapFrame, rip) == FRAME_RIP_OFFSET);
+const FRAME_RFLAGS_OFFSET: usize = 152;
+const _: () = assert!(core::mem::offset_of!(TrapFrame, rflags) == FRAME_RFLAGS_OFFSET);
+const FRAME_SS_OFFSET: usize = 168;
+const _: () = assert!(core::mem::offset_of!(TrapFrame, ss) == FRAME_SS_OFFSET);
+/// RFLAGS bits that make `sysretq` the wrong instruction: RF would resume a
+/// debug fault the kernel never took, and VM is not a state a 64-bit return
+/// may enter.
+const SYSRET_FORBIDDEN_FLAGS: u64 = (1 << 16) | (1 << 17);
 // The entry stub pushes 22 quadwords onto a 16-byte-aligned stack, so the
 // System V requirement that RSP is 16-byte aligned at a `call` holds without a
 // fixup.
@@ -276,13 +286,77 @@ core::arch::global_asm!(
     "cld",
     "mov rdi, rsp",
     "call {syscall_dispatch}",
-    "jmp thalyx_trap_return",
+
+    // The fast return. `sysretq` is two or three times cheaper than `iretq`
+    // on this class of processor, and it is safe exactly when the frame still
+    // describes the return `syscall` set up: to the one user code selector
+    // `IA32_STAR` makes it return to, with the matching stack selector, to a
+    // canonical address, with no flag the instruction must not restore. Each
+    // of those is checked here rather than assumed, and a frame that fails any
+    // of them -- a handler that rewrote the return, a signal-like redirection,
+    // anything that is not a plain return to the caller -- leaves through
+    // `iretq`, which checks everything the processor can check.
+    //
+    // The canonical test is the reason the guard exists at all: `sysretq` with
+    // a non-canonical RIP raises #GP *in ring 0* on Intel parts, on the
+    // kernel stack the return was leaving, which is the classic way a kernel
+    // turns a user-controlled address into a kernel fault. RAX is used as the
+    // scratch because it is restored from the frame a few instructions later.
+    "mov rax, [rsp + {frame_cs}]",
+    "cmp rax, {user_cs}",
+    "jne thalyx_trap_return",
+    "mov rax, [rsp + {frame_ss}]",
+    "cmp rax, {user_ss}",
+    "jne thalyx_trap_return",
+    "mov rax, [rsp + {frame_rflags}]",
+    "test rax, {forbidden_flags}",
+    "jnz thalyx_trap_return",
+    "mov rax, [rsp + {frame_rip}]",
+    "mov rcx, rax",
+    "shl rcx, 16",
+    "sar rcx, 16",
+    "cmp rcx, rax",
+    "jne thalyx_trap_return",
+
+    // Committed. The processor came from ring 3, so the kernel's GS goes back
+    // before the registers do; `sysretq` performs no swap of its own.
+    "swapgs",
+    "pop rax",
+    "pop rbx",
+    "pop rcx",
+    "pop rdx",
+    "pop rsi",
+    "pop rdi",
+    "pop rbp",
+    "pop r8",
+    "pop r9",
+    "pop r10",
+    "pop r11",
+    "pop r12",
+    "pop r13",
+    "pop r14",
+    "pop r15",
+    "add rsp, 16",
+    // RCX and R11 are the instruction's operands, not the caller's registers:
+    // `syscall` destroyed both on entry, so restoring them from the frame's
+    // general-purpose slots and then overwriting them here loses nothing the
+    // caller still owned. They are read from the frame rather than kept from
+    // the pops so that a handler which legitimately changed the return address
+    // or the flags is honoured.
+    "mov rcx, [rsp]",
+    "mov r11, [rsp + 16]",
+    "mov rsp, [rsp + 24]",
+    "sysretq",
 
     trap_dispatch = sym trap_dispatch,
     syscall_dispatch = sym crate::arch::x86_64::syscall::syscall_dispatch,
     user_rsp = const percpu::OFFSET_USER_RSP,
     kernel_rsp = const percpu::OFFSET_KERNEL_RSP,
     frame_cs = const FRAME_CS_OFFSET,
+    frame_rip = const FRAME_RIP_OFFSET,
+    frame_rflags = const FRAME_RFLAGS_OFFSET,
+    frame_ss = const FRAME_SS_OFFSET,
+    forbidden_flags = const SYSRET_FORBIDDEN_FLAGS,
     user_ss = const gdt::USER_DATA as u64,
     user_cs = const gdt::USER_CODE as u64,
     syscall_vector = const SYSCALL_VECTOR,

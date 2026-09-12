@@ -89,13 +89,25 @@ pub struct MemoryObject {
     /// Diagnostic label. A name grants nothing.
     pub label: [u8; 16],
     /// Capability entries naming this object.
-    pub refs: u32,
+    pub refs: core::sync::atomic::AtomicU32,
     /// Invalidation generation published when the object's last mapping was
     /// withdrawn, zero if it was never mapped. An object nothing can reach any
     /// more gives its frames straight back to the pool once every processor
     /// has flushed past this generation, and through the quarantine while one
     /// may not have.
     pub unmapped_at: u64,
+    /// Processors that could be holding a translation of these frames: the
+    /// union, over every mapping ever withdrawn, of the processors the domain
+    /// it was mapped into had run on.
+    ///
+    /// The exact set the reclamation condition is about. "Every online
+    /// processor has flushed past the withdrawal" answers the same question
+    /// with a wider set, and a processor that never ran in any space these
+    /// frames were mapped into holds nothing of them whatever generation it
+    /// last flushed at -- so waiting for it is waiting for nothing, and on a
+    /// machine that no longer interrupts every processor on every unmap it is
+    /// waiting for a while.
+    pub unmapped_cpus: u64,
 }
 
 impl MemoryObject {
@@ -114,8 +126,9 @@ impl MemoryObject {
             writable_maps: 0,
             dma_grants: 0,
             label: [0; 16],
-            refs: 0,
+            refs: core::sync::atomic::AtomicU32::new(0),
             unmapped_at: 0,
+            unmapped_cpus: 0,
         }
     }
 

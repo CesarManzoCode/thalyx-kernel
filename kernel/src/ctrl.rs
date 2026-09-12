@@ -60,6 +60,14 @@ pub struct ControlLog {
     pub pending_reservations: u32,
     /// Capability entries naming this log.
     pub refs: u32,
+    /// Threads that registered a wait for a batch of this log, one bit each.
+    /// A hint for the wake, as an endpoint's receivers are: a bit set names
+    /// a thread to try, and a thread that stopped waiting -- a deadline, a
+    /// cancellation -- is found not to match and its bit dropped. Without it
+    /// every receipt written while the log held a batch walked the whole
+    /// thread table under the control lock, taking the wait lock of every
+    /// blocked thread on the machine to ask whether it was the reader.
+    pub readers: u64,
 }
 
 impl ControlLog {
@@ -80,6 +88,7 @@ impl ControlLog {
             coalesced: 0,
             pending_reservations: 0,
             refs: 0,
+            readers: 0,
         }
     }
 

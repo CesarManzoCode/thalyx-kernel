@@ -102,7 +102,7 @@ pub fn create(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
         "domain={index} name={text} id={} scope={} entry=0x{:x} segments={} image_pages={} \
          image_object={} state=building managed=1",
         machine.domains[index].id,
-        machine.scopes[scope_index as usize].id,
+        scope::table()[scope_index as usize].id(),
         machine.domains[index].entry,
         machine.domains[index].segments,
         machine.domains[index].image_pages,
@@ -174,16 +174,11 @@ pub fn map(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u6
         .position(|record| !record.used)
         .ok_or(status::LIMIT_EXHAUSTED)?;
     let owner_scope = machine.domains[target].owner_scope;
-    if !scope::reserve(&mut machine.scopes, owner_scope, Resource::Metadata, 1) {
+    if !scope::reserve(owner_scope, Resource::Metadata, 1) {
         return Err(status::LIMIT_EXHAUSTED);
     }
-    if !scope::reserve(
-        &mut machine.scopes,
-        owner_scope,
-        Resource::MemoryPages,
-        MAP_TABLE_RESERVE,
-    ) {
-        scope::release(&mut machine.scopes, owner_scope, Resource::Metadata, 1);
+    if !scope::reserve(owner_scope, Resource::MemoryPages, MAP_TABLE_RESERVE) {
+        scope::release(owner_scope, Resource::Metadata, 1);
         return Err(status::LIMIT_EXHAUSTED);
     }
 
@@ -221,13 +216,8 @@ pub fn map(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u6
                 space.unmap(vaddr);
             }
         }
-        scope::release(&mut machine.scopes, owner_scope, Resource::Metadata, 1);
-        scope::release(
-            &mut machine.scopes,
-            owner_scope,
-            Resource::MemoryPages,
-            MAP_TABLE_RESERVE,
-        );
+        scope::release(owner_scope, Resource::Metadata, 1);
+        scope::release(owner_scope, Resource::MemoryPages, MAP_TABLE_RESERVE);
         return Err(match error {
             crate::arch::x86_64::paging::MapError::AlreadyMapped => status::STATE_CONFLICT,
             crate::arch::x86_64::paging::MapError::OutOfMemory => status::LIMIT_EXHAUSTED,
@@ -253,8 +243,10 @@ pub fn map(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u6
     // and reused under the record while the mapping is still installed: a
     // withdrawal would then consult an unrelated grant.
     if memory.grant != crate::obj::NO_GRANT {
-        machine.grants[memory.grant as usize].refs =
-            machine.grants[memory.grant as usize].refs.saturating_add(1);
+        {
+            let mut node = machine.grants.nodes[memory.grant as usize].lock();
+            node.refs = node.refs.saturating_add(1);
+        }
     }
     // The tables the mapping actually took, and the rest of the reserve back.
     let charged_after = machine.allocator().charged(Owner::Domain(target as u16)) as u64;
@@ -262,7 +254,6 @@ pub fn map(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u6
         .saturating_sub(charged_before)
         .min(MAP_TABLE_RESERVE);
     scope::release(
-        &mut machine.scopes,
         owner_scope,
         Resource::MemoryPages,
         MAP_TABLE_RESERVE - taken,
@@ -272,7 +263,9 @@ pub fn map(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u6
     if request.rights & right::MEMORY_WRITE != 0 {
         machine.memories[object].writable_maps += 1;
     }
-    machine.scopes[owner_scope as usize].maps_pending += 1;
+    scope::table()[owner_scope as usize]
+        .maps_pending
+        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
     trace!(
         "mem.mapped",
@@ -309,8 +302,8 @@ pub fn unmap(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64
     if request.reserved0 != 0 {
         return Err(status::INVALID_ARGUMENT);
     }
-    let (target, pages, live, mask) = {
-        let mut machine = MACHINE.lock();
+    let (target, pages, live, mask, memory) = {
+        let mut machine = MACHINE.write();
         let cap = resolve(
             &machine,
             ctx.domain,
@@ -339,28 +332,39 @@ pub fn unmap(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64
         // Every processor this address space has ever been dispatched on, not
         // only the ones inside it at this instant. That is the set an
         // invalidation actually has to reach.
-        let mask = machine.domains[target].cpu_mask;
-        (
-            target,
-            crate::api::memops::withdraw_map(&mut machine, record_index),
-            live,
-            mask,
-        )
+        let mask = crate::tlb::space_mask(target);
+        let (pages, memory) =
+            crate::api::memops::withdraw_map_deferring(&mut machine, record_index);
+        (target, pages, live, mask, memory)
     };
 
-    let ack = crate::tlb::shootdown();
+    // Only the processors that could be holding one of this space's
+    // translations. A processor that has never run in it has nothing to
+    // retire, and making it retire everything it does hold, and waiting for
+    // it, is the cost this used to pay on every unmap.
+    let ack = crate::tlb::shootdown_space(target);
     trace!(
         "mem.unmapped",
         "domain={target} vaddr=0x{:x} pages={pages} active_in_space={live} \
          space_cpu_mask=0x{mask:x} space_cpus={} invalidation_generation={} \
-         acknowledged_cpus={} expected_cpus={} acknowledged={}",
+         acknowledged_cpus={} expected_cpus={} loaded_cpus={} interrupted_cpus={} \
+         acknowledged={}",
         request.vaddr,
         mask.count_ones(),
         ack.generation,
         ack.acknowledged,
         ack.expected,
+        ack.live,
+        ack.interrupted,
         u8::from(!ack.timed_out)
     );
+    // Now that the processors that could hold a translation have acknowledged,
+    // an object nothing else names goes straight back to the pool instead of
+    // through the quarantine.
+    if let Some(memory) = memory {
+        let mut machine = MACHINE.write();
+        crate::api::memops::collect_memory_acked(&mut machine, memory, !ack.timed_out);
+    }
     if ack.timed_out {
         return Err(status::DRAIN_INCOMPLETE);
     }
@@ -393,7 +397,7 @@ pub fn install_cap(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> R
         if request.rights_mask & !source.rights != 0 {
             return Err(status::INSUFFICIENT_RIGHTS);
         }
-        let parent = machine.grants[source.grant as usize];
+        let parent = *machine.grants.nodes[source.grant as usize].lock();
         let deadline = if request.deadline_ns == 0 {
             parent.deadline_ns
         } else {
@@ -416,15 +420,16 @@ pub fn install_cap(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> R
         .ok_or(status::LIMIT_EXHAUSTED)?
     };
 
-    let rights = machine.grants[grant as usize].rights;
+    let rights = machine.grants.nodes[grant as usize].lock().rights;
     if source.object.kind == ObjKind::Endpoint && rights & right::ENDPOINT_RECEIVE != 0 {
         let endpoint = source.object.index as usize;
-        let current = machine.endpoints[endpoint].receiver_domain;
+        let current = machine.endpoints[endpoint].get_mut().receiver_domain;
         if current != u16::MAX && current as usize != target {
             return Err(status::STATE_CONFLICT);
         }
-        machine.endpoints[endpoint].receiver_domain = target as u16;
-        machine.endpoints[endpoint].receiver_generation = machine.domains[target].generation;
+        machine.endpoints[endpoint].get_mut().receiver_domain = target as u16;
+        machine.endpoints[endpoint].get_mut().receiver_generation =
+            machine.domains[target].generation;
     }
 
     let handle = crate::api::cap_install(
@@ -443,7 +448,7 @@ pub fn install_cap(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> R
         request.target_slot,
         source.object.kind.name(),
         crate::api::object_id(machine, source.object),
-        machine.grants[grant as usize].id
+        machine.grants.nodes[grant as usize].lock().id
     );
     Ok(handle)
 }
@@ -494,11 +499,11 @@ pub fn add_thread(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Re
         "thread.created",
         "domain={target} name={} thread={thread} id={} entry=0x{:x} stack_top=0x{:x}",
         machine.domains[target].name_str(),
-        machine.threads[thread].id,
+        crate::thread::get(thread).control().id,
         request.entry,
         request.stack_top
     );
-    Ok(machine.threads[thread].id)
+    Ok(crate::thread::get(thread).control().id)
 }
 
 /// Installs the channel a fault of this domain is reported on.
@@ -531,11 +536,15 @@ pub fn set_fault_channel(
         ctx.now,
     )?;
     let index = endpoint.object.index as usize;
-    if machine.endpoints[index].reserved_cells + 1 >= machine.endpoints[index].capacity {
-        return Err(status::LIMIT_EXHAUSTED);
-    }
-    machine.endpoints[index].reserved_cells += 1;
-    machine.grants[endpoint.grant as usize].refs += 1;
+    let (endpoint_id, reserved_cells) = {
+        let slot = machine.endpoints[index].get_mut();
+        if slot.reserved_cells + 1 >= slot.capacity {
+            return Err(status::LIMIT_EXHAUSTED);
+        }
+        slot.reserved_cells += 1;
+        (slot.id, slot.reserved_cells)
+    };
+    machine.grants.nodes[endpoint.grant as usize].lock().refs += 1;
     machine.domains[target].fault_endpoint = Some(endpoint.object);
     machine.domains[target].fault_grant = endpoint.grant;
     machine.domains[target].fault_facet = endpoint.facet;
@@ -544,9 +553,9 @@ pub fn set_fault_channel(
         "domain.fault_channel",
         "domain={target} name={} endpoint={} facet={} reserved_cells={}",
         machine.domains[target].name_str(),
-        machine.endpoints[index].id,
+        endpoint_id,
         endpoint.facet,
-        machine.endpoints[index].reserved_cells
+        reserved_cells
     );
     Ok(0)
 }
@@ -564,7 +573,7 @@ pub fn activate(machine: &mut Machine, ctx: &Ctx) -> Result<u64, i64> {
                 machine.domains[target].id,
                 machine.domains[target].entry,
                 machine.domains[target].thread_count(),
-                machine.scopes[machine.domains[target].owner_scope as usize].id
+                scope::table()[machine.domains[target].owner_scope as usize].id()
             );
             Ok(machine.domains[target].id)
         }
@@ -600,9 +609,9 @@ pub fn query(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<
         state: domain.state.abi(),
         threads: domain.thread_count() as u32,
         faults: domain.faults,
-        space_cpu_mask: domain.cpu_mask as u32,
+        space_cpu_mask: crate::tlb::space_mask(target) as u32,
         domain_id: domain.id,
-        owner_scope_id: machine.scopes[domain.owner_scope as usize].id,
+        owner_scope_id: crate::scope::table()[domain.owner_scope as usize].id(),
         exit_code: domain.exit_code,
         fault_vector: fault.vector,
         fault_rip: fault.rip,

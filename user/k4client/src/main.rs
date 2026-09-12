@@ -188,6 +188,14 @@ impl Client {
                 k2::note(note::CLIENT_RESULT, u64::from(result_outcome::UNKNOWN));
                 None
             }
+            // The control plane had no cell left to cover this admission, so
+            // the kernel refused the call before it did anything. That is what
+            // the lost-control scenario is for; it is a named refusal, not a
+            // surprise.
+            Err(status::LIMIT_EXHAUSTED) => {
+                k2::note(note::CONTROL_FULL, (-status::LIMIT_EXHAUSTED) as u64);
+                None
+            }
             Err(code) => {
                 k2::note(report::UNEXPECTED, code as u64);
                 None

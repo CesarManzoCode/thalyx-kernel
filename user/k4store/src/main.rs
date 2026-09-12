@@ -268,6 +268,27 @@ struct Service {
 }
 
 impl Service {
+    /// Appends one diagnostic note of this service to its control plane, and
+    /// only while the plane has ordinary room for it.
+    ///
+    /// A note says what this service did, for a reader that drains the log. It
+    /// is not the evidence of anything: the receipts the kernel writes are. So
+    /// when nobody is draining and the log is full, writing is not a way to be
+    /// heard -- the note cannot be kept, and the attempt would make the kernel
+    /// declare a hole in coverage that the work itself did not cause. What such
+    /// a run has to show is the refusal of the admissions the receipts covered,
+    /// not this.
+    fn service_note(&self, code: u64, value: u64) {
+        let room = k2::log_query(self.log).map_or(0, |info| {
+            info.capacity
+                .saturating_sub(info.reserved_cells)
+                .saturating_sub(info.used)
+        });
+        if room > 0 {
+            let _ = k2::log_append(self.log, receipt_kind::SERVICE_NOTE, code, value, 0);
+        }
+    }
+
     /// Tells the engine which staged digests are still nameable.
     ///
     /// Two things are: what a live workspace has bound, which is content
@@ -874,13 +895,10 @@ impl Service {
             return refused(store_status::EFFECT_REFUSED);
         }
         k2::note(note::EFFECT_ADMITTED, invocation);
-        let _ = k2::log_append(
-            self.log,
-            receipt_kind::SERVICE_NOTE,
-            0x4B34_0001,
-            request.request_sequence,
-            0,
-        );
+        // Before the publication: this one says the service began something,
+        // which is what the effect admission covers and what a reader needs to
+        // see a publication that did not finish.
+        self.service_note(0x4B34_0001, request.request_sequence);
 
         match self.store.publish(
             principal,
@@ -912,13 +930,7 @@ impl Service {
                 // itself a commit -- the kernel marks the outcome `COMMITTED`
                 // when a responder answers -- so answering is the discharge,
                 // and it is the only discharge that carries the answer.
-                let _ = k2::log_append(
-                    self.log,
-                    receipt_kind::SERVICE_NOTE,
-                    0x4B34_0002,
-                    generation,
-                    0,
-                );
+                self.service_note(0x4B34_0002, generation);
                 if after == Fault::LoseResponse {
                     self.store.demanded = Some(Fault::LoseResponse);
                 }
@@ -1083,8 +1095,12 @@ fn run() -> ! {
         configuration.instance | (configuration.leg << 8) | (configuration.scenario << 16),
     );
 
+    let mut store = Store::new(Disk::new(disk_endpoint));
+    // The service's own view of the plane that records what it does, so it can
+    // decline to write what it could not then account for.
+    store.control_log = log;
     let mut service_state = Service {
-        store: Store::new(Disk::new(disk_endpoint)),
+        store,
         workspaces: [Workspace::default(); MAX_WORKSPACES],
         candidates: [[0u8; 32]; state::MAX_PRINCIPALS],
         offered: [[[0u8; 32]; OFFERED]; state::MAX_PRINCIPALS],

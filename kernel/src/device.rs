@@ -167,7 +167,7 @@ pub struct Device {
     /// Functions in that group.
     pub group_members: u32,
     /// Capability entries naming this device.
-    pub refs: u32,
+    pub refs: core::sync::atomic::AtomicU32,
 }
 
 impl Device {
@@ -205,7 +205,7 @@ impl Device {
             dma_address_bits: 64,
             isolation_group: 0,
             group_members: 1,
-            refs: 0,
+            refs: core::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -412,7 +412,7 @@ const INTERRUPT_RECORD_LIMIT: u32 = 8;
 /// that arrives late, after the session it belonged to ended, must not be
 /// attributed to the session that replaced it.
 pub fn on_interrupt(vector: u8) {
-    let mut machine = MACHINE.lock();
+    let mut machine = MACHINE.write();
     let mut delivered = false;
     for index in 0..MAX_IRQ_BINDINGS {
         let binding = machine.irqs[index];
@@ -667,7 +667,7 @@ pub unsafe fn read_transport_features(common: u64) -> (bool, bool) {
 
 /// Reports one assigned device on the diagnostic plane.
 pub fn report(index: usize) {
-    let machine = MACHINE.lock();
+    let machine = MACHINE.write();
     let device = &machine.devices[index];
     if !device.used {
         return;
@@ -747,7 +747,7 @@ fn map_kernel_window(phys: u64, pages: u64) -> Option<u64> {
     // SAFETY: as above.
     unsafe { NEXT_MMIO_PAGE = first + pages };
     let vaddr = crate::layout::MMIO_AREA + first * PAGE_SIZE;
-    let mut guard = MACHINE.lock();
+    let mut guard = MACHINE.write();
     let machine = &mut *guard;
     for page in 0..pages {
         let space = machine.kernel_space.as_mut()?;
@@ -776,7 +776,7 @@ pub fn discover(platform: &crate::acpi::Platform, sponsor: ScopeId) {
         return;
     }
     {
-        let mut guard = MACHINE.lock();
+        let mut guard = MACHINE.write();
         let machine = &mut *guard;
         machine.iommu_described = platform.dmar_present;
         machine.iommu_translating = false;
@@ -816,7 +816,7 @@ pub fn discover(platform: &crate::acpi::Platform, sponsor: ScopeId) {
                 .min(platform.ecam_bus_end),
         )
     };
-    MACHINE.lock().ecam = Some(ecam);
+    MACHINE.write().ecam = Some(ecam);
     let inventory = pci::enumerate(&ecam, 0);
     event!(
         "pci.enumerated",
@@ -898,14 +898,9 @@ fn assign(
         .filter(|other| other.bus() == function.bus() && other.slot() == function.slot())
         .count() as u32;
 
-    let mut machine = MACHINE.lock();
+    let mut machine = MACHINE.write();
     let index = machine.devices.iter().position(|device| !device.used)?;
-    if !crate::scope::reserve(
-        &mut machine.scopes,
-        sponsor,
-        crate::scope::Resource::Metadata,
-        1,
-    ) {
+    if !crate::scope::reserve(sponsor, crate::scope::Resource::Metadata, 1) {
         return None;
     }
     let id = machine.next_id()?;
@@ -954,7 +949,7 @@ fn assign(
 
 /// Everything the run holds about devices, once nothing is running.
 pub fn summarize() {
-    let machine = MACHINE.lock();
+    let machine = MACHINE.write();
     let assigned = machine.devices.iter().filter(|device| device.used).count();
     let grants = machine.dma_grants.iter().filter(|grant| grant.used).count();
     let maps = machine.device_maps.iter().filter(|map| map.used).count();

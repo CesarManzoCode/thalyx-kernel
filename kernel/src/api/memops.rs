@@ -63,7 +63,7 @@ pub fn create(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
         return Err(status::INVALID_ARGUMENT);
     }
     let sponsor = ctx.cap.object.index;
-    if machine.scopes[sponsor as usize].state != scope::State::Open {
+    if scope::table()[sponsor as usize].state() != scope::State::Open {
         return Err(status::SCOPE_CLOSED);
     }
 
@@ -72,16 +72,11 @@ pub fn create(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
         .iter()
         .position(|object| object.state == State::Empty)
         .ok_or(status::LIMIT_EXHAUSTED)?;
-    if !scope::reserve(&mut machine.scopes, sponsor, Resource::Metadata, 1) {
+    if !scope::reserve(sponsor, Resource::Metadata, 1) {
         return Err(status::LIMIT_EXHAUSTED);
     }
-    if !scope::reserve(
-        &mut machine.scopes,
-        sponsor,
-        Resource::MemoryPages,
-        request.pages,
-    ) {
-        scope::release(&mut machine.scopes, sponsor, Resource::Metadata, 1);
+    if !scope::reserve(sponsor, Resource::MemoryPages, request.pages) {
+        scope::release(sponsor, Resource::Metadata, 1);
         return Err(status::LIMIT_EXHAUSTED);
     }
     let base = match machine
@@ -90,13 +85,8 @@ pub fn create(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
     {
         Ok(base) => base,
         Err(_) => {
-            scope::release(&mut machine.scopes, sponsor, Resource::Metadata, 1);
-            scope::release(
-                &mut machine.scopes,
-                sponsor,
-                Resource::MemoryPages,
-                request.pages,
-            );
+            scope::release(sponsor, Resource::Metadata, 1);
+            scope::release(sponsor, Resource::MemoryPages, request.pages);
             return Err(status::LIMIT_EXHAUSTED);
         }
     };
@@ -117,8 +107,9 @@ pub fn create(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
         writable_maps: 0,
         dma_grants: 0,
         label: request.label,
-        refs: 0,
+        refs: core::sync::atomic::AtomicU32::new(0),
         unmapped_at: 0,
+        unmapped_cpus: 0,
     };
 
     let object = ObjRef::new(ObjKind::Memory, index as u16, generation);
@@ -150,7 +141,7 @@ pub fn create(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
         machine.memories[index].label_str(),
         request.pages,
         request.max_rights,
-        machine.scopes[sponsor as usize].id,
+        scope::table()[sponsor as usize].id(),
         base.addr()
     );
     Ok(handle)
@@ -167,7 +158,7 @@ pub fn query(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<
         writable_maps: object.writable_maps,
         pages: u64::from(object.pages),
         object_id: object.id,
-        sponsor_scope_id: machine.scopes[object.sponsor as usize].id,
+        sponsor_scope_id: scope::table()[object.sponsor as usize].id(),
         label: object.label,
     };
     begin_response(staging, ctx.operation);
@@ -303,17 +294,8 @@ pub fn read(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u
 /// only the second one is about the race this mechanism exists for.
 #[must_use]
 pub fn cpus_in_space(machine: &Machine, cr3: u64) -> u32 {
-    let mut count = 0;
-    for cpu in 0..crate::limits::MAX_CPUS {
-        let slot = machine.cpus[cpu];
-        if !slot.online || slot.current == usize::MAX || slot.current >= machine.threads.len() {
-            continue;
-        }
-        if machine.threads[slot.current].cr3 == cr3 {
-            count += 1;
-        }
-    }
-    count
+    let _ = machine;
+    crate::sched::cpus_in_space(cr3)
 }
 
 /// Withdraws one mapping, invalidates it here and publishes it everywhere.
@@ -333,9 +315,26 @@ pub fn cpus_in_space(machine: &Machine, cr3: u64) -> u32 {
 /// rest rely on the frames staying in quarantine until every processor has
 /// caught up.
 pub fn withdraw_map(machine: &mut Machine, map_index: usize) -> u32 {
+    let (removed, memory) = withdraw_map_deferring(machine, map_index);
+    if let Some(memory) = memory {
+        collect_memory(machine, memory);
+    }
+    removed
+}
+
+/// Withdraws one mapping and names the object to collect, without collecting
+/// it.
+///
+/// For the caller that is about to wait for the invalidation it just
+/// published: an object collected before that wait can only be *deferred*,
+/// because nothing has acknowledged anything yet, and its frames go to the
+/// quarantine to be found again later. Collecting after the acknowledgement
+/// puts them straight back in the pool, which is what the ordinary case
+/// deserves and what the allocator's next contiguous request needs.
+pub fn withdraw_map_deferring(machine: &mut Machine, map_index: usize) -> (u32, Option<usize>) {
     let record = machine.maps[map_index];
     if !record.used {
-        return 0;
+        return (0, None);
     }
     let domain = record.domain as usize;
     let active = cpu::read_cr3();
@@ -373,31 +372,45 @@ pub fn withdraw_map(machine: &mut Machine, map_index: usize) -> u32 {
         }
     }
     let scope = record.scope;
-    machine.scopes[scope as usize].maps_pending = machine.scopes[scope as usize]
-        .maps_pending
-        .saturating_sub(1);
-    scope::release(&mut machine.scopes, scope, Resource::Metadata, 1);
+    scope::decrement(&scope::table()[scope as usize].maps_pending);
+    scope::release(scope, Resource::Metadata, 1);
     let grant = record.grant;
     machine.maps[map_index] = crate::memobj::MapRecord::empty();
     // The reference the mapping held on its authorising grant. Releasing it
     // here, after the record is gone, is what lets a node whose last handle was
     // closed while the mapping stood be collected now.
     if grant != crate::obj::NO_GRANT {
-        machine.grants[grant as usize].refs = machine.grants[grant as usize].refs.saturating_sub(1);
+        {
+            let mut node = machine.grants.nodes[grant as usize].lock();
+            node.refs = node.refs.saturating_sub(1);
+        }
         crate::api::collect_grant(machine, grant);
     }
     if removed != 0 {
         let published = crate::tlb::publish();
-        // Recorded on the object, so a later release knows whether every
-        // processor has flushed past the withdrawal of its last mapping.
+        // Recorded on the object, so a later release knows whether the
+        // processors that could hold one of these translations have flushed
+        // past the withdrawal. The set is the domain's, plus this processor,
+        // which has just invalidated the entries itself.
         if same_object {
             machine.memories[memory].unmapped_at = published;
+            // Every processor that could still hold one of these translations.
+            // Not this one: it removed the entries page by page as it went,
+            // which is the same retirement a flush would perform and a great
+            // deal cheaper than performing it. A processor that has the space
+            // loaded is exactly a processor whose bit is set, so "the entries
+            // were invalidated here" and "this processor is in the set" are
+            // the same claim, and the one place they could disagree -- an
+            // unmapper that is not executing in the space it is unmapping --
+            // is the one where nothing was invalidated here and nothing is
+            // held here either.
+            let mine = 1u64 << crate::percpu::index();
+            let live = crate::tlb::live_mask(domain);
+            machine.memories[memory].unmapped_cpus |=
+                (live & !mine) | if current { 0 } else { live & mine };
         }
     }
-    if same_object {
-        collect_memory(machine, memory);
-    }
-    removed
+    (removed, if same_object { Some(memory) } else { None })
 }
 
 /// Releases a memory object nothing can reach any more.
@@ -414,11 +427,24 @@ pub fn withdraw_map(machine: &mut Machine, map_index: usize) -> u32 {
 /// it: retirement reported it as retained, and the slot of a retired scope is
 /// not one this can safely credit.
 pub fn collect_memory(machine: &mut Machine, index: usize) {
+    collect_memory_acked(machine, index, false);
+}
+
+/// Releases a memory object nothing can reach any more, `acknowledged` saying
+/// whether the withdrawal of its last mapping has already been acknowledged by
+/// every processor that could have held one of its translations.
+///
+/// That is the condition the frames actually need. The generation comparison
+/// below answers the same question the other way round -- has *every* online
+/// processor flushed past it -- which is a sufficient condition and not a
+/// necessary one: a processor that never ran in the space the object was
+/// mapped into holds nothing of it whatever generation it last flushed at.
+pub fn collect_memory_acked(machine: &mut Machine, index: usize, acknowledged: bool) {
     let Some(object) = machine.memories.get(index) else {
         return;
     };
     if object.state == State::Empty
-        || object.refs != 0
+        || object.refs.load(core::sync::atomic::Ordering::Relaxed) != 0
         || object.map_count != 0
         || object.dma_grants != 0
     {
@@ -426,20 +452,30 @@ pub fn collect_memory(machine: &mut Machine, index: usize) {
     }
     let sponsor = object.sponsor;
     if !matches!(
-        machine.scopes[sponsor as usize].state,
+        scope::table()[sponsor as usize].state(),
         scope::State::Open | scope::State::Fenced | scope::State::Quiescent
     ) {
         return;
     }
-    let (base, pages, generation, id, state, unmapped_at) = (
+    let (base, pages, generation, id, state, unmapped_at, unmapped_cpus) = (
         object.base,
         u64::from(object.pages),
         object.generation,
         object.id,
         object.state,
         object.unmapped_at,
+        object.unmapped_cpus,
     );
-    let immediate = unmapped_at == 0 || crate::tlb::safe_generation() >= unmapped_at;
+    let immediate = acknowledged
+        || unmapped_at == 0
+        || crate::tlb::flushed_by(unmapped_cpus, unmapped_at)
+        || crate::tlb::safe_generation() >= unmapped_at;
+    let stamp = if immediate {
+        0
+    } else {
+        // One generation for the object's whole run of frames.
+        crate::tlb::retire_stamp()
+    };
     for page in 0..pages {
         let frame = Frame::containing(base.addr() + page * PAGE_SIZE);
         if immediate {
@@ -450,11 +486,13 @@ pub fn collect_memory(machine: &mut Machine, index: usize) {
             // them.
             unsafe { machine.allocator().release(frame, Owner::Scope(sponsor)) };
         } else {
-            machine.allocator().retire(frame, Owner::Scope(sponsor));
+            machine
+                .allocator()
+                .retire_at(frame, Owner::Scope(sponsor), stamp);
         }
     }
-    scope::release(&mut machine.scopes, sponsor, Resource::MemoryPages, pages);
-    scope::release(&mut machine.scopes, sponsor, Resource::Metadata, 1);
+    scope::release(sponsor, Resource::MemoryPages, pages);
+    scope::release(sponsor, Resource::Metadata, 1);
     machine.memories[index] = MemoryObject::empty();
     machine.memories[index].generation = generation;
     trace!(
@@ -462,7 +500,7 @@ pub fn collect_memory(machine: &mut Machine, index: usize) {
         "object={id} pages={pages} state_at_release={} sponsor_scope={} reason=unreferenced \
          release={}",
         state.name(),
-        machine.scopes[sponsor as usize].id,
+        scope::table()[sponsor as usize].id(),
         if immediate { "immediate" } else { "deferred" }
     );
 }
@@ -477,7 +515,7 @@ fn describe(machine: &Machine, index: usize) -> MemoryInfo {
         writable_maps: object.writable_maps,
         pages: u64::from(object.pages),
         object_id: object.id,
-        sponsor_scope_id: machine.scopes[object.sponsor as usize].id,
+        sponsor_scope_id: scope::table()[object.sponsor as usize].id(),
         label: object.label,
     }
 }
@@ -503,7 +541,7 @@ fn describe(machine: &Machine, index: usize) -> MemoryInfo {
 /// finishes the transition; declaring the bytes immutable is not.
 pub fn seal(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64> {
     let (index, id, generation, withdrawn, pages, live, mask) = {
-        let mut machine = MACHINE.lock();
+        let mut machine = MACHINE.write();
         let mut writers = [false; crate::state::MAX_DOMAINS];
         let cap = resolve(
             &machine,
@@ -581,7 +619,7 @@ pub fn seal(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
             if let Some(space) = machine.domains[domain].space.as_ref() {
                 live += cpus_in_space(&machine, space.cr3());
             }
-            mask |= machine.domains[domain].cpu_mask;
+            mask |= crate::tlb::space_mask(domain);
         }
         (index, id, generation, withdrawn, pages, live, mask)
     };
@@ -589,7 +627,7 @@ pub fn seal(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
     // No lock is held here, which is the point.
     let ack = crate::tlb::shootdown();
 
-    let mut machine = MACHINE.lock();
+    let mut machine = MACHINE.write();
     if machine.memories[index].generation != generation
         || machine.memories[index].state == State::Empty
     {

@@ -53,6 +53,7 @@ mod smp;
 mod state;
 mod sync;
 mod syscall;
+mod thread;
 mod time;
 mod tlb;
 mod trap;

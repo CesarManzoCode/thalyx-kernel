@@ -16,7 +16,9 @@ use thalyx_abi::generated::{
 
 use crate::api::{BODY, Ctx, begin_response, resolve};
 use crate::event;
-use crate::state::{MACHINE, Machine, ThreadState, Wait};
+use crate::sched::WakeHint;
+use crate::state::{MACHINE, Machine, Wait};
+use crate::thread;
 use crate::ucopy::Staging;
 
 /// Receipts one read carries: the interface's batch.
@@ -39,7 +41,7 @@ pub fn read(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
     let mut final_pass = false;
     loop {
         {
-            let mut machine = MACHINE.lock();
+            let mut machine = MACHINE.write();
             let now = crate::api::now_ns();
             let cap = resolve(
                 &machine,
@@ -51,12 +53,12 @@ pub fn read(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
             )?;
             let index = cap.object.index as usize;
             let mut records = [ReceiptRecord::zeroed(); BATCH];
-            let count = machine.logs[index].read(&mut records);
+            let count = machine.logs[index].get_mut().read(&mut records);
             if count >= BATCH || ctx.deadline == 0 || final_pass || now >= ctx.deadline {
                 let result = LogReadResult {
                     count: count as u32,
-                    lost: machine.logs[index].lost,
-                    next_sequence: machine.logs[index].next_sequence,
+                    lost: machine.logs[index].get_mut().lost,
+                    next_sequence: machine.logs[index].get_mut().next_sequence,
                     records,
                 };
                 drop(machine);
@@ -67,17 +69,15 @@ pub fn read(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
             if ctx.flags & thalyx_abi::generated::flag::NONBLOCKING != 0 {
                 return Err(status::WOULD_BLOCK);
             }
-            let thread = ctx.thread;
-            machine.threads[thread].wait = Wait::Log(index as u16, cap.object.generation);
-            machine.threads[thread].wait_deadline_ns = ctx.deadline;
-            machine.threads[thread].wake_status = status::OK;
-            machine.threads[thread].state = ThreadState::Blocked;
+            thread::prepare_wait(
+                ctx.thread,
+                Wait::Log(index as u16, cap.object.generation),
+                ctx.deadline,
+            );
+            machine.logs[index].get_mut().readers |= 1u64 << ctx.thread;
         }
         crate::sched::block_current();
-        let mut machine = MACHINE.lock();
-        let woken = machine.threads[ctx.thread].wake_status;
-        machine.threads[ctx.thread].wake_status = status::OK;
-        drop(machine);
+        let (woken, _) = thread::take_wake_status(ctx.thread);
         match woken {
             status::OK => {}
             // The deadline is an answer, not a failure: what the log holds at
@@ -89,20 +89,25 @@ pub fn read(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
 }
 
 /// Wakes a thread waiting on `index`, once the log holds a full batch for it.
-pub fn wake_reader(machine: &mut Machine, index: usize, generation: u32) {
-    if machine.logs[index].count < BATCH {
-        return;
-    }
-    for thread in 0..machine.threads.len() {
-        if machine.threads[thread].state != ThreadState::Blocked {
-            continue;
+pub fn wake_reader(machine: &Machine, index: usize, generation: u32) {
+    let mut waiting = {
+        let log = machine.logs[index].lock();
+        if log.count < BATCH {
+            return;
         }
-        if machine.threads[thread].wait == Wait::Log(index as u16, generation) {
-            machine.threads[thread].wait = Wait::None;
-            machine.threads[thread].wait_deadline_ns = 0;
-            machine.threads[thread].wake_status = status::OK;
-            machine.threads[thread].state = ThreadState::Ready;
-            crate::sched::kick_idle(machine);
+        log.readers
+    };
+    while waiting != 0 {
+        let thread = waiting.trailing_zeros() as usize;
+        waiting &= waiting - 1;
+        machine.logs[index].lock().readers &= !(1u64 << thread);
+        if thread::defer_wake_if(
+            thread,
+            |record| record.wait == Wait::Log(index as u16, generation),
+            status::OK,
+            0,
+            WakeHint::Any,
+        ) {
             return;
         }
     }
@@ -114,7 +119,7 @@ pub fn append(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
     if request.reserved0 != 0 {
         return Err(status::INVALID_ARGUMENT);
     }
-    let scope = machine.threads[ctx.thread].effective_scope;
+    let scope = thread::get(ctx.thread).effective_scope();
     let claimed = request.claimed_origin_domain_id;
     let real = machine.domains[ctx.domain].id;
     if claimed != 0 && claimed != real {
@@ -134,9 +139,9 @@ pub fn append(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
         scope,
         u64::from(request.kind),
         0,
-        machine.threads[ctx.thread]
-            .bound_invocation
-            .map_or(0, |(index, _)| machine.invocations[index as usize].id),
+        thread::get(ctx.thread).bound().map_or(0, |(index, _)| {
+            machine.invocations[index as usize].lock().id
+        }),
         status::OK,
         request.a,
         request.b,
@@ -152,14 +157,16 @@ pub fn append(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
 pub fn acknowledge(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u64, i64> {
     let request: LogAckRequest = staging.read(BODY);
     let index = ctx.cap.object.index as usize;
-    let dropped = machine.logs[index].acknowledge(request.through_sequence);
+    let dropped = machine.logs[index]
+        .get_mut()
+        .acknowledge(request.through_sequence);
     Ok(dropped as u64)
 }
 
 /// Reports capacity, reservation and loss.
 pub fn query(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u64, i64> {
     let index = ctx.cap.object.index as usize;
-    let log = &machine.logs[index];
+    let log = &machine.logs[index].get_mut();
     let info = LogInfo {
         capacity: crate::limits::CONTROL_LOG_CAPACITY as u32,
         reserved_cells: crate::limits::CONTROL_LOG_RESERVED as u32,

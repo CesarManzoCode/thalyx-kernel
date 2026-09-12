@@ -18,6 +18,7 @@
 //! A commit whose objects are not all present is not adopted and its prepare is
 //! aborted with the reason that says why.
 
+use thalyx_abi::generated::receipt_kind;
 use thalyx_user_k4fmt as k4;
 use thalyx_user_k4fmt::Pod;
 use thalyx_user_k4fmt::pkg::note;
@@ -203,6 +204,9 @@ pub struct Store {
     /// refused, and the run would carry on writing after the point it was
     /// supposed to be cut at.
     pub demanded: Option<Fault>,
+    /// The control log this service's admissions are recorded in, or zero
+    /// before the loop hands it over.
+    pub control_log: u64,
 
     pub uuid: [u8; 16],
     pub store_epoch: u64,
@@ -269,11 +273,16 @@ fn absolute(index: u64) -> u64 {
     geometry::STORE_BASE_BLOCK + index
 }
 
+/// Ordinary control-log cells the commit record and its flush need between
+/// them, which is the pair that must not be torn.
+const COMMIT_CELLS: u32 = 2;
+
 impl Store {
     pub fn new(disk: Disk) -> Self {
         Self {
             disk,
             harness: Harness::default(),
+            control_log: 0,
             demanded: None,
             uuid: [0u8; 16],
             store_epoch: 0,
@@ -387,12 +396,63 @@ impl Store {
             | fault_mode::TEAR_WRITE
             | fault_mode::IO_ERROR
             | fault_mode::REORDER => Fault::Write(self.harness.mode),
+            fault_mode::LOSE_CONTROL => {
+                self.lose_control_plane();
+                Fault::None
+            }
             _ => Fault::None,
         };
         if let Fault::Stop | Fault::Kill | Fault::LoseResponse = decided {
             self.demanded = Some(decided);
         }
         decided
+    }
+
+    /// Fills the control plane's ordinary cells with this service's own notes
+    /// and leaves none, so the next covered admission meets a full log.
+    ///
+    /// Harness only, and marked as such: the scenario is that the auditor has
+    /// stopped reading and the plane fills under the run's own admissions
+    /// while a publication is in flight. Which admission met the full log used
+    /// to be decided by a race -- the supervisor filling the log from outside
+    /// against the clients consuming it -- and the case showed a different
+    /// thing each run: a log that never filled, a caller refused before it
+    /// had prepared anything, a commit on the medium whose flush was the
+    /// admission refused. Filled here, at the point the directive names, the
+    /// state is the one the scenario is about: a preparation durable, and a
+    /// service that cannot say whether what it prepared was published.
+    ///
+    /// Nothing is lost by the fill. A full plane is not an overrun one: the
+    /// fill stops at the room the plane reports, not at the refusal that would
+    /// count a loss, and what the kernel then refuses is the admission a cell
+    /// could not be reserved for.
+    fn lose_control_plane(&mut self) {
+        if self.control_log == 0 {
+            return;
+        }
+        let mut filled = 0u64;
+        while let Ok(info) = k2::log_query(self.control_log) {
+            let room = info
+                .capacity
+                .saturating_sub(info.reserved_cells)
+                .saturating_sub(info.used);
+            if room == 0 {
+                break;
+            }
+            if k2::log_append(
+                self.control_log,
+                receipt_kind::SERVICE_NOTE,
+                0x4B34_F111,
+                filled,
+                0,
+            )
+            .is_err()
+            {
+                break;
+            }
+            filled += 1;
+        }
+        k2::note(note::CONTROL_FILLED, filled);
     }
 
     // -- the medium ----------------------------------------------------------
@@ -1600,6 +1660,24 @@ impl Store {
             Fault::Stop | Fault::Kill => return Err(store_status::UNAVAILABLE),
             _ => fault_mode::NONE,
         };
+        // The commit record and the flush that publishes it are two more
+        // admissions the control plane has to cover, and they are the two that
+        // must not be separated: a commit on the medium that the flush never
+        // published is a version this service can never claim, and a reader of
+        // its log would have to guess. If the plane cannot cover both, nothing
+        // is written; what the caller is told is then what the preparation's
+        // own state says, which is `UNKNOWN` while a preparation is durable
+        // and unresolved.
+        if self.control_log != 0 {
+            let room = k2::log_query(self.control_log).map_or(0, |info| {
+                info.capacity
+                    .saturating_sub(info.reserved_cells)
+                    .saturating_sub(info.used)
+            });
+            if room < COMMIT_CELLS {
+                return Err(store_status::UNAVAILABLE);
+            }
+        }
         let new_generation = self.published_generation + 1;
         let commit = CommitRecord {
             prepare_sequence,

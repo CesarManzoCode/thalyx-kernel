@@ -69,8 +69,19 @@ static SINK: SpinLock<Sink> = SpinLock::new(Sink {
 
 /// Whether trace records are written. Summaries always are.
 static TRACE: AtomicBool = AtomicBool::new(true);
-/// Trace records withheld while tracing was off.
-static WITHHELD: AtomicU64 = AtomicU64::new(0);
+/// Trace records withheld while tracing was off, counted by the processor
+/// that withheld them.
+///
+/// One word for the machine was a line every processor wrote on every
+/// withheld record, and the hot paths withhold four or five per IPC round
+/// trip, most of them with the control lock held: the count of records not
+/// written was itself a cache line handed between processors as often as
+/// the lock was.
+#[repr(C, align(64))]
+struct Withheld(AtomicU64);
+
+static WITHHELD: [Withheld; crate::limits::MAX_CPUS] =
+    [const { Withheld(AtomicU64::new(0)) }; crate::limits::MAX_CPUS];
 
 /// A writer that counts what it writes, so the plane's cost is the bytes it
 /// actually sent and not an estimate from the format string.
@@ -117,7 +128,12 @@ pub fn trace_enabled() -> bool {
 /// Counts a trace record that was not written. The [`trace!`](crate::trace)
 /// macro calls this instead of building the record's arguments.
 pub fn withhold() {
-    WITHHELD.fetch_add(1, Ordering::Relaxed);
+    // Every path that can trace runs after its processor installed its
+    // per-processor block: a written record takes the sink's lock, whose
+    // statistics already read the block, so a withheld one may too.
+    WITHHELD[crate::percpu::index()]
+        .0
+        .fetch_add(1, Ordering::Relaxed);
 }
 
 /// Emits one record. Prefer the [`event!`](crate::event) macro.
@@ -185,7 +201,10 @@ pub fn summary() {
     } else {
         ((u128::from(cycles) * 1_000_000_000u128) / u128::from(hz)) as u64
     };
-    let withheld = WITHHELD.load(Ordering::Relaxed);
+    let withheld: u64 = WITHHELD
+        .iter()
+        .map(|cpu| cpu.0.load(Ordering::Relaxed))
+        .sum();
     crate::event!(
         "diag.summary",
         "records={records} bytes={bytes} write_cycles={cycles} write_ns={ns} tsc_hz={hz} \

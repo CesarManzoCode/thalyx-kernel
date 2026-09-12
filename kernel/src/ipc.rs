@@ -29,12 +29,8 @@ pub const NO_MESSAGE: u16 = u16::MAX;
 
 /// A bounded queue with one owner, an epoch and explicit facets.
 pub struct Endpoint {
-    /// Whether the slot is in use.
-    pub used: bool,
     /// Whether the endpoint still admits messages.
     pub open: bool,
-    /// Generation of this table slot.
-    pub generation: u32,
     /// Diagnostic identity.
     pub id: u64,
     /// Session epoch. Restarting a service produces a new endpoint and a new
@@ -70,8 +66,15 @@ pub struct Endpoint {
     pub delivered: u64,
     /// Diagnostic label.
     pub label: [u8; 16],
-    /// Capability entries naming this endpoint.
-    pub refs: u32,
+    /// Threads believed to be blocked waiting to receive here, one bit each.
+    ///
+    /// A hint and only a hint: a wake still checks, under the thread's own
+    /// lock, that the thread is blocked on exactly this endpoint and this
+    /// generation, so a stale bit wakes nobody and a missing one cannot
+    /// happen -- the bit is set under the same lock that registers the wait.
+    /// What it replaces is a walk of the whole thread table on every message
+    /// admitted.
+    pub receivers: u64,
 }
 
 impl Endpoint {
@@ -79,9 +82,7 @@ impl Endpoint {
     #[must_use]
     pub const fn empty() -> Self {
         Self {
-            used: false,
             open: false,
-            generation: 0,
             id: 0,
             epoch: 0,
             owner_scope: 0,
@@ -98,7 +99,7 @@ impl Endpoint {
             admitted: 0,
             delivered: 0,
             label: [0; 16],
-            refs: 0,
+            receivers: 0,
         }
     }
 

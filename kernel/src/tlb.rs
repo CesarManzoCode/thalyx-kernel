@@ -9,8 +9,10 @@
 //! * a **generation** counts published invalidations. Every removal or
 //!   narrowing of a mapping bumps it, after the entry itself is written;
 //! * every processor records the generation it has flushed to. Flushing is
-//!   complete — a `CR3` reload, which retires every entry because this kernel
-//!   marks no mapping global — so a later generation subsumes every earlier
+//!   complete — a `CR3` reload retires every entry of the user half, which
+//!   this kernel never marks global, and a withdrawal in the kernel half,
+//!   whose entries are global, is counted separately and retired by a flush
+//!   that reaches them too — so a later generation subsumes every earlier
 //!   one. That is what makes coalescing safe: an acknowledgement of generation
 //!   three cannot leave an obligation from generation two behind, which is the
 //!   race a range-tracking scheme has to solve separately;
@@ -37,8 +39,41 @@ use crate::limits::MAX_CPUS;
 /// Published invalidations. Starts at one so a processor that has recorded
 /// nothing is distinguishable from one that has recorded the first generation.
 static GENERATION: AtomicU64 = AtomicU64::new(1);
-/// Generation each processor has flushed to.
-static SEEN: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(1) }; MAX_CPUS];
+/// Of those, the ones that withdrew a kernel-half mapping, whose entries are
+/// global and survive a `CR3` reload. Bumped before the generation that
+/// carries them, so a processor that catches up with the generation sees
+/// this counter's step too.
+static KERNEL_GENERATION: AtomicU64 = AtomicU64::new(1);
+/// What one processor has flushed to and what it has loaded, on a line of
+/// its own.
+///
+/// Eight words in one line were a line every processor wrote on every switch
+/// -- its own slot, but the line is what moves -- and read on every refresh.
+#[repr(C, align(64))]
+struct Processor {
+    /// Generation the processor has flushed to.
+    seen: AtomicU64,
+    /// Kernel-half generation the processor's last flush reached: the
+    /// generation at which it last retired its global entries as well.
+    seen_kernel: AtomicU64,
+    /// Space the processor has loaded, or `usize::MAX`.
+    space: core::sync::atomic::AtomicUsize,
+    /// Root the processor has loaded, or zero before it loaded one here.
+    ///
+    /// What a switch compares against instead of reading `CR3`: on this
+    /// platform the read was a third of the switch's architectural work,
+    /// and the value it returns is the one this processor wrote last.
+    loaded: AtomicU64,
+}
+
+static PROCESSORS: [Processor; MAX_CPUS] = [const {
+    Processor {
+        seen: AtomicU64::new(1),
+        seen_kernel: AtomicU64::new(1),
+        space: core::sync::atomic::AtomicUsize::new(usize::MAX),
+        loaded: AtomicU64::new(0),
+    }
+}; MAX_CPUS];
 /// Bitmask of processors that have completed their handshake with the kernel.
 static ONLINE: AtomicU64 = AtomicU64::new(0);
 
@@ -59,6 +94,134 @@ static MAX_SPINS: AtomicU64 = AtomicU64::new(0);
 /// reported instead of hanging the machine.
 const WAIT_SPIN_LIMIT: u64 = 200_000_000;
 
+/// Bit per processor each domain's address space has ever been dispatched
+/// on.
+///
+/// A count of who is in the space *right now* answers a different and much
+/// weaker question: an invalidation has to reach every processor that could
+/// hold a translation, and a processor that ran here a microsecond ago still
+/// could. The mask is what makes "reached everyone who could have cached it"
+/// checkable after the fact. Set by the scheduler at dispatch, without a
+/// lock; cleared when the domain's slot is reused.
+static SPACE_MASKS: [AtomicU64; crate::limits::MAX_DOMAINS] =
+    [const { AtomicU64::new(0) }; crate::limits::MAX_DOMAINS];
+
+/// Bit per processor that may hold a translation of each domain's address
+/// space **right now**.
+///
+/// The narrower question, and the one an invalidation actually has to answer.
+/// A processor enters the set when it dispatches a thread of the domain and
+/// leaves it when it loads a different space: this kernel marks no mapping
+/// global and uses no address-space identifiers, so writing `CR3` retires
+/// every entry of the space being left, and a processor that has left holds
+/// nothing of it. The wider mask above stays what it is -- every processor the
+/// space was ever on -- because that is what an *acknowledgement* has to be
+/// checked against after the fact, and the two are different claims.
+///
+/// Linux keeps the same set, in `mm_cpumask`, and for the same reason: sending
+/// an interrupt to a processor that cannot hold the translation is a
+/// microsecond spent to make a processor flush nothing.
+static SPACE_LIVE: [AtomicU64; crate::limits::MAX_DOMAINS] =
+    [const { AtomicU64::new(0) }; crate::limits::MAX_DOMAINS];
+
+/// Notes that `cpu` is dispatching a thread of `domain`.
+///
+/// The store into the live set is sequentially consistent, and so is the load
+/// of the generation that [`refresh_local`] performs on the way to running
+/// that thread. Together with the matching pair on the other side -- publish
+/// the generation, then read the live set -- one of the two processors always
+/// sees the other: either this processor is in the set the invalidation waits
+/// for, or its own refresh has already retired everything the invalidation
+/// removed. There is no third case, and that is the whole of why an
+/// invalidation may skip a processor.
+#[inline]
+pub fn note_dispatch(domain: usize, cpu: usize) {
+    let bit = 1u64 << cpu;
+    if let Some(mask) = SPACE_MASKS.get(domain)
+        && mask.load(Ordering::Relaxed) & bit == 0
+    {
+        mask.fetch_or(bit, Ordering::AcqRel);
+    }
+    // Only this processor ever sets or clears its own bit, so a relaxed read
+    // of it is exact. A bit that is already set was set by a store this
+    // processor made and has not undone, and that store is ordered before
+    // everything since -- including this dispatch's refresh. The pairing holds
+    // without writing it again.
+    if let Some(live) = SPACE_LIVE.get(domain)
+        && live.load(Ordering::Relaxed) & bit == 0
+    {
+        live.fetch_or(bit, Ordering::SeqCst);
+    }
+}
+
+/// Processors `domain`'s address space has ever been dispatched on.
+#[must_use]
+pub fn space_mask(domain: usize) -> u64 {
+    SPACE_MASKS
+        .get(domain)
+        .map_or(0, |mask| mask.load(Ordering::Acquire))
+}
+
+/// Processors that may hold a translation of `domain`'s space right now.
+#[must_use]
+pub fn live_mask(domain: usize) -> u64 {
+    SPACE_LIVE
+        .get(domain)
+        .map_or(0, |mask| mask.load(Ordering::SeqCst))
+}
+
+/// Forgets the masks of a domain whose slot is being reused.
+pub fn forget_space(domain: usize) {
+    if let Some(mask) = SPACE_MASKS.get(domain) {
+        mask.store(0, Ordering::Release);
+    }
+    if let Some(live) = SPACE_LIVE.get(domain) {
+        live.store(0, Ordering::SeqCst);
+    }
+}
+
+/// Loads `cr3` on this processor if it is not the space already loaded.
+///
+/// # Safety
+///
+/// `cr3` must be the root of an address space that shares the kernel's upper
+/// half, so the code and stack executing here stay mapped across the write.
+pub unsafe fn switch_space(cr3: u64, domain: usize) {
+    let me = crate::percpu::index();
+    if me >= MAX_CPUS {
+        return;
+    }
+    let bit = 1u64 << me;
+    let processor = &PROCESSORS[me];
+    // The root this processor wrote last, or the one it booted with when it
+    // has written none here yet. Only this processor writes its own record,
+    // and nothing else writes `CR3` once a processor schedules.
+    let mut loaded = processor.loaded.load(Ordering::Relaxed);
+    if loaded == 0 {
+        loaded = cpu::read_cr3();
+        processor.loaded.store(loaded, Ordering::Relaxed);
+    }
+    if cr3 == 0 || cr3 == loaded {
+        // Nothing is loaded and nothing is retired, so nothing this processor
+        // holds has changed and the sets stay as they are.
+        return;
+    }
+    let leaving = processor.space.swap(domain, Ordering::Relaxed);
+    // SAFETY: the caller's contract.
+    unsafe { cpu::write_cr3(cr3) };
+    processor.loaded.store(cr3, Ordering::Relaxed);
+    // The write retired every entry of the space just left -- no mapping in
+    // this kernel is global and there are no address-space identifiers -- so
+    // this processor now holds nothing of it. Cleared afterwards, so the set
+    // never says "gone" while a translation is still cached.
+    if leaving != domain
+        && let Some(live) = SPACE_LIVE.get(leaving)
+        && live.load(Ordering::Relaxed) & bit != 0
+    {
+        live.fetch_and(!bit, Ordering::SeqCst);
+    }
+}
+
 /// Records that `cpu` participates in invalidation from now on.
 ///
 /// A processor is added only after it has flushed once, so it can never be
@@ -67,7 +230,9 @@ pub fn mark_online(cpu: usize) {
     if cpu >= MAX_CPUS {
         return;
     }
-    SEEN[cpu].store(GENERATION.load(Ordering::Acquire), Ordering::Release);
+    PROCESSORS[cpu]
+        .seen
+        .store(GENERATION.load(Ordering::Acquire), Ordering::Release);
     ONLINE.fetch_or(1u64 << cpu, Ordering::AcqRel);
 }
 
@@ -80,7 +245,7 @@ pub fn mark_offline(cpu: usize) {
     if cpu >= MAX_CPUS {
         return;
     }
-    SEEN[cpu].store(u64::MAX, Ordering::Release);
+    PROCESSORS[cpu].seen.store(u64::MAX, Ordering::Release);
     ONLINE.fetch_and(!(1u64 << cpu), Ordering::AcqRel);
 }
 
@@ -110,6 +275,18 @@ pub fn retire_stamp() -> u64 {
     GENERATION.fetch_add(1, Ordering::AcqRel) + 1
 }
 
+/// A fresh generation for a frame whose mapping was in the kernel half.
+///
+/// Kernel-half entries are global: a `CR3` reload does not retire them, so a
+/// processor catching up with this generation flushes them explicitly. The
+/// kernel counter steps first, and the generation's own step is what
+/// publishes it: a processor that observes the generation observes the
+/// kernel step behind it.
+pub fn retire_stamp_kernel() -> u64 {
+    KERNEL_GENERATION.fetch_add(1, Ordering::AcqRel);
+    GENERATION.fetch_add(1, Ordering::AcqRel) + 1
+}
+
 /// Brings the calling processor up to the published generation.
 ///
 /// Safe to call from anywhere, including from inside a lock's spin loop: it
@@ -119,15 +296,32 @@ pub fn refresh_local() {
     if cpu >= MAX_CPUS {
         return;
     }
+    let processor = &PROCESSORS[cpu];
     let wanted = GENERATION.load(Ordering::Acquire);
-    if SEEN[cpu].load(Ordering::Relaxed) >= wanted {
+    if processor.seen.load(Ordering::Relaxed) >= wanted {
         return;
     }
-    // SAFETY: the value written back is the address space this processor is
-    // already executing in, so the code and stack running here stay mapped.
-    unsafe { cpu::flush_tlb_all() };
+    // Read after the generation, with the order the publisher wrote them
+    // in: a kernel-half withdrawal this generation carries is visible here.
+    let wanted_kernel = KERNEL_GENERATION.load(Ordering::Acquire);
+    // SAFETY: the values written back are the ones this processor is already
+    // executing with, so the code and stack running here stay mapped.
+    unsafe {
+        if processor.seen_kernel.load(Ordering::Relaxed) < wanted_kernel {
+            // Something left the kernel half: the global entries go too. On a
+            // virtual machine the control-register writes this takes are the
+            // expensive kind, which is why the ordinary case below does not
+            // pay for them.
+            cpu::flush_tlb_all();
+        } else {
+            cpu::flush_tlb_user();
+        }
+    }
     FLUSHES.fetch_add(1, Ordering::Relaxed);
-    SEEN[cpu].store(wanted, Ordering::Release);
+    processor
+        .seen_kernel
+        .store(wanted_kernel, Ordering::Relaxed);
+    processor.seen.store(wanted, Ordering::Release);
 }
 
 /// The interrupt one processor sends another to make it refresh.
@@ -138,11 +332,11 @@ pub fn on_shootdown_interrupt() {
     refresh_local();
 }
 
-fn notify_others(me: usize) {
+fn notify(me: usize, targets: u64) {
     let Some(controller) = lapic::current() else {
         return;
     };
-    let online = ONLINE.load(Ordering::Acquire);
+    let online = targets & ONLINE.load(Ordering::Acquire);
     for cpu in 0..MAX_CPUS {
         if cpu == me || online & (1u64 << cpu) == 0 {
             continue;
@@ -161,10 +355,18 @@ fn notify_others(me: usize) {
 pub struct Ack {
     /// Generation waited for.
     pub generation: u64,
-    /// Processors that acknowledged it.
+    /// Processors that hold none of the invalidated translations: those that
+    /// recorded this generation, plus those that could not have been holding
+    /// one in the first place.
     pub acknowledged: u32,
-    /// Processors that were online when the wait started.
+    /// Processors that were online when the wait started. The claim is about
+    /// all of them, however it was obtained for each.
     pub expected: u32,
+    /// Processors that had the address space loaded and were therefore waited
+    /// for. Equal to `expected` for an invalidation that names no space.
+    pub live: u32,
+    /// Of those, the ones this processor had to interrupt.
+    pub interrupted: u32,
     /// Spins the wait took.
     pub spins: u64,
     /// Whether the wait gave up without every acknowledgement.
@@ -184,11 +386,16 @@ pub struct Ack {
 /// construction, because the wait itself calls back into the local refresh.
 #[must_use]
 pub fn wait_for(generation: u64) -> Ack {
+    wait_for_mask(generation, ONLINE.load(Ordering::Acquire))
+}
+
+/// Waits until every processor in `expected_mask` has flushed at `generation`
+/// or later, announcing it to them first.
+fn wait_for_mask(generation: u64, expected_mask: u64) -> Ack {
     let me = crate::percpu::index();
     refresh_local();
-    let expected_mask = ONLINE.load(Ordering::Acquire);
     let expected = expected_mask.count_ones();
-    notify_others(me);
+    notify(me, expected_mask);
 
     let mut spins = 0u64;
     loop {
@@ -198,7 +405,7 @@ pub fn wait_for(generation: u64) -> Ack {
             if expected_mask & (1u64 << cpu) == 0 {
                 continue;
             }
-            if SEEN[cpu].load(Ordering::Acquire) >= generation {
+            if PROCESSORS[cpu].seen.load(Ordering::Acquire) >= generation {
                 acknowledged += 1;
             } else {
                 outstanding = true;
@@ -213,6 +420,8 @@ pub fn wait_for(generation: u64) -> Ack {
                 generation,
                 acknowledged,
                 expected,
+                live: expected,
+                interrupted: expected.saturating_sub(1),
                 spins,
                 timed_out: false,
             };
@@ -223,7 +432,7 @@ pub fn wait_for(generation: u64) -> Ack {
             // not take the announcement until it makes progress. Repeating it
             // costs one write and removes the dependency on the first one
             // having arrived at a convenient moment.
-            notify_others(me);
+            notify(me, expected_mask);
         }
         if spins >= WAIT_SPIN_LIMIT {
             TIMEOUTS.fetch_add(1, Ordering::Relaxed);
@@ -231,6 +440,8 @@ pub fn wait_for(generation: u64) -> Ack {
                 generation,
                 acknowledged,
                 expected,
+                live: expected,
+                interrupted: expected.saturating_sub(1),
                 spins,
                 timed_out: true,
             };
@@ -246,6 +457,75 @@ pub fn wait_for(generation: u64) -> Ack {
 pub fn shootdown() -> Ack {
     let generation = publish();
     wait_for(generation)
+}
+
+/// Publishes an invalidation of `domain`'s address space and waits for the
+/// processors that could be holding one of its translations.
+///
+/// The generation is published *before* the live set is read, and a processor
+/// joining the space stores into that set before it reads the generation. One
+/// of the two orders always wins: a processor that is not waited for here has
+/// already flushed at a generation at least this one. A processor that never
+/// ran in this space has nothing of it to flush, which is the ordinary case
+/// and the one this exists for -- an interrupt sent to it would make it
+/// retire every translation it holds of somebody else's space, and wait for
+/// it to happen.
+pub fn shootdown_space(domain: usize) -> Ack {
+    let generation = publish();
+    let online = ONLINE.load(Ordering::SeqCst);
+    let live = live_mask(domain) & online;
+    let me = crate::percpu::index();
+    let others = live & !(1u64 << me);
+    // The claim is still about every processor, and it is still that none of
+    // them holds a translation this invalidation removed. It is obtained two
+    // ways. A processor with the space loaded is waited for. A processor
+    // without it loaded left the space by writing `CR3`, which retired every
+    // entry of it -- no mapping here is global and there are no address-space
+    // identifiers -- so it was already holding nothing, and an interrupt
+    // asking it to flush everything it holds of somebody else's space would
+    // establish nothing this did not already know.
+    let elsewhere = (online & !live).count_ones();
+    if others == 0 {
+        // This processor's own record is not moved either: it removed the
+        // entries page by page as it went, which retires exactly what had to
+        // be retired, and the object it just unmapped records that.
+        return Ack {
+            generation,
+            acknowledged: online.count_ones(),
+            expected: online.count_ones(),
+            live: live.count_ones(),
+            interrupted: 0,
+            spins: 0,
+            timed_out: false,
+        };
+    }
+    let mut ack = wait_for_mask(generation, live);
+    ack.acknowledged += elsewhere;
+    ack.expected = online.count_ones();
+    ack.live = live.count_ones();
+    ack.interrupted = others.count_ones();
+    ack
+}
+
+/// Whether every processor in `mask` has flushed at `generation` or later.
+///
+/// The precise form of the reclamation condition: a frame is unreachable once
+/// every processor that could have cached a translation to it has flushed past
+/// the invalidation that removed the last entry naming it. Processors that are
+/// offline are not waited for -- a parked processor holds nothing anyone can
+/// reach through.
+#[must_use]
+pub fn flushed_by(mask: u64, generation: u64) -> bool {
+    let online = mask & ONLINE.load(Ordering::Acquire);
+    for cpu in 0..MAX_CPUS {
+        if online & (1u64 << cpu) == 0 {
+            continue;
+        }
+        if PROCESSORS[cpu].seen.load(Ordering::Acquire) < generation {
+            return false;
+        }
+    }
+    true
 }
 
 /// The newest generation every online processor has already flushed at.
@@ -264,7 +544,7 @@ pub fn safe_generation() -> u64 {
         if online & (1u64 << cpu) == 0 {
             continue;
         }
-        let seen = SEEN[cpu].load(Ordering::Acquire);
+        let seen = PROCESSORS[cpu].seen.load(Ordering::Acquire);
         if seen < safe {
             safe = seen;
         }

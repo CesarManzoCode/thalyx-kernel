@@ -2915,9 +2915,9 @@ DAMAGE += [
             run, "device.dma_granted", "enforced_by", "remapping_unit", session="1")),
     ),
     (
-        "llama.cpp mapping the file the profile says it cannot",
+        "llama.cpp reading the file the profile says it maps",
         "profile_holds",
-        lambda runs: damage_note_in(runs, "engine", "engine_mmap", "nengine", 1),
+        lambda runs: damage_note_in(runs, "engine", "engine_mmap", "nengine", 0),
     ),
     (
         "the type-check tool built after all",

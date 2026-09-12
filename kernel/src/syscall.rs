@@ -34,18 +34,30 @@ use crate::{event, trace};
 
 /// Handles one `syscall` entry.
 pub fn handle(frame: &mut TrapFrame) {
-    crate::trap::note_user_entry(frame);
-
+    // No lock is taken to find out who entered: the current thread of this
+    // processor is this processor's own, and the counter is its own. The
+    // machine lock is taken by the operations that need it, which is what
+    // makes an entry that needs nothing -- a version query -- cost an entry
+    // and a return rather than a lock acquisition on a line every other
+    // processor is also writing. The thread is found once and handed to the
+    // ring-3 confirmation, which used to find it again.
     let (domain, thread) = {
-        let mut machine = MACHINE.lock();
-        let current = machine.current();
-        machine.threads[current].syscalls += 1;
-        if machine.threads[current].kind != ThreadKind::User {
+        let current = crate::sched::current_thread();
+        let cell = crate::thread::get(current);
+        crate::trap::note_entry_of(frame, current, cell);
+        // Read and written rather than incremented atomically: the only
+        // writer is the thread itself, running here, and a locked instruction
+        // for a number nobody else writes costs more than the count is worth
+        // on a path every entry takes.
+        let count = cell.syscalls.load(core::sync::atomic::Ordering::Relaxed);
+        cell.syscalls
+            .store(count + 1, core::sync::atomic::Ordering::Relaxed);
+        if cell.kind() != ThreadKind::User {
             // Ring 0 cannot execute `syscall` in this kernel; reaching here
             // would mean the entry was taken from a context that has no domain.
             (usize::MAX, current)
         } else {
-            (machine.threads[current].domain, current)
+            (cell.domain(), current)
         }
     };
 
@@ -78,7 +90,7 @@ pub fn handle(frame: &mut TrapFrame) {
                 frame.rax = status::INVALID_ARGUMENT as u64;
                 return;
             }
-            limits_query(domain, frame);
+            limits_query(thread, frame);
         }
         entry::THREAD_POINTER_SET => {
             if domain == usize::MAX {
@@ -120,7 +132,7 @@ pub fn handle(frame: &mut TrapFrame) {
     }
     // This thread keeps running: a thread it woke and nobody picked up is
     // handed to an idle processor here, on the way out.
-    crate::sched::flush_wake();
+    crate::sched::on_kernel_exit();
 
     // Every return to ring 3 passes here. A thread whose domain was terminated
     // by authority while it was inside this entry does not get the return.
@@ -134,7 +146,7 @@ pub fn handle(frame: &mut TrapFrame) {
 /// it reads here, so the only two values the kernel supplies itself are the
 /// ones the schema cannot know: the page size it actually runs on and the epoch
 /// this boot started at.
-fn limits_query(domain: usize, frame: &mut TrapFrame) {
+fn limits_query(thread: usize, frame: &mut TrapFrame) {
     if frame.r10 != core::mem::size_of::<Limits>() as u64 {
         frame.rax = k2status::INVALID_ARGUMENT as u64;
         frame.rdx = 0;
@@ -142,8 +154,8 @@ fn limits_query(domain: usize, frame: &mut TrapFrame) {
     }
 
     let (boot_epoch, cpus_online) = {
-        let machine = MACHINE.lock();
-        (machine.boot_epoch, machine.cpus_online as u32)
+        let machine = MACHINE.write();
+        (machine.boot_epoch, crate::sched::cpus_online() as u32)
     };
     let limits = Limits {
         major: thalyx_abi::VERSION_MAJOR,
@@ -178,15 +190,7 @@ fn limits_query(domain: usize, frame: &mut TrapFrame) {
             core::mem::size_of::<Limits>(),
         )
     };
-    let machine = MACHINE.lock();
-    let Some(space) = machine.domains[domain].space.as_ref() else {
-        drop(machine);
-        frame.rax = k2status::PEER_DEAD as u64;
-        frame.rdx = 0;
-        return;
-    };
-    let written = ucopy::copy_out(space, frame.rdx, bytes);
-    drop(machine);
+    let written = ucopy::copy_out(ucopy::UserSpace::current(thread), frame.rdx, bytes);
 
     match written {
         Ok(()) => {
@@ -225,10 +229,11 @@ fn thread_pointer_set(domain: usize, thread: usize, frame: &mut TrapFrame) {
         return;
     }
     let first = {
-        let mut machine = MACHINE.lock();
-        let first = machine.threads[thread].fs_base == 0 && value != 0;
-        machine.threads[thread].fs_base = value;
-        first
+        let cell = crate::thread::get(thread);
+        let previous = cell
+            .fs_base
+            .swap(value, core::sync::atomic::Ordering::Relaxed);
+        previous == 0 && value != 0
     };
     // The thread is running on this processor now, so the value takes effect on
     // the return to ring 3. If it was preempted between the store above and this
@@ -238,6 +243,9 @@ fn thread_pointer_set(domain: usize, thread: usize, frame: &mut TrapFrame) {
     // SAFETY: the value is zero or canonical and in the user half, checked
     // above, so the write cannot fault; the kernel never uses FS.
     unsafe { cpu::wrmsr(cpu::MSR_FS_BASE, value) };
+    // The processor's record of what it last wrote, so the next dispatch does
+    // not write it again for nothing.
+    crate::sched::note_fs_base(value);
     if first {
         let name = crate::domain::domain_name(domain);
         trace!(
@@ -255,13 +263,20 @@ fn diag_note(domain: usize, thread: usize, frame: &mut TrapFrame) {
     let second = frame.r10;
 
     let (sequence, cpu_ns, preemptions, syscalls) = {
-        let mut machine = MACHINE.lock();
+        let mut machine = MACHINE.write();
         machine.domains[domain].notes += 1;
+        let cell = crate::thread::get(thread);
+        // SAFETY: the scheduler fields of the thread running on this
+        // processor, read by that thread itself.
+        let (cpu_ns, preemptions) = unsafe {
+            let sched = cell.sched();
+            (sched.cpu_ns, sched.preemptions)
+        };
         (
             machine.domains[domain].notes,
-            machine.threads[thread].cpu_ns,
-            machine.threads[thread].preemptions,
-            machine.threads[thread].syscalls,
+            cpu_ns,
+            preemptions,
+            cell.syscalls.load(core::sync::atomic::Ordering::Relaxed),
         )
     };
 

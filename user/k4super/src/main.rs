@@ -80,10 +80,6 @@ const STALL_LIMIT_NS: u64 = 30_000_000_000;
 /// The whole run, however it ends.
 const RUN_DEADLINE_NS: u64 = 60_000_000_000;
 
-/// Ordinary cells the control log had when the scenario that loses the
-/// control plane was written: sixty-four less eight reserved.
-const ORIGINAL_ORDINARY_CELLS: u32 = 56;
-
 /// Publications the publisher attempts when the scenario does not say.
 const DEFAULT_ROUNDS: u64 = 3;
 
@@ -959,39 +955,17 @@ fn run() -> ! {
     });
     let stall_limit = k2::now_ns() + STALL_LIMIT_NS;
     let mut stall_over_at: Option<u64> = None;
-    if scenario == 5 {
-        // The scenario is that the log fills under the run's own admissions
-        // while nobody reads it. How many cells it has is the interface's
-        // business -- K6 raised it from sixty-four to two hundred and
-        // fifty-six -- and the three rounds this run publishes fill the
-        // smaller log and not the larger. So the log is brought, with service
-        // notes that occupy a cell each as any receipt does, to the number of
-        // free cells the smaller log had at this point of the run: fifty-six
-        // ordinary cells less the receipts the build had already written. The
-        // run's admissions then meet the log this scenario was written
-        // against, filling part way through the publications with the
-        // service's own admission the one refused. Not a change of what is
-        // shown: a covered admission refused for want of a cell, named as such.
-        let used_before = k2::log_query(log).map_or(0, |info| info.used);
-        let free_then = ORIGINAL_ORDINARY_CELLS.saturating_sub(used_before);
-        let mut filled = 0u64;
-        while let Ok(info) = k2::log_query(log) {
-            if info.used + free_then >= ordinary_cells {
-                break;
-            }
-            if k2::log_append(log, 0x4B34_F111, filled, 0, 0).is_err() {
-                break;
-            }
-            filled += 1;
-        }
-        k2::note(note::LOG_PREFILLED, filled);
-    }
     loop {
         // Scenario 5 is the one where the control plane is lost. The auditor
         // stops reading until the log is full, and a full log does not lose
         // the receipts that matter -- it stops the kernel admitting the work
         // they would cover. What the run then has to show is a refusal that
         // names the reason, not a publication nobody can account for.
+        //
+        // The log fills where the case's directive says, inside the service,
+        // with a preparation durable: filled from here, against clients that
+        // were consuming it at the same time, which admission met the full
+        // log was a different one each run. This loop only stops reading.
         //
         // Before anything else, because everything else in this loop waits and
         // the log fills while it does.

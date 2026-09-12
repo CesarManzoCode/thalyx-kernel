@@ -23,7 +23,7 @@ use crate::mm::frame::FrameAllocator;
 use crate::mm::{Frame, Owner, Rights};
 use crate::obj::ScopeId;
 use crate::percpu;
-use crate::state::{IDLE_THREAD, MACHINE, ThreadKind, ThreadState};
+use crate::state::{IDLE_THREAD, MACHINE};
 use crate::{domain, sched, smp, time, tlb};
 use crate::{event, trace};
 
@@ -211,7 +211,7 @@ pub unsafe fn start(bootinfo_phys: u64) -> ! {
     );
 
     {
-        let mut machine = MACHINE.lock();
+        let mut machine = MACHINE.write();
         machine.memory = Some(allocator);
     }
 
@@ -220,7 +220,7 @@ pub unsafe fn start(bootinfo_phys: u64) -> ! {
     // SAFETY: the kernel's own tables are installed and every mapping the
     // kernel executes from, and its stack, exist in them.
     unsafe {
-        let machine = MACHINE.lock();
+        let machine = MACHINE.write();
         let space = machine
             .kernel_space
             .as_ref()
@@ -272,7 +272,7 @@ pub unsafe fn start(bootinfo_phys: u64) -> ! {
     // Supervisor execution and access prevention are enabled only now: before
     // the kernel's own tables were installed, a firmware mapping that marked
     // kernel memory user-accessible would have faulted immediately.
-    let mut cr4 = cpu::read_cr4();
+    let mut cr4 = cpu::read_cr4() | cpu::CR4_PGE;
     if features.smep {
         cr4 |= cpu::CR4_SMEP;
     }
@@ -280,7 +280,9 @@ pub unsafe fn start(bootinfo_phys: u64) -> ! {
         cr4 |= cpu::CR4_SMAP;
     }
     // SAFETY: the bits are enabled only when CPUID advertised them, and the
-    // kernel neither executes from nor reads user pages.
+    // kernel neither executes from nor reads user pages. Global pages are a
+    // base feature of the architecture; the kernel half's entries carry the
+    // bit and the user half's never do.
     unsafe { cpu::write_cr4(cr4) };
     event!(
         "cpu.profile",
@@ -288,13 +290,13 @@ pub unsafe fn start(bootinfo_phys: u64) -> ! {
          kernel_simd=off user_fp=x87+sse2 fp_switch=eager global_pages={}",
         if features.smep { "on" } else { "absent" },
         if features.smap { "on" } else { "absent" },
-        // Read back rather than assumed. Cross-processor invalidation reloads
-        // `CR3` and calls that complete, which is only true while no mapping is
-        // global, and no mapping can be global while this bit is clear.
+        // Read back rather than assumed. A switch retires the user half by
+        // reloading `CR3`; a refresh retires the kernel half as well, by
+        // clearing and restoring this bit.
         if cpu::read_cr4() & cpu::CR4_PGE == 0 {
-            "off"
+            "off_unexpected"
         } else {
-            "on_unexpected"
+            "kernel"
         }
     );
 
@@ -344,7 +346,7 @@ pub unsafe fn start(bootinfo_phys: u64) -> ! {
     // creates from here on is unaccounted: every object is charged to a scope,
     // starting with the root scope that owns the machine.
     let root = {
-        let mut machine = MACHINE.lock();
+        let mut machine = MACHINE.write();
         machine.boot_epoch = info.boot_epoch;
         let root = k2boot::establish_root(&mut machine);
         k2boot::establish_control_log(&mut machine, root);
@@ -469,9 +471,7 @@ fn report_memory_map() {
 /// run where they differ is a run whose scheduling evidence covers fewer
 /// processors than the machine has.
 fn report_smp(platform: &acpi::Platform) {
-    let machine = MACHINE.lock();
-    let online = machine.cpus_online;
-    drop(machine);
+    let online = sched::cpus_online();
     let (published, ipis, flushes, timeouts, spins) = tlb::counters();
     event!(
         "smp.online",
@@ -484,24 +484,22 @@ fn report_smp(platform: &acpi::Platform) {
         tlb::online_mask()
     );
     for cpu in 0..crate::limits::MAX_CPUS {
-        let machine = MACHINE.lock();
-        let slot = machine.cpus[cpu];
-        drop(machine);
-        if !slot.online {
+        let slot = sched::cpu_state(cpu);
+        if !slot.is_online() {
             continue;
         }
         event!(
             "smp.cpu",
             "cpu={cpu} apic_id={} idle_thread={} role={}",
-            slot.apic_id,
-            slot.idle_thread,
+            slot.apic_id.load(core::sync::atomic::Ordering::Relaxed),
+            crate::state::idle_thread(cpu),
             if cpu == 0 { "bootstrap" } else { "application" }
         );
     }
 }
 
 fn map_kernel_range(space: &mut AddressSpace, start: u64, end: u64, rights: Rights, delta: u64) {
-    let mut guard = MACHINE.lock();
+    let mut guard = MACHINE.write();
     let allocator = guard.memory.as_mut().expect("frame allocator established");
     let mut vaddr = start;
     while vaddr < end {
@@ -515,7 +513,7 @@ fn map_kernel_range(space: &mut AddressSpace, start: u64, end: u64, rights: Righ
 
 fn build_kernel_space(info: &BootInfo, lapic_phys: u64, backend: lapic::Backend) {
     let mut space = {
-        let mut guard = MACHINE.lock();
+        let mut guard = MACHINE.write();
         let allocator = guard.memory.as_mut().expect("frame allocator established");
         let mut space = AddressSpace::new(allocator, Owner::Kernel).expect("kernel PML4");
         space
@@ -572,7 +570,7 @@ fn build_kernel_space(info: &BootInfo, lapic_phys: u64, backend: lapic::Backend)
         layout::LAPIC_VADDR
     );
 
-    let mut machine = MACHINE.lock();
+    let mut machine = MACHINE.write();
     machine.kernel_space = Some(space);
 }
 
@@ -630,22 +628,14 @@ fn start_timer(lapic_phys: u64, backend: lapic::Backend) -> lapic::Calibration {
 
 fn establish_idle_thread(info: &BootInfo) {
     let stack_top = HHDM_BASE + info.boot_stack_phys + info.boot_stack_pages * PAGE_SIZE;
-    let mut machine = MACHINE.lock();
+    let machine = MACHINE.write();
     let cr3 = machine
         .kernel_space
         .as_ref()
         .expect("kernel space built")
         .cr3();
-    let thread = &mut machine.threads[IDLE_THREAD];
-    thread.state = ThreadState::Running;
-    thread.kind = ThreadKind::Idle;
-    thread.kstack_top = stack_top;
-    thread.cr3 = cr3;
-    thread.fpu = fpu::initial();
-    thread.quantum_ticks = sched::QUANTUM_TICKS;
-    thread.dispatched_ns = time::monotonic_ns().unwrap_or(0);
-    machine.cpus[0].current = IDLE_THREAD;
     drop(machine);
+    sched::establish_idle(0, stack_top, cr3, time::monotonic_ns().unwrap_or(0));
 
     // SAFETY: bootstrap path with interrupts masked; the boot stack is mapped
     // through the direct map and is the stack this code is running on.
@@ -695,7 +685,7 @@ fn create_supervisor(root: ScopeId, supervisor: &thalyx_boot_protocol::BootModul
         .count();
 
     let index = {
-        let mut machine = MACHINE.lock();
+        let mut machine = MACHINE.write();
         // The package chose this path, and the run records which one it took.
         // Two images built from one kernel differ only here, so a log that did
         // not say which it was would be ambiguous about the thing that matters.
@@ -715,7 +705,7 @@ fn create_supervisor(root: ScopeId, supervisor: &thalyx_boot_protocol::BootModul
     match domain::activate(index) {
         Ok(()) => {
             let (entry, segments, thread) = {
-                let machine = MACHINE.lock();
+                let machine = MACHINE.write();
                 (
                     machine.domains[index].entry,
                     machine.domains[index].segments,
@@ -753,7 +743,7 @@ fn create_k1_domains(root: ScopeId) -> usize {
                 "name={name} reason=unsupported_kind kind={}",
                 module.kind
             );
-            MACHINE.lock().modules_rejected += 1;
+            MACHINE.write().modules_rejected += 1;
             continue;
         }
 
@@ -779,7 +769,7 @@ fn create_k1_domains(root: ScopeId) -> usize {
                 match domain::activate(index) {
                     Ok(()) => {
                         let (entry, segments, thread) = {
-                            let machine = MACHINE.lock();
+                            let machine = MACHINE.write();
                             (
                                 machine.domains[index].entry,
                                 machine.domains[index].segments,
@@ -803,7 +793,7 @@ fn create_k1_domains(root: ScopeId) -> usize {
                 }
             }
             Err(error) => {
-                MACHINE.lock().modules_rejected += 1;
+                MACHINE.write().modules_rejected += 1;
                 event!(
                     "module.rejected",
                     "name={name} reason={} expected_reject={}",
@@ -817,7 +807,7 @@ fn create_k1_domains(root: ScopeId) -> usize {
 }
 
 fn report_domain(index: usize, name: &str) {
-    let machine = MACHINE.lock();
+    let machine = MACHINE.write();
     let Some(space) = machine.domains[index].space.as_ref() else {
         return;
     };
@@ -828,7 +818,7 @@ fn report_domain(index: usize, name: &str) {
     let charged = {
         // The lock is already held; read through the same guard.
         drop(machine);
-        let mut machine = MACHINE.lock();
+        let mut machine = MACHINE.write();
         machine.allocator().charged(Owner::Domain(index as u16))
     };
     trace!(
@@ -841,7 +831,7 @@ fn report_domain(index: usize, name: &str) {
         layout::USER_STACK_PAGES
     );
 
-    let machine = MACHINE.lock();
+    let machine = MACHINE.write();
     let Some(space) = machine.domains[index].space.as_ref() else {
         return;
     };
@@ -868,7 +858,7 @@ fn reclaim_boot_memory(info: &BootInfo) {
 
     let mut modules_frames = 0usize;
     let mut boot_frames = 0usize;
-    let mut machine = MACHINE.lock();
+    let mut machine = MACHINE.write();
     for region in regions() {
         let start = region.base;
         let end = region.base + region.pages * PAGE_SIZE;
@@ -912,7 +902,7 @@ fn reclaim_boot_memory(info: &BootInfo) {
 fn drain_quarantine() {
     tlb::refresh_local();
     let (released, held, peak, retained, total) = {
-        let mut machine = MACHINE.lock();
+        let mut machine = MACHINE.write();
         let allocator = machine.allocator();
         let released = allocator.drain_quarantine();
         (
@@ -936,78 +926,92 @@ fn drain_quarantine() {
 /// "one processor ran everything while three idled" produce the same total, and
 /// only the first is evidence that the scheduling was multiprocessor.
 fn scheduling_summary() {
-    let machine = MACHINE.lock();
     // The processors that ran, not the ones still running: this summary is
     // written after the others have parked.
-    let online = machine.cpus_started;
-    let peak = crate::scope::peak_running(&machine.scopes);
-    let mut rows = [(0usize, 0u32, 0u64, 0u64, 0u64, 0u64, 0u64); crate::limits::MAX_CPUS];
+    let online = sched::cpus_started();
+    let peak = crate::scope::peak_running();
+    let mut rows = [(0usize, 0u32, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64); crate::limits::MAX_CPUS];
     let mut count = 0usize;
     for cpu in 0..crate::limits::MAX_CPUS {
-        let slot = machine.cpus[cpu];
-        if slot.apic_id == u32::MAX {
+        let slot = sched::cpu_state(cpu);
+        let apic_id = slot.apic_id.load(core::sync::atomic::Ordering::Relaxed);
+        if apic_id == u32::MAX {
             continue;
         }
         rows[count] = (
             cpu,
-            slot.apic_id,
-            slot.ticks,
-            slot.dispatches,
-            slot.preemptions,
-            slot.budget_stalls,
-            slot.user_ns,
+            apic_id,
+            slot.ticks.load(core::sync::atomic::Ordering::Relaxed),
+            slot.dispatches.load(core::sync::atomic::Ordering::Relaxed),
+            slot.preemptions.load(core::sync::atomic::Ordering::Relaxed),
+            slot.budget_stalls
+                .load(core::sync::atomic::Ordering::Relaxed),
+            slot.user_ns.load(core::sync::atomic::Ordering::Relaxed),
+            slot.kicks.load(core::sync::atomic::Ordering::Relaxed),
         );
         count += 1;
     }
-    let migrations: u64 = machine.threads.iter().map(|thread| thread.migrations).sum();
-    let interval = machine.max_charge_interval_ns;
-    drop(machine);
+    let migrations = sched::migrations();
+    let (_, _, _, _, interval) = sched::totals();
 
     for slot in 0..count {
-        let (cpu, apic_id, ticks, dispatches, preemptions, stalls, user_ns) = rows[slot];
+        let (cpu, apic_id, ticks, dispatches, preemptions, stalls, user_ns, kicks) = rows[slot];
+        // The interrupts this processor sent to make another one look at its
+        // queue: each is a microsecond and a half of the sender's time on
+        // this platform, and a round trip that pays one is not on one
+        // processor.
         event!(
             "sched.cpu_summary",
             "cpu={cpu} apic_id={apic_id} ticks={ticks} dispatches={dispatches} \
-             preemptions={preemptions} budget_stalls={stalls} user_ns={user_ns}"
+             preemptions={preemptions} budget_stalls={stalls} user_ns={user_ns} kicks={kicks}"
         );
     }
     // Every scope that was ever given a budget, with the most it was actually
     // charged in a closed window. A budget nothing was measured against is a
     // number, not a limit.
     for index in 0..crate::limits::MAX_SCOPES {
-        let machine = MACHINE.lock();
-        let node = &machine.scopes[index];
-        if node.state == crate::scope::State::Empty || node.limits.cpu_budget_ns == 0 {
+        let node = &crate::scope::table()[index];
+        let limits = node.limits.load();
+        if node.state() == crate::scope::State::Empty || limits.cpu_budget_ns == 0 {
             continue;
         }
         let (id, label, budget, parallelism) = (
-            node.id,
+            node.id(),
             node.label_str(),
-            node.limits.cpu_budget_ns,
-            node.limits.parallelism,
+            limits.cpu_budget_ns,
+            limits.parallelism,
         );
+        let load = |field: &core::sync::atomic::AtomicU64| {
+            field.load(core::sync::atomic::Ordering::Relaxed)
+        };
         let (windows, worst, overruns, worst_overrun, total, debt) = (
-            node.windows_closed,
-            node.max_window_ns,
-            node.overruns,
-            node.max_overrun_ns,
-            node.cpu_total_ns,
-            node.cpu_debt_ns,
+            load(&node.windows_closed),
+            load(&node.max_window_ns),
+            load(&node.overruns),
+            load(&node.max_overrun_ns),
+            load(&node.cpu_total_ns) + sched::pending_charges(index as u16),
+            load(&node.cpu_debt_ns),
         );
         // The peaks are recorded where the commitment happens, so they answer
         // the question a closed window cannot: how much was ever promised at
         // once, and how many threads ever held this scope at one instant.
         let (committed, peak, grants, refusals) = (
-            node.max_committed_ns,
-            node.max_running,
-            node.dispatch_grants,
-            node.dispatch_refusals,
+            load(&node.max_committed_ns),
+            node.max_running.load(core::sync::atomic::Ordering::Relaxed),
+            load(&node.dispatch_grants),
+            load(&node.dispatch_refusals),
         );
-        let (charged, excess) = (node.max_charged_in_window_ns, node.max_excess_ns);
+        let (charged, excess) = (
+            load(&node.max_charged_in_window_ns),
+            load(&node.max_excess_ns),
+        );
         // Every overrun was counted; only the first few were written out as
         // their own records. The difference is stated, so a reader of the
         // debt records knows how many windows they stand for.
-        let debt_records = u64::from(node.debt_records);
+        let debt_records = u64::from(
+            node.debt_records
+                .load(core::sync::atomic::Ordering::Relaxed),
+        );
         event!(
             "scope.accounting",
             "scope={index} id={id} label={label} budget_ns={budget} \
@@ -1019,7 +1023,6 @@ fn scheduling_summary() {
              debt_records={debt_records} debt_records_coalesced={}",
             overruns.saturating_sub(debt_records)
         );
-        drop(machine);
     }
 
     let (published, ipis, flushes, timeouts, spins) = tlb::counters();
@@ -1034,19 +1037,43 @@ fn scheduling_summary() {
         crate::sched::QUANTUM_NS,
         crate::sched::TICK_HZ
     );
+    // What each kind of lock actually cost, so "the lock was the limit" stays
+    // an argument about a number, and about which lock.
+    for (name, class) in [
+        ("lock.control", crate::sync::LockClass::Control),
+        ("lock.runqueue", crate::sync::LockClass::RunQueue),
+        ("lock.wait", crate::sync::LockClass::Wait),
+        ("lock.other", crate::sync::LockClass::Other),
+        ("lock.shared", crate::sync::LockClass::Shared),
+        ("lock.channel", crate::sync::LockClass::Channel),
+        ("lock.record", crate::sync::LockClass::Record),
+        ("lock.caps", crate::sync::LockClass::Caps),
+        ("lock.grants", crate::sync::LockClass::Grants),
+        ("lock.log", crate::sync::LockClass::Log),
+    ] {
+        let (acquisitions, waits, cycles, worst_wait) = crate::sync::contention(class);
+        event!(
+            name,
+            "acquisitions={acquisitions} contended={waits} waited_cycles={cycles} \
+             worst_wait_cycles={worst_wait} contended_fraction_ppm={}",
+            if acquisitions == 0 {
+                0
+            } else {
+                waits.saturating_mul(1_000_000) / acquisitions
+            }
+        );
+    }
 }
 
 fn summarize(terminal: sched::Terminal) {
-    let machine = MACHINE.lock();
-    let ticks = machine.ticks;
-    let preemptions = machine.preemptions;
+    let (ticks, preemptions, _, records, _) = sched::totals();
+    let machine = MACHINE.write();
     let faults = machine.user_faults;
     let rejected = machine.modules_rejected;
-    let records = machine.preempt_records;
     drop(machine);
 
     for index in 0..crate::state::MAX_DOMAINS {
-        let machine = MACHINE.lock();
+        let machine = MACHINE.write();
         let state = machine.domains[index].state;
         if state == crate::state::DomainState::Empty {
             continue;
@@ -1057,15 +1084,15 @@ fn summarize(terminal: sched::Terminal) {
             .map_or("none", crate::state::ExitReason::name);
         let charged = {
             drop(machine);
-            let mut machine = MACHINE.lock();
+            let mut machine = MACHINE.write();
             machine.allocator().charged(Owner::Domain(index as u16))
         };
         let name = domain::domain_name(index);
         let (handles, scope_id) = {
-            let machine = MACHINE.lock();
+            let machine = MACHINE.write();
             (
-                machine.domains[index].caps.live(),
-                machine.scopes[machine.domains[index].owner_scope as usize].id,
+                machine.domains[index].caps.lock().live(),
+                crate::scope::table()[machine.domains[index].owner_scope as usize].id(),
             )
         };
         event!(
@@ -1076,7 +1103,7 @@ fn summarize(terminal: sched::Terminal) {
         );
     }
 
-    let mut machine = MACHINE.lock();
+    let mut machine = MACHINE.write();
     let free = machine.allocator().free_frames();
     let usable = machine.allocator().usable();
     let kernel_charged = machine.allocator().charged(Owner::Kernel);
@@ -1087,7 +1114,7 @@ fn summarize(terminal: sched::Terminal) {
     // ended tidily while an invocation was still charged somewhere would look
     // exactly like one that did not, without the first number.
     let (outstanding, managed) = {
-        let machine = MACHINE.lock();
+        let machine = MACHINE.write();
         let outstanding = machine
             .root_scope
             .map_or(0, |root| crate::api::scopeops::outstanding(&machine, root));
@@ -1107,7 +1134,7 @@ fn summarize(terminal: sched::Terminal) {
     // of the interface this evidence is silent about instead of leaving a
     // reader to assume it covers them.
     if managed {
-        let reached = MACHINE.lock().operations_reached;
+        let reached = crate::api::operations_reached();
         let total = thalyx_abi::generated::OPERATIONS.len();
         let count = reached.count_ones();
         event!(

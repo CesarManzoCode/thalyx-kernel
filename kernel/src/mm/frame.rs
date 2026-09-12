@@ -24,6 +24,16 @@ use thalyx_boot_protocol::{MemoryRegion, PAGE_SIZE, region_kind};
 
 use super::{Frame, Owner};
 
+/// Whether any frame is in quarantine, readable without the control lock so
+/// a tick can skip the drain when there is nothing to drain.
+static QUARANTINE_PENDING: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+/// Whether the quarantine holds anything.
+#[must_use]
+pub fn quarantine_pending() -> bool {
+    QUARANTINE_PENDING.load(core::sync::atomic::Ordering::Acquire) != 0
+}
+
 /// Owners the allocator can count separately: the kernel, every domain slot and
 /// every scope slot.
 const OWNER_SLOTS: usize = 1 + crate::limits::MAX_DOMAINS + crate::limits::MAX_SCOPES;
@@ -253,13 +263,24 @@ impl FrameAllocator {
         self.quarantine_released
     }
 
-    /// Hands a frame to the quarantine instead of to the pool.
+    /// Hands a frame to the quarantine instead of to the pool, at a
+    /// generation the caller has taken.
     ///
     /// The stamp is a fresh invalidation generation, so the frame is released
-    /// only after every online processor has flushed at a point later than this
-    /// call — whether or not the caller published an invalidation of its own.
-    pub fn retire(&mut self, frame: Frame, owner: Owner) {
-        let generation = crate::tlb::retire_stamp();
+    /// only after every online processor has flushed at a point later than the
+    /// call that took it -- whether or not the caller published an
+    /// invalidation of its own.
+    ///
+    /// Tearing a domain down retires hundreds of frames in one critical
+    /// section, and a generation taken for each of them is a generation every
+    /// processor in the machine has to notice: a processor that sees a newer
+    /// one flushes every translation it holds, and it looks at the counter
+    /// every time it waits for a lock. One stamp for the batch says the same
+    /// thing -- these frames must not come back until every processor has
+    /// flushed at a point after their entries were removed -- and says it
+    /// once.
+    pub fn retire_at(&mut self, frame: Frame, owner: Owner, generation: u64) {
+        QUARANTINE_PENDING.store(1, core::sync::atomic::Ordering::Release);
         for slot in &mut self.quarantine {
             if slot.used {
                 continue;
@@ -302,6 +323,9 @@ impl FrameAllocator {
             unsafe { self.release(slot.frame, slot.owner) };
         }
         self.quarantine_released += released;
+        if self.quarantined == 0 {
+            QUARANTINE_PENDING.store(0, core::sync::atomic::Ordering::Release);
+        }
         released
     }
 
@@ -384,8 +408,31 @@ impl FrameAllocator {
         }
         self.drain_quarantine();
         let count = count as usize;
-        let mut index = 0usize;
-        while index + count <= self.frames {
+        // From where the last allocation left off, and only then from the
+        // beginning. The low frames are the kernel's own and are taken for the
+        // life of the run, so a search that always starts at zero walks that
+        // prefix bit by bit on every call -- thousands of tests to find a
+        // single page, paid by every object created and by every step a
+        // program's heap grows.
+        let start = self.hint.min(self.frames);
+        if let Some(frame) = self.take_run(start, self.frames, count, owner) {
+            return Ok(frame);
+        }
+        if let Some(frame) = self.take_run(
+            0,
+            start.saturating_add(count).min(self.frames),
+            count,
+            owner,
+        ) {
+            return Ok(frame);
+        }
+        Err(AllocError::OutOfMemory)
+    }
+
+    /// Takes `count` contiguous free frames inside `[from, to)`, or nothing.
+    fn take_run(&mut self, from: usize, to: usize, count: usize, owner: Owner) -> Option<Frame> {
+        let mut index = from;
+        while index + count <= to {
             let mut run = 0usize;
             while run < count && !self.test(index + run) {
                 run += 1;
@@ -402,13 +449,18 @@ impl FrameAllocator {
                     // bitmap only ever tracked frames below the map limit.
                     unsafe { core::ptr::write_bytes(frame.hhdm_ptr(), 0, PAGE_SIZE as usize) };
                 }
-                return Ok(Frame::containing((index as u64) * PAGE_SIZE));
+                self.hint = if index + count >= self.frames {
+                    0
+                } else {
+                    index + count
+                };
+                return Some(Frame::containing((index as u64) * PAGE_SIZE));
             }
             // `index + run` is the first frame that is taken, so the next run
             // cannot start before the frame after it.
             index += run + 1;
         }
-        Err(AllocError::OutOfMemory)
+        None
     }
 
     /// Returns a frame charged to `owner`.
@@ -426,6 +478,14 @@ impl FrameAllocator {
         }
         self.clear(index);
         self.free += 1;
+        // The search resumes where frames are known to be free. Without this
+        // the hint only ever moves forward, so a program that creates and
+        // destroys an object in a loop walks further into the pool on every
+        // turn and never comes back to the run it just gave up -- which is
+        // both a longer search and a colder set of pages than the one it had.
+        if index < self.hint {
+            self.hint = index;
+        }
         let slot = owner.slot();
         self.charged[slot] = self.charged[slot].saturating_sub(1);
     }

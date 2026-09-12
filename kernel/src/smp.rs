@@ -28,7 +28,7 @@ use crate::layout;
 use crate::limits::MAX_CPUS;
 use crate::mm::{Frame, Owner, Rights};
 use crate::percpu;
-use crate::state::{MACHINE, ThreadKind, ThreadState, idle_thread};
+use crate::state::{MACHINE, idle_thread};
 use crate::{sched, time, tlb};
 
 /// Highest physical address a start-up interrupt can name: the vector is a page
@@ -87,7 +87,7 @@ pub fn shutting_down() -> bool {
 /// simultaneously faulting onto.
 pub fn map_emergency_stacks(cpu: usize) -> [u64; layout::IST_COUNT] {
     let mut tops = [0u64; layout::IST_COUNT];
-    let mut guard = MACHINE.lock();
+    let mut guard = MACHINE.write();
     let machine = &mut *guard;
     for (slot, top) in tops.iter_mut().enumerate() {
         let base = layout::ist_slot_base(cpu * layout::IST_COUNT + slot);
@@ -131,13 +131,7 @@ pub fn claim_bootstrap(apic_id: u32) {
 pub fn bootstrap_online(apic_id: u32) {
     ONLINE.fetch_or(1, Ordering::AcqRel);
     tlb::mark_online(0);
-    let mut machine = MACHINE.lock();
-    machine.cpus[0].online = true;
-    machine.cpus[0].apic_id = apic_id;
-    machine.cpus[0].idle_thread = idle_thread(0);
-    machine.cpus[0].current = idle_thread(0);
-    machine.cpus_online = 1;
-    machine.cpus_started = 1;
+    sched::set_online(0, apic_id);
 }
 
 /// Builds the address space an application processor enables paging with.
@@ -150,7 +144,7 @@ pub fn bootstrap_online(apic_id: u32) {
 /// It is executable and not writable: the trampoline is code, and the parameter
 /// block it reads is written before the processor exists.
 fn build_ap_space() -> Option<u64> {
-    let mut guard = MACHINE.lock();
+    let mut guard = MACHINE.write();
     let machine = &mut *guard;
     let allocator = machine.memory.as_mut()?;
     let mut space = AddressSpace::new(allocator, Owner::Kernel).ok()?;
@@ -178,7 +172,7 @@ fn build_ap_space() -> Option<u64> {
 /// the three absolute addresses it cannot know until the page is chosen.
 fn install_trampoline(cr3: u64) -> Option<Frame> {
     let frame = {
-        let mut machine = MACHINE.lock();
+        let mut machine = MACHINE.write();
         machine
             .allocator()
             .alloc_below(STARTUP_LIMIT, Owner::Kernel)
@@ -255,20 +249,15 @@ fn spin_ns(ns: u64) {
 
 /// Allocates the idle thread of processor `cpu` and returns its stack top.
 fn establish_ap_idle(cpu: usize) -> Option<u64> {
-    let mut machine = MACHINE.lock();
+    let mut machine = MACHINE.write();
     let index = idle_thread(cpu);
     let (slot, top) = crate::domain::allocate_kernel_stack(&mut machine).ok()?;
     let cr3 = machine.kernel_space.as_ref()?.cr3();
-    let thread = &mut machine.threads[index];
-    thread.state = ThreadState::Running;
-    thread.kind = ThreadKind::Idle;
-    thread.kstack_slot = slot;
-    thread.kstack_top = top;
-    thread.cr3 = cr3;
-    thread.fpu = fpu::initial();
-    thread.quantum_ticks = sched::QUANTUM_TICKS;
-    machine.cpus[cpu].idle_thread = index;
-    machine.cpus[cpu].current = index;
+    drop(machine);
+    sched::establish_idle(cpu, top, cr3, 0);
+    // SAFETY: the idle thread of a processor that has not started; nothing
+    // else reaches it until the handshake below publishes the slot.
+    unsafe { crate::thread::get(index).control_mut().kstack_slot = slot };
     Some(top)
 }
 
@@ -461,7 +450,7 @@ extern "C" fn ap_entry(cpu_index: u64) -> ! {
     unsafe {
         cpu::wrmsr(cpu::MSR_EFER, cpu::rdmsr(cpu::MSR_EFER) | cpu::EFER_NXE);
         cpu::write_cr0(cpu::read_cr0() | cpu::CR0_WP);
-        let mut cr4 = cpu::read_cr4();
+        let mut cr4 = cpu::read_cr4() | cpu::CR4_PGE;
         if features.smep {
             cr4 |= cpu::CR4_SMEP;
         }
@@ -502,7 +491,7 @@ extern "C" fn ap_entry(cpu_index: u64) -> ! {
     // mapping the trampoline needed. From here the identity mapping is gone
     // from this processor's view.
     let kernel_cr3 = {
-        let machine = MACHINE.lock();
+        let machine = MACHINE.write();
         machine
             .kernel_space
             .as_ref()
@@ -514,10 +503,8 @@ extern "C" fn ap_entry(cpu_index: u64) -> ! {
         unsafe { cpu::write_cr3(kernel_cr3) };
     }
 
-    let stack_top = {
-        let machine = MACHINE.lock();
-        machine.threads[idle_thread(cpu)].kstack_top
-    };
+    // This processor's own idle thread, established before it was started.
+    let stack_top = crate::thread::get(idle_thread(cpu)).control().kstack_top;
     // SAFETY: the idle thread's own stack, mapped in the shared kernel half,
     // with interrupts masked.
     unsafe {
@@ -526,15 +513,12 @@ extern "C" fn ap_entry(cpu_index: u64) -> ! {
     }
 
     let apic_id = controller.id();
-    {
-        let mut machine = MACHINE.lock();
-        machine.cpus[cpu].online = true;
-        machine.cpus[cpu].apic_id = apic_id;
-        machine.cpus[cpu].cursor = 0;
-        machine.cpus_online += 1;
-        machine.cpus_started += 1;
-        machine.threads[idle_thread(cpu)].dispatched_ns = time::monotonic_ns().unwrap_or(0);
+    // SAFETY: this processor's own idle thread, which it is running.
+    unsafe {
+        crate::thread::get(idle_thread(cpu)).sched().dispatched_ns =
+            time::monotonic_ns().unwrap_or(0);
     }
+    sched::set_online(cpu, apic_id);
     tlb::mark_online(cpu);
     time::observe();
 
@@ -607,11 +591,7 @@ pub fn stop_all() {
 /// Records that this processor has stopped scheduling and will not answer
 /// another invalidation.
 pub fn park(cpu: usize) -> ! {
-    {
-        let mut machine = MACHINE.lock();
-        machine.cpus[cpu].online = false;
-        machine.cpus_online = machine.cpus_online.saturating_sub(1);
-    }
+    sched::set_offline(cpu);
     ONLINE.fetch_and(!(1u64 << cpu), Ordering::AcqRel);
     tlb::mark_offline(cpu);
     PARKED.fetch_or(1u64 << cpu, Ordering::AcqRel);

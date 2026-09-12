@@ -1,11 +1,15 @@
 //! `SYSCALL` configuration and entry.
 //!
 //! Entry uses the `syscall` instruction, as the ABI contract specifies. Return
-//! does **not** use `sysret`: it goes through `iretq` with a validated frame.
-//! `sysret` would be faster and is the documented fast path, but it has to be
-//! guarded against non-canonical return addresses and against restoring
-//! dangerous flag states, and those guards are the part worth getting right
-//! before the speed.
+//! uses `sysretq` when the frame still describes the return `syscall` set up,
+//! and `iretq` otherwise. The guards are in the entry stub in
+//! `arch::x86_64::trap`, and they are the reason the fast path is safe rather
+//! than merely fast: the selectors must be the two `IA32_STAR` makes the
+//! instruction return to, the flags must carry neither RF nor VM, and the
+//! return address must be canonical -- on Intel parts `sysretq` with a
+//! non-canonical RIP faults *in ring 0*, which is how a user-chosen address
+//! becomes a kernel exception. A frame that fails any of those leaves through
+//! `iretq`, which checks everything the processor can check.
 
 use super::cpu;
 use super::gdt;

@@ -135,6 +135,14 @@ pub fn build(
         arg1: COMPUTE_THREADS,
         arg2: u64::from(quiet),
         arg3: 0,
+        // The run that times this start is the one that asked for a quiet
+        // engine; its launcher does not read the runtime's startup notes and
+        // pays two milliseconds on the diagnostic plane for each of them.
+        flags: if quiet {
+            native::flag::QUIET_STARTUP
+        } else {
+            0
+        },
     };
     let recipe = Recipe {
         name: "nengine",
@@ -180,7 +188,12 @@ pub fn build(
         },
     )?;
     let _ = k2::cap_close(built.work_signal);
-    k2::note(note::SERVICE_BUILT, 3);
+    // Inside whatever the caller is timing, and a note is a synchronous
+    // record on the diagnostic plane. K5 reads this one; K6 times the build
+    // and does not.
+    if !quiet {
+        k2::note(note::SERVICE_BUILT, 3);
+    }
 
     let deadline = k2::now_ns() + LOAD_DEADLINE_NS;
     loop {
@@ -212,7 +225,11 @@ pub fn build(
     let _ = k2::cap_close(built.domain);
     let scope_view = k2::derive(scope, right::INSPECT, 0, 0).unwrap_or(0);
     let _ = k2::cap_close(scope);
-    k2::note(note::ENGINE_READY, model_bytes);
+    // Same reason as the note above: this one is still inside the caller's
+    // measurement, and K6's measurement is what it is about.
+    if !quiet {
+        k2::note(note::ENGINE_READY, model_bytes);
+    }
     Some(Engine {
         endpoint,
         scope: scope_view,

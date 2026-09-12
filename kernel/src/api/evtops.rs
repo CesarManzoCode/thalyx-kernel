@@ -16,18 +16,44 @@ use thalyx_abi::generated::{
     right, status,
 };
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use crate::api::{BODY, Ctx, begin_response, resolve};
 use crate::events::{Signal, Timer};
 use crate::obj::{NO_GRANT, ObjKind, ObjRef};
+use crate::sched::WakeHint;
 use crate::scope::{self, Resource};
-use crate::state::{MACHINE, Machine, ThreadState, Wait};
+use crate::state::{MACHINE, Machine, Wait};
+use crate::thread;
 use crate::trace;
 use crate::ucopy::Staging;
+
+/// Earliest armed timer deadline, or `u64::MAX`: what a tick checks before
+/// taking the control lock to expire anything.
+static NEXT_TIMER: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Whether an armed timer is due at `now`.
+#[must_use]
+pub fn timer_due(now: u64) -> bool {
+    NEXT_TIMER.load(Ordering::Acquire) <= now
+}
+
+/// Recomputes the earliest armed deadline. Under the machine lock.
+fn recompute_next(machine: &Machine) {
+    let next = machine
+        .timers
+        .iter()
+        .filter(|timer| timer.used && timer.armed)
+        .map(|timer| timer.deadline_ns)
+        .min()
+        .unwrap_or(u64::MAX);
+    NEXT_TIMER.store(next, Ordering::Release);
+}
 
 /// Creates a coalescing signal charged to the addressed scope.
 pub fn create_signal(machine: &mut Machine, ctx: &Ctx) -> Result<u64, i64> {
     let sponsor = ctx.cap.object.index;
-    if machine.scopes[sponsor as usize].state != scope::State::Open {
+    if scope::table()[sponsor as usize].state() != scope::State::Open {
         return Err(status::SCOPE_CLOSED);
     }
     let index = machine
@@ -35,11 +61,11 @@ pub fn create_signal(machine: &mut Machine, ctx: &Ctx) -> Result<u64, i64> {
         .iter()
         .position(|signal| !signal.used)
         .ok_or(status::LIMIT_EXHAUSTED)?;
-    if !scope::reserve(&mut machine.scopes, sponsor, Resource::Metadata, 1) {
+    if !scope::reserve(sponsor, Resource::Metadata, 1) {
         return Err(status::LIMIT_EXHAUSTED);
     }
     let Some(id) = machine.next_id() else {
-        scope::release(&mut machine.scopes, sponsor, Resource::Metadata, 1);
+        scope::release(sponsor, Resource::Metadata, 1);
         return Err(status::LIMIT_EXHAUSTED);
     };
     let generation = machine.signals[index].generation.saturating_add(1);
@@ -51,7 +77,7 @@ pub fn create_signal(machine: &mut Machine, ctx: &Ctx) -> Result<u64, i64> {
         bits: 0,
         sequence: 0,
         waiters: 0,
-        refs: 0,
+        refs: core::sync::atomic::AtomicU32::new(0),
     };
     let object = ObjRef::new(ObjKind::Signal, index as u16, generation);
     let owner = machine.domains[ctx.domain].owner_scope;
@@ -70,7 +96,8 @@ pub fn create_signal(machine: &mut Machine, ctx: &Ctx) -> Result<u64, i64> {
         .ok_or(status::LIMIT_EXHAUSTED)?;
     trace!(
         "event.signal_created",
-        "signal={id} scope={}", machine.scopes[sponsor as usize].id
+        "signal={id} scope={}",
+        scope::table()[sponsor as usize].id()
     );
     Ok(handle)
 }
@@ -90,7 +117,7 @@ pub fn create_timer(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> 
         return Err(status::INVALID_ARGUMENT);
     }
     let sponsor = ctx.cap.object.index;
-    if machine.scopes[sponsor as usize].state != scope::State::Open {
+    if scope::table()[sponsor as usize].state() != scope::State::Open {
         return Err(status::SCOPE_CLOSED);
     }
     let index = machine
@@ -98,11 +125,11 @@ pub fn create_timer(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> 
         .iter()
         .position(|timer| !timer.used)
         .ok_or(status::LIMIT_EXHAUSTED)?;
-    if !scope::reserve(&mut machine.scopes, sponsor, Resource::Metadata, 1) {
+    if !scope::reserve(sponsor, Resource::Metadata, 1) {
         return Err(status::LIMIT_EXHAUSTED);
     }
     let Some(id) = machine.next_id() else {
-        scope::release(&mut machine.scopes, sponsor, Resource::Metadata, 1);
+        scope::release(sponsor, Resource::Metadata, 1);
         return Err(status::LIMIT_EXHAUSTED);
     };
     let generation = machine.timers[index].generation.saturating_add(1);
@@ -117,7 +144,7 @@ pub fn create_timer(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> 
         deadline_ns: 0,
         armed: false,
         fired: 0,
-        refs: 0,
+        refs: core::sync::atomic::AtomicU32::new(0),
     };
     let object = ObjRef::new(ObjKind::Timer, index as u16, generation);
     let owner = machine.domains[ctx.domain].owner_scope;
@@ -139,7 +166,7 @@ pub fn create_timer(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> 
         "timer={id} signal={} bits=0x{:x} scope={}",
         machine.signals[signal.object.index as usize].id,
         request.bits,
-        machine.scopes[sponsor as usize].id
+        scope::table()[sponsor as usize].id()
     );
     Ok(handle)
 }
@@ -167,25 +194,28 @@ pub fn raise_bits(machine: &mut Machine, index: usize, generation: u32, bits: u6
     }
     machine.signals[index].bits |= bits;
     machine.signals[index].sequence = machine.signals[index].sequence.wrapping_add(1);
-    let mut woken = false;
-    for thread in 0..machine.threads.len() {
-        if machine.threads[thread].state != ThreadState::Blocked {
-            continue;
-        }
-        if let Wait::Signal(signal, signal_generation, mask) = machine.threads[thread].wait
-            && signal as usize == index
-            && signal_generation == generation
-            && mask & bits != 0
-        {
-            machine.threads[thread].wait = Wait::None;
-            machine.threads[thread].wait_deadline_ns = 0;
-            machine.threads[thread].wake_status = status::OK;
-            machine.threads[thread].state = ThreadState::Ready;
-            woken = true;
-        }
+    if machine.signals[index].waiters == 0 {
+        return;
     }
-    if woken {
-        crate::sched::kick_idle(machine);
+    // Every waiter on any of the raised bits: a signal is a coalescing set,
+    // and two threads waiting on the same bit both go and look. The waker
+    // keeps running, so each goes to an idle processor.
+    for (thread, _) in thread::iter() {
+        thread::defer_wake_if(
+            thread,
+            |record| {
+                matches!(
+                    record.wait,
+                    Wait::Signal(signal, signal_generation, mask)
+                        if signal as usize == index
+                            && signal_generation == generation
+                            && mask & bits != 0
+                )
+            },
+            thalyx_abi::generated::status::OK,
+            0,
+            WakeHint::Any,
+        );
     }
 }
 
@@ -196,8 +226,9 @@ pub fn wait(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
         return Err(status::INVALID_ARGUMENT);
     }
     loop {
+        let index;
         {
-            let mut machine = MACHINE.lock();
+            let mut machine = MACHINE.write();
             let cap = resolve(
                 &machine,
                 ctx.domain,
@@ -206,7 +237,7 @@ pub fn wait(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
                 spec.rights,
                 crate::api::now_ns(),
             )?;
-            let index = cap.object.index as usize;
+            index = cap.object.index as usize;
             let observed = machine.signals[index].bits & request.bits;
             if observed != 0 {
                 machine.signals[index].bits &= !observed;
@@ -225,19 +256,21 @@ pub fn wait(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
             if ctx.flags & thalyx_abi::generated::flag::NONBLOCKING != 0 {
                 return Err(status::WOULD_BLOCK);
             }
-            let thread = ctx.thread;
-            machine.threads[thread].wait =
-                Wait::Signal(index as u16, cap.object.generation, request.bits);
-            machine.threads[thread].wait_deadline_ns = ctx.deadline;
-            machine.threads[thread].wake_status = status::OK;
-            machine.threads[thread].state = ThreadState::Blocked;
+            thread::prepare_wait(
+                ctx.thread,
+                Wait::Signal(index as u16, cap.object.generation, request.bits),
+                ctx.deadline,
+            );
             machine.signals[index].waiters += 1;
         }
         crate::sched::block_current();
-        let mut machine = MACHINE.lock();
-        let woken = machine.threads[ctx.thread].wake_status;
-        machine.threads[ctx.thread].wake_status = status::OK;
-        drop(machine);
+        let (woken, _) = thread::take_wake_status(ctx.thread);
+        {
+            let mut machine = MACHINE.write();
+            if machine.signals.get(index).is_some_and(|signal| signal.used) {
+                machine.signals[index].waiters = machine.signals[index].waiters.saturating_sub(1);
+            }
+        }
         if woken != status::OK {
             return Err(woken);
         }
@@ -269,6 +302,7 @@ pub fn arm(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u6
     let index = ctx.cap.object.index as usize;
     machine.timers[index].deadline_ns = request.deadline_ns;
     machine.timers[index].armed = true;
+    NEXT_TIMER.fetch_min(request.deadline_ns, Ordering::AcqRel);
     Ok(request.deadline_ns)
 }
 
@@ -277,6 +311,7 @@ pub fn cancel(machine: &mut Machine, ctx: &Ctx) -> Result<u64, i64> {
     let index = ctx.cap.object.index as usize;
     machine.timers[index].armed = false;
     machine.timers[index].deadline_ns = 0;
+    recompute_next(machine);
     Ok(0)
 }
 
@@ -316,11 +351,12 @@ pub fn expire(machine: &mut Machine, now: u64) -> u32 {
         raise_bits(machine, signal, generation, bits);
         fired += 1;
     }
+    recompute_next(machine);
     fired
 }
 
 /// True when a timer is armed, so the idle path knows something can still wake.
 #[must_use]
-pub fn any_armed(machine: &Machine) -> bool {
-    machine.timers.iter().any(|timer| timer.used && timer.armed)
+pub fn any_armed() -> bool {
+    NEXT_TIMER.load(Ordering::Acquire) != u64::MAX
 }

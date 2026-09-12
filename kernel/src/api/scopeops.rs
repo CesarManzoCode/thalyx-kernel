@@ -20,10 +20,13 @@ use crate::api::{BODY, Ctx, begin_response, receipt};
 use crate::ipc;
 use crate::mm::{Frame, Owner};
 use crate::obj::{ObjKind, ObjRef, ScopeId};
+use crate::sched::WakeHint;
 use crate::scope::{self, Limits, Resource, State};
-use crate::state::{Machine, ThreadState, Wait};
+use crate::state::Machine;
+use crate::thread::{self, ThreadState};
 use crate::ucopy::Staging;
 use crate::{event, trace};
+use core::sync::atomic::Ordering;
 use thalyx_boot_protocol::PAGE_SIZE;
 
 fn to_limits(request: &ScopeLimits) -> Limits {
@@ -71,51 +74,53 @@ pub fn create_child(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> 
         return Err(status::INVALID_ARGUMENT);
     }
     let parent = ctx.cap.object.index;
-    let parent_state = machine.scopes[parent as usize].state;
+    let table = scope::table();
+    let parent_state = table[parent as usize].state();
     if parent_state != State::Open {
         return Err(status::SCOPE_CLOSED);
     }
-    let depth = machine.scopes[parent as usize].depth + 1;
+    let depth = table[parent as usize].depth.load(Ordering::Relaxed) + 1;
     if u64::from(depth) >= thalyx_abi::limit::MAX_SCOPE_DEPTH {
         return Err(status::LIMIT_EXHAUSTED);
     }
     let limits = to_limits(&request.limits);
-    if !fits(&limits, &machine.scopes[parent as usize].limits) {
+    if !fits(&limits, &table[parent as usize].limits.load()) {
         return Err(status::LIMIT_EXHAUSTED);
     }
 
-    let index = match machine
-        .scopes
-        .iter()
-        .position(|node| node.state == State::Empty)
-    {
+    let index = match table.iter().position(|node| node.state() == State::Empty) {
         Some(index) => index,
         // No empty slot: a retired one nothing names any more gives up its
         // accounting for the newcomer.
-        None => (0..machine.scopes.len())
+        None => (0..table.len())
             .find(|&candidate| scope::collect_retired(machine, candidate))
             .ok_or(status::LIMIT_EXHAUSTED)?,
     };
-    if !scope::reserve(&mut machine.scopes, parent, Resource::Metadata, 1) {
+    if !scope::reserve(parent, Resource::Metadata, 1) {
         return Err(status::LIMIT_EXHAUSTED);
     }
     let Some(id) = machine.next_id() else {
-        scope::release(&mut machine.scopes, parent, Resource::Metadata, 1);
+        scope::release(parent, Resource::Metadata, 1);
         return Err(status::LIMIT_EXHAUSTED);
     };
 
-    let generation = machine.scopes[index].generation.saturating_add(1);
-    let node = &mut machine.scopes[index];
-    *node = scope::Scope::empty();
-    node.state = State::Open;
-    node.generation = generation;
-    node.id = id;
-    node.parent = Some(parent);
-    node.depth = depth;
-    node.label = request.label;
-    node.limits = limits;
-    node.window_index = ctx.now / crate::limits::CPU_WINDOW_NS;
-    machine.scopes[parent as usize].children += 1;
+    let node = &table[index];
+    let generation = node.generation.load(Ordering::Relaxed).saturating_add(1);
+    node.reset();
+    node.generation.store(generation, Ordering::Relaxed);
+    node.id.store(id, Ordering::Relaxed);
+    node.set_parent(Some(parent));
+    node.depth.store(depth, Ordering::Relaxed);
+    node.set_label(request.label);
+    node.limits.store(limits);
+    node.window_index
+        .store(ctx.now / crate::limits::CPU_WINDOW_NS, Ordering::Relaxed);
+    crate::sched::forget_credits(index as ScopeId);
+    // Published last: a state store is what a reader without the lock keys on.
+    node.set_state(State::Open);
+    table[parent as usize]
+        .children
+        .fetch_add(1, Ordering::Relaxed);
 
     let object = ObjRef::new(ObjKind::Scope, index as u16, generation);
     let sponsor = machine.domains[ctx.domain].owner_scope;
@@ -133,7 +138,7 @@ pub fn create_child(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> 
     let handle = crate::api::cap_install(machine, ctx.domain, object, grant, None)
         .ok_or(status::LIMIT_EXHAUSTED)?;
 
-    let label = machine.scopes[index].label_str();
+    let label = table[index].label_str();
     trace!(
         "scope.created",
         "scope={index} id={id} label={label} parent={parent} depth={depth} \
@@ -151,27 +156,31 @@ pub fn create_child(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> 
 
 /// Reports limits, consumption and debt.
 pub fn query(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u64, i64> {
-    scope::roll_window(&mut machine.scopes, ctx.now);
+    let _ = machine;
+    scope::roll_window(ctx.now);
     let index = ctx.cap.object.index as usize;
-    let node = &machine.scopes[index];
+    let node = &scope::table()[index];
+    // What the processors are still holding locally is part of the answer:
+    // the pool plus every pending charge is the exact total at this instant.
+    let pending = crate::sched::pending_charges(index as ScopeId);
     let info = ScopeInfo {
-        limits: from_limits(&node.limits),
-        state: node.state.abi(),
-        depth: u32::from(node.depth),
-        parallelism_used: node.parallelism_used,
-        threads: node.threads,
-        scope_id: node.id,
+        limits: from_limits(&node.limits.load()),
+        state: node.state().abi(),
+        depth: u32::from(node.depth.load(Ordering::Relaxed)),
+        parallelism_used: node.parallelism_used.load(Ordering::Relaxed),
+        threads: node.threads.load(Ordering::Relaxed),
+        scope_id: node.id(),
         parent_scope_id: node
-            .parent
-            .map_or(0, |parent| machine.scopes[parent as usize].id),
-        memory_pages_used: node.memory_pages,
-        metadata_used: node.metadata,
-        queue_bytes_used: node.queue_bytes,
-        cpu_window_used_ns: node.cpu_window_ns,
-        cpu_total_ns: node.cpu_total_ns,
-        cpu_debt_ns: node.cpu_debt_ns,
-        closure_used_ns: node.closure_used_ns,
-        window_index: node.window_index,
+            .parent()
+            .map_or(0, |parent| scope::table()[parent as usize].id()),
+        memory_pages_used: node.memory_pages.load(Ordering::Relaxed),
+        metadata_used: node.metadata.load(Ordering::Relaxed),
+        queue_bytes_used: node.queue_bytes.load(Ordering::Relaxed),
+        cpu_window_used_ns: node.cpu_window_ns.load(Ordering::Relaxed) + pending,
+        cpu_total_ns: node.cpu_total_ns.load(Ordering::Relaxed) + pending,
+        cpu_debt_ns: node.cpu_debt_ns.load(Ordering::Relaxed),
+        closure_used_ns: node.closure_used_ns.load(Ordering::Relaxed),
+        window_index: node.window_index.load(Ordering::Relaxed),
     };
     begin_response(staging, ctx.operation);
     staging.write(BODY, info);
@@ -184,30 +193,31 @@ pub fn set_limits(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Re
     if request.reserved0 != 0 {
         return Err(status::INVALID_ARGUMENT);
     }
+    let _ = machine;
     let index = ctx.cap.object.index as usize;
-    if machine.scopes[index].state != State::Open {
+    let node = &scope::table()[index];
+    if node.state() != State::Open {
         return Err(status::SCOPE_CLOSED);
     }
     let limits = to_limits(&request);
-    if let Some(parent) = machine.scopes[index].parent
-        && !fits(&limits, &machine.scopes[parent as usize].limits)
+    if let Some(parent) = node.parent()
+        && !fits(&limits, &scope::table()[parent as usize].limits.load())
     {
         return Err(status::LIMIT_EXHAUSTED);
     }
     // A limit is never lowered below what the subtree already holds: that would
     // turn an accounted charge into a debt nobody agreed to.
-    let node = &machine.scopes[index];
-    if limits.memory_pages < node.memory_pages
-        || limits.metadata_objects < node.metadata
-        || limits.queue_bytes < node.queue_bytes
+    if limits.memory_pages < node.memory_pages.load(Ordering::Relaxed)
+        || limits.metadata_objects < node.metadata.load(Ordering::Relaxed)
+        || limits.queue_bytes < node.queue_bytes.load(Ordering::Relaxed)
     {
         return Err(status::STATE_CONFLICT);
     }
-    machine.scopes[index].limits = limits;
+    node.limits.store(limits);
     event!(
         "scope.limits",
         "scope={index} id={} cpu_budget_ns={} memory_pages={} parallelism={}",
-        machine.scopes[index].id,
+        node.id(),
         limits.cpu_budget_ns,
         limits.memory_pages,
         limits.parallelism
@@ -216,27 +226,20 @@ pub fn set_limits(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Re
 }
 
 /// Wakes every thread whose wait belongs to a fenced scope.
-fn cancel_waits(machine: &mut Machine, root: ScopeId) -> u32 {
+fn cancel_waits(root: ScopeId) -> u32 {
     let mut woken = 0;
-    for index in 0..machine.threads.len() {
-        if machine.threads[index].state != ThreadState::Blocked {
+    for (index, cell) in thread::iter() {
+        if cell.state() != ThreadState::Blocked {
             continue;
         }
-        let scope = machine.threads[index].effective_scope;
-        let owner = machine.threads[index].owner_scope;
-        if !scope::is_within(&machine.scopes, root, scope)
-            && !scope::is_within(&machine.scopes, root, owner)
-        {
+        let scope = cell.effective_scope();
+        let owner = cell.control().owner_scope;
+        if !scope::is_within(root, scope) && !scope::is_within(root, owner) {
             continue;
         }
-        machine.threads[index].wake_status = status::CANCELLED;
-        machine.threads[index].wait = Wait::None;
-        machine.threads[index].wait_deadline_ns = 0;
-        machine.threads[index].state = ThreadState::Ready;
-        woken += 1;
-    }
-    if woken != 0 {
-        crate::sched::kick_idle(machine);
+        if thread::wake_if(index, |_| true, status::CANCELLED, 0, WakeHint::Any) {
+            woken += 1;
+        }
     }
     woken
 }
@@ -244,13 +247,13 @@ fn cancel_waits(machine: &mut Machine, root: ScopeId) -> u32 {
 /// Places the barrier and reports what it changed.
 pub fn fence(machine: &mut Machine, ctx: &Ctx) -> Result<u64, i64> {
     let root = ctx.cap.object.index;
-    let scopes_fenced = scope::fence(&mut machine.scopes, root);
-    let woken = cancel_waits(machine, root);
+    let scopes_fenced = scope::fence(root);
+    let woken = cancel_waits(root);
     let withdrawn = crate::api::ipcops::withdraw_undelivered(machine, root, ctx.now);
     crate::api::ipcops::mark_cancelled(machine, root);
-    let obligations = scope::pending(&machine.scopes, root);
-    let id = machine.scopes[root as usize].id;
-    let label = machine.scopes[root as usize].label_str();
+    let obligations = scope::pending(root);
+    let id = scope::table()[root as usize].id();
+    let label = scope::table()[root as usize].label_str();
     trace!(
         "scope.fenced",
         "scope={root} id={id} label={label} scopes_fenced={scopes_fenced} waits_cancelled={woken} \
@@ -274,16 +277,17 @@ pub fn fence(machine: &mut Machine, ctx: &Ctx) -> Result<u64, i64> {
         u64::from(withdrawn),
         false,
     );
-    scope::advance_quiescence(&mut machine.scopes, ctx.now);
+    scope::advance_quiescence(ctx.now);
     Ok(u64::from(scopes_fenced))
 }
 
 fn report(machine: &mut Machine, root: ScopeId, now: u64) -> DrainReport {
-    scope::advance_quiescence(&mut machine.scopes, now);
-    let obligations = scope::pending(&machine.scopes, root);
-    let node = &machine.scopes[root as usize];
+    let _ = machine;
+    scope::advance_quiescence(now);
+    let obligations = scope::pending(root);
+    let node = &scope::table()[root as usize];
     let mut report = DrainReport::zeroed();
-    report.state = node.state.abi();
+    report.state = node.state().abi();
     report.threads_running = obligations.threads;
     report.invocations_pending = obligations.invocations;
     report.effects_pending = obligations.effects;
@@ -291,8 +295,8 @@ fn report(machine: &mut Machine, root: ScopeId, now: u64) -> DrainReport {
     report.undelivered_cancelled = obligations.undelivered;
     report.retained_pages = obligations.pages;
     report.retained_metadata = obligations.metadata;
-    report.last_progress_ns = node.last_progress_ns;
-    report.token = node.drain_token;
+    report.last_progress_ns = node.last_progress_ns.load(Ordering::Relaxed);
+    report.token = node.drain_token.load(Ordering::Relaxed);
     report
 }
 
@@ -312,7 +316,7 @@ pub fn retire(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
     begin_response(staging, ctx.operation);
     staging.write(BODY, value);
 
-    let state = machine.scopes[root as usize].state;
+    let state = scope::table()[root as usize].state();
     if state == State::Open {
         return Err(status::STATE_CONFLICT);
     }
@@ -331,17 +335,17 @@ pub fn retire(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
     // and useless figure the resource contract warns against.
     let released = release_sponsored(machine, root);
 
-    let id = machine.scopes[root as usize].id;
-    let previous = machine.scopes[root as usize].state.name();
-    let pages = machine.scopes[root as usize].memory_pages;
-    let metadata = machine.scopes[root as usize].metadata;
-    for index in 0..machine.scopes.len() {
-        if machine.scopes[index].state == State::Empty
-            || !scope::is_within(&machine.scopes, root, index as ScopeId)
-        {
+    let node = &scope::table()[root as usize];
+    let id = node.id();
+    let previous = node.state().name();
+    let pages = node.memory_pages.load(Ordering::Relaxed);
+    let metadata = node.metadata.load(Ordering::Relaxed);
+    for index in 0..scope::table().len() {
+        let other = &scope::table()[index];
+        if other.state() == State::Empty || !scope::is_within(root, index as ScopeId) {
             continue;
         }
-        machine.scopes[index].state = State::Retired;
+        other.set_state(State::Retired);
     }
     trace!(
         "scope.retired",
@@ -379,7 +383,7 @@ fn withdraw_everywhere(machine: &mut Machine, object: ObjRef) {
             continue;
         }
         for slot in 0..crate::limits::MAX_CAPS {
-            let entry = machine.domains[domain].caps.slots[slot];
+            let entry = machine.domains[domain].caps.get_mut().slots[slot];
             if entry.live && entry.object == object {
                 crate::api::cap_release_slot(machine, domain, slot);
             }
@@ -415,8 +419,7 @@ fn release_sponsored(machine: &mut Machine, root: ScopeId) -> (u64, u64) {
                 object.id,
             )
         };
-        if state == crate::memobj::State::Empty || !scope::is_within(&machine.scopes, root, sponsor)
-        {
+        if state == crate::memobj::State::Empty || !scope::is_within(root, sponsor) {
             continue;
         }
         if map_count != 0 {
@@ -438,8 +441,8 @@ fn release_sponsored(machine: &mut Machine, root: ScopeId) -> (u64, u64) {
                 );
             }
         }
-        scope::release(&mut machine.scopes, sponsor, Resource::MemoryPages, count);
-        scope::release(&mut machine.scopes, sponsor, Resource::Metadata, 1);
+        scope::release(sponsor, Resource::MemoryPages, count);
+        scope::release(sponsor, Resource::Metadata, 1);
         machine.memories[index] = crate::memobj::MemoryObject::empty();
         machine.memories[index].generation = generation;
         trace!(
@@ -447,27 +450,28 @@ fn release_sponsored(machine: &mut Machine, root: ScopeId) -> (u64, u64) {
             "object={id} pages={count} state_at_release={} sponsor_scope={} \
              reason=scope_retired",
             state.name(),
-            machine.scopes[sponsor as usize].id
+            scope::table()[sponsor as usize].id()
         );
         pages += count;
         objects += 1;
     }
 
     for index in 0..machine.endpoints.len() {
-        let (used, owner_scope, generation) = {
-            let endpoint = &machine.endpoints[index];
-            (endpoint.used, endpoint.owner_scope, endpoint.generation)
-        };
-        if !used || !scope::is_within(&machine.scopes, root, owner_scope) {
+        let (used, generation) = (
+            machine.endpoint_ids[index].used,
+            machine.endpoint_ids[index].generation,
+        );
+        let owner_scope = machine.endpoints[index].get_mut().owner_scope;
+        if !used || !scope::is_within(root, owner_scope) {
             continue;
         }
         withdraw_everywhere(
             machine,
             ObjRef::new(ObjKind::Endpoint, index as u16, generation),
         );
-        scope::release(&mut machine.scopes, owner_scope, Resource::Metadata, 1);
-        machine.endpoints[index] = crate::ipc::Endpoint::empty();
-        machine.endpoints[index].generation = generation;
+        scope::release(owner_scope, Resource::Metadata, 1);
+        *machine.endpoints[index].get_mut() = crate::ipc::Endpoint::empty();
+        machine.endpoint_ids[index].used = false;
         objects += 1;
     }
 
@@ -476,14 +480,14 @@ fn release_sponsored(machine: &mut Machine, root: ScopeId) -> (u64, u64) {
             let signal = &machine.signals[index];
             (signal.used, signal.owner_scope, signal.generation)
         };
-        if !used || !scope::is_within(&machine.scopes, root, owner_scope) {
+        if !used || !scope::is_within(root, owner_scope) {
             continue;
         }
         withdraw_everywhere(
             machine,
             ObjRef::new(ObjKind::Signal, index as u16, generation),
         );
-        scope::release(&mut machine.scopes, owner_scope, Resource::Metadata, 1);
+        scope::release(owner_scope, Resource::Metadata, 1);
         machine.signals[index] = crate::events::Signal::empty();
         machine.signals[index].generation = generation;
         objects += 1;
@@ -494,14 +498,14 @@ fn release_sponsored(machine: &mut Machine, root: ScopeId) -> (u64, u64) {
             let timer = &machine.timers[index];
             (timer.used, timer.owner_scope, timer.generation)
         };
-        if !used || !scope::is_within(&machine.scopes, root, owner_scope) {
+        if !used || !scope::is_within(root, owner_scope) {
             continue;
         }
         withdraw_everywhere(
             machine,
             ObjRef::new(ObjKind::Timer, index as u16, generation),
         );
-        scope::release(&mut machine.scopes, owner_scope, Resource::Metadata, 1);
+        scope::release(owner_scope, Resource::Metadata, 1);
         machine.timers[index] = crate::events::Timer::empty();
         machine.timers[index].generation = generation;
         objects += 1;
@@ -515,9 +519,10 @@ fn release_sponsored(machine: &mut Machine, root: ScopeId) -> (u64, u64) {
 pub fn outstanding(machine: &Machine, root: ScopeId) -> u32 {
     let mut count = 0;
     for invocation in machine.invocations.iter() {
+        let invocation = invocation.lock();
         if invocation.state != ipc::State::Empty
             && invocation.state != ipc::State::Resolved
-            && scope::is_within(&machine.scopes, root, invocation.origin_scope)
+            && scope::is_within(root, invocation.origin_scope)
         {
             count += 1;
         }

@@ -94,7 +94,17 @@ typedef struct {
     uint64_t arg1;
     uint64_t arg2;
     uint64_t arg3;
+    uint64_t flags;           /* TH_FLAG_*, about the runtime and not the role  */
 } th_config;
+
+/* The runtime keeps its own startup evidence instead of writing it. A note
+ * costs a synchronous record on the diagnostic plane -- about two milliseconds
+ * on this platform, measured -- and a launcher that is timing a start pays for
+ * every one of them. Set for a run that times starts and does not read them. */
+#define TH_FLAG_QUIET_STARTUP 1ull
+
+/* Whether the runtime was asked to keep its startup evidence to itself. */
+int th_quiet_startup(void);
 
 const th_config *th_boot(void);
 

@@ -284,7 +284,8 @@ def main() -> int:
     parser.add_argument("--sizes", type=Path, default=None,
                         help="samples per entry, as a pilot's sizes.json recommends")
     parser.add_argument("--timeout", type=float, default=1500.0)
-    parser.add_argument("--only", nargs="*", default=None, help="run only these benchmark names")
+    parser.add_argument("--only", nargs="*", default=None,
+                        help="run only these benchmarks, by name or as name:param")
     arguments = parser.parse_args()
 
     try:
@@ -311,7 +312,8 @@ def main() -> int:
     sizes = json.loads(arguments.sizes.read_text()) if arguments.sizes else {}
     entries = suite(arguments.scale, sizes)
     if arguments.only:
-        entries = [entry for entry in entries if entry[0] in arguments.only]
+        entries = [entry for entry in entries
+                   if entry[0] in arguments.only or f"{entry[0]}:{entry[1]}" in arguments.only]
     model_bytes = (BUILD / "reference/tiny.gguf").stat().st_size
     campaign = {
         "label": arguments.label,

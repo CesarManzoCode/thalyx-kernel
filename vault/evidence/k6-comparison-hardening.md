@@ -106,6 +106,80 @@ Unidades: nanosegundos en las primitivas y el despertar; nanosegundos de ejecuci
 
 **Lo que la campaña no dice.** El estimador recomienda 42 rondas para que las medianas de `scale.ipc` con tres y cuatro pares queden a un 5 % entre arranques; se corrieron seis, y los intervalos de esas dos filas lo reflejan. Ningún número aquí es una medida sobre hardware físico. Las dos ejecuciones de Linux difieren entre sí en las primitivas de entrada y en IPC en un 5–6 %, que es lo que las mitigaciones cuestan en este anfitrión; este kernel no paga nada equivalente porque no mitiga nada, y eso es una diferencia de garantías, no de velocidad.
 
+## Segunda fase: partir el cerrojo (`perf/ipc-scalability`)
+
+Lo que la campaña de referencia dejó dicho —que el IPC no escala con los pares
+y que el cerrojo único de la máquina es la causa— se atacó después de ella. Lo
+que sigue son medianas de tres rondas en el mismo anfitrión y la misma
+configuración, sobre `8a7eeb1`, con las puertas K1–K5 en verde bajo TCG; el
+brazo de Linux es el de la campaña de referencia. Tres rondas no son las 43 que
+el estimador pide para las filas de IPC con más pares, y las cifras se dan con
+su coeficiente de variación por ronda para que se vea lo que sí sostienen.
+
+| Fila | Antes (`5aa86a2`) | Ahora | cv | Linux | Veredicto |
+|---|---|---|---|---|---|
+| `entry.clock` | — | 60 ns | 0,0 % | 110 | gana 1,83× |
+| `ipc.call:0` | 2 352 idas/corte | 2 061 ns | 0,2 % | 6 980 | gana 3,39× |
+| `ipc.caps:4` | — | 3 051 ns | 0,5 % | 7 400 | gana 2,43× |
+| `mem.map:1` | — | 1 940 ns | 0,2 % | 1 830 | **pierde 0,94×** |
+| `mem.map:64` | — | 10 043 ns | 0,0 % | 37 550 | gana 3,74× |
+| `mem.seal:16` | — | 10 803 ns | 0,2 % | 23 110 | gana 2,14× |
+| `cap.derive` | — | 440 ns | 0,0 % | 140 | **pierde 0,32×** |
+| `sched.wake` | — | 1 175 ns | 1,1 % | 2 740 | gana 2,33× |
+| `scale.ipc:1` | 2 352 | 4 608 | 0,1 % | 1 511 | gana 3,05× |
+| `scale.ipc:2` | 1 701 | 6 362 | 0,5 % | 3 006 | gana 2,12× |
+| `scale.ipc:3` | 1 597 | 7 797 | 0,2 % | 7 410 | gana 1,05× |
+| `scale.ipc:4` | 1 806 | 8 518 | 0,1 % | 11 914 | **pierde 0,71×** |
+| `closure.unit` | — | 12 543 ns | 1,2 % | 49 940 | gana 3,98× |
+| `engine.load` | 30 890 µs | 6 343 µs | — | 3 499 | **pierde 0,55×** |
+| `engine.infer:0` | — | 1 792 µs | — | 1 642 | **pierde 0,92×** |
+| `engine.cancel` | 7 174 µs | 13 414 µs | 2,6 % | 4 936 | **pierde 0,37×** |
+| `quota.share:25` | — | 2 483 404 ns | — | 2 443 152 | pierde 0,98× |
+| `scale.compute:4` | — | 110 715 | — | 111 870 | pierde 0,99× |
+
+**Lo que se hizo.** El cerrojo de la máquina es ahora un cerrojo de lectores por
+procesador. Las cuatro operaciones del viaje de ida y vuelta —admitir, recibir,
+responder, cerrar el ticket— lo toman compartido y se sirven de un cerrojo por
+registro: canal, invocación, celda de mensaje, tabla de capacidades de un
+dominio, nodo de grant, log. El plano de control lo sigue tomando en exclusiva.
+`vault/architecture/concurrency.md` recoge el orden y las tres reglas que lo
+hacen posible.
+
+**Lo que costó llegar.** La primera versión del reparto medía *peor* que el
+cerrojo único —6 411 idas y vueltas con cuatro pares contra 7 344—, con un 40 %
+menos de espera. Un cerrojo se toma y se suelta con dos operaciones atómicas
+sobre una línea que dos procesadores se pasan, y el viaje de ida y vuelta
+llegó a tomar cuarenta. Lo que hizo que el reparto pagara fue bajar esa
+cuenta —un recorrido de linaje en la misma toma que leyó el nodo, una toma por
+liberación de invocación en vez de cinco, el recibo decidiendo en su propia
+toma si alguien espera— y cambiar el turno por un intercambio en los cerrojos
+cortos. Queda un coste que no se ha recuperado: las filas de un solo par pagan
+entre un 5 y un 17 % —`ipc.call:0` 1 920 → 2 061 ns, `cap.derive` 370 → 440,
+`mem.map:1` 1 810 → 1 940, que es la fila que el reparto convirtió en derrota.
+
+**Dónde está ahora el límite, medido.** Con el reparto hecho, la espera por
+cerrojos es el 4 % del tiempo de máquina. Lo que limita `scale.ipc:4` es la
+**contabilidad de ámbito por la cadena de ancestros**: operaciones atómicas de
+lectura-modificación-escritura sobre líneas que todos los procesadores
+comparten, recorridas de la hoja a la raíz. Neutralizándola entera —sondas
+desechadas, nunca integradas— las cuatro filas dan 4 931, 7 315, 9 536 y
+**11 070**, contra 8 518 ahora y 11 914 en Linux. Por partes, cada una medida
+sola con cuatro pares: las reservas y devoluciones de `QueueBytes` y
+`Metadata` valen un 12,5 %; los contadores de simultaneidad por despacho un
+11,4 %; el resto es el cargo de ejecución. **Aun con toda ella gratis la fila
+seguiría por debajo de Linux**, y hacerla barata sin debilitar el contrato
+—cada contador con techo comprobado necesitaría reservas por procesador, y una
+reserva por procesador permite rechazar a un hermano mientras queda sitio— es
+el problema de diseño que [OQ-04](../roadmap/open-questions.md) deja abierto.
+
+**`engine.cancel`.** La fila pasó de 7 174 a 13 414 µs dentro de este sprint.
+Bisecada: el cambio es `d96804e`, que hace que el runtime de K6 no narre su
+propio arranque, y **ese commit no toca una línea del kernel**. La fila mide una
+cancelación corriendo contra una inferencia; arrancar el motor más rápido
+cambia cuál de las dos gana la carrera. No es una regresión del camino de
+cancelación, y `engine.load` —la fila que ese mismo commit buscaba— bajó de
+30 890 a 6 343 µs.
+
 ## Hardware físico acotado
 
 `tools/inventory_host.py` registra la máquina física bajo KVM tal como se describe a sí misma, sin privilegios: procesador, banderas de interés, topología SMT, gobernador, vulnerabilidades del anfitrión, memoria, firmware y DMI, grupos IOMMU con sus dispositivos, dispositivos de bloque con su caché de escritura y FUA, módulo KVM y sus parámetros. La campaña lo guarda junto a sus resultados. Es el inventario que [OQ-05](../roadmap/open-questions.md) pide y no es un arranque: este kernel no ha corrido sobre esa máquina fuera de KVM, y ninguna cifra de esta nota dice lo contrario.
