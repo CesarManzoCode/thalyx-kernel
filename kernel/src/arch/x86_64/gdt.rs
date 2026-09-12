@@ -31,12 +31,22 @@ pub const TSS_SELECTOR: u16 = 0x28;
 
 /// `IA32_STAR` bits 47:32 select the kernel selectors used by `syscall`.
 pub const STAR_SYSCALL_BASE: u64 = KERNEL_CODE as u64;
-/// `IA32_STAR` bits 63:48; `sysret` derives user CS from base + 16 and user SS
-/// from base + 8, which is why this is the kernel data selector.
-pub const STAR_SYSRET_BASE: u64 = KERNEL_DATA as u64;
+/// `IA32_STAR` bits 63:48; `sysretq` derives user CS from base + 16 and user
+/// SS from base + 8, which is why this is the kernel data selector -- **with
+/// its requested privilege level already set to three**.
+///
+/// The privilege bits belong in this field and not in the processor's
+/// arithmetic. Intel's `SYSRET` forces the returned selectors to RPL 3; AMD's
+/// takes them from this field as it stands, and on a processor that does the
+/// latter a base with RPL 0 puts ring-3 code on `SS = 0x18`. Nothing faults
+/// there and nothing looks wrong: the fault arrives at the *next* interrupt
+/// from that thread, whose `iretq` finds a frame whose stack selector does not
+/// agree with its code selector, in the kernel, on another processor's stack.
+/// Setting it here makes both implementations produce the same two selectors.
+pub const STAR_SYSRET_BASE: u64 = (KERNEL_DATA as u64) | 3;
 
-const _: () = assert!(USER_DATA as u64 == STAR_SYSRET_BASE + 8 + 3);
-const _: () = assert!(USER_CODE as u64 == STAR_SYSRET_BASE + 16 + 3);
+const _: () = assert!(USER_DATA as u64 == STAR_SYSRET_BASE + 8);
+const _: () = assert!(USER_CODE as u64 == STAR_SYSRET_BASE + 16);
 
 /// 64-bit task state segment. `iomap_base` points past the end of the segment,
 /// so no I/O permission bitmap exists and every port access from ring 3 faults.
