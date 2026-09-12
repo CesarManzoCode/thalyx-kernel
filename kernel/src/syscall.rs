@@ -34,19 +34,24 @@ use crate::{event, trace};
 
 /// Handles one `syscall` entry.
 pub fn handle(frame: &mut TrapFrame) {
-    crate::trap::note_user_entry(frame);
-
     // No lock is taken to find out who entered: the current thread of this
     // processor is this processor's own, and the counter is its own. The
     // machine lock is taken by the operations that need it, which is what
     // makes an entry that needs nothing -- a version query -- cost an entry
     // and a return rather than a lock acquisition on a line every other
-    // processor is also writing.
+    // processor is also writing. The thread is found once and handed to the
+    // ring-3 confirmation, which used to find it again.
     let (domain, thread) = {
         let current = crate::sched::current_thread();
         let cell = crate::thread::get(current);
+        crate::trap::note_entry_of(frame, current, cell);
+        // Read and written rather than incremented atomically: the only
+        // writer is the thread itself, running here, and a locked instruction
+        // for a number nobody else writes costs more than the count is worth
+        // on a path every entry takes.
+        let count = cell.syscalls.load(core::sync::atomic::Ordering::Relaxed);
         cell.syscalls
-            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            .store(count + 1, core::sync::atomic::Ordering::Relaxed);
         if cell.kind() != ThreadKind::User {
             // Ring 0 cannot execute `syscall` in this kernel; reaching here
             // would mean the entry was taken from a context that has no domain.

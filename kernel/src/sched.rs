@@ -1352,7 +1352,8 @@ pub fn on_kernel_exit() {
     // because of it. Every return from the kernel to a thread's own code is
     // a point where the reservation can be honoured exactly, and it costs one
     // counter read.
-    if cpu::rdtsc() >= CPUS[me].deadline_tsc.load(Ordering::Relaxed) {
+    let deadline = CPUS[me].deadline_tsc.load(Ordering::Relaxed);
+    if deadline != u64::MAX && cpu::rdtsc() >= deadline {
         {
             // The reservation ran out while the thread was in the kernel, so
             // its dispatch ends here rather than at the next tick. Counted the

@@ -29,13 +29,22 @@ pub fn note_user_entry(frame: &TrapFrame) {
     if !frame.from_user() {
         return;
     }
-    // Every entry from user mode passes here, so it takes no lock: the
-    // confirmation is a one-shot flag on this processor's own current thread,
-    // and the swap makes exactly one entry the announcing one.
+    let current = crate::sched::current_thread();
+    note_entry_of(frame, current, crate::thread::get(current));
+}
+
+/// The same, for a caller that has already found this processor's thread.
+///
+/// Every entry from user mode passes through one of these, so neither takes a
+/// lock and the common case is a single read: the confirmation is a one-shot
+/// flag on this processor's own current thread, already set for every entry
+/// after the first.
+pub fn note_entry_of(frame: &TrapFrame, current: usize, cell: &'static crate::thread::ThreadCell) {
     let announce = {
-        let current = crate::sched::current_thread();
-        let cell = crate::thread::get(current);
         if cell.kind() != ThreadKind::User
+            || cell
+                .ring3_confirmed
+                .load(core::sync::atomic::Ordering::Relaxed)
             || cell
                 .ring3_confirmed
                 .swap(true, core::sync::atomic::Ordering::Relaxed)
