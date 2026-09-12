@@ -283,10 +283,18 @@ fn notify(me: usize, targets: u64) {
 pub struct Ack {
     /// Generation waited for.
     pub generation: u64,
-    /// Processors that acknowledged it.
+    /// Processors that hold none of the invalidated translations: those that
+    /// recorded this generation, plus those that could not have been holding
+    /// one in the first place.
     pub acknowledged: u32,
-    /// Processors that were online when the wait started.
+    /// Processors that were online when the wait started. The claim is about
+    /// all of them, however it was obtained for each.
     pub expected: u32,
+    /// Processors that had the address space loaded and were therefore waited
+    /// for. Equal to `expected` for an invalidation that names no space.
+    pub live: u32,
+    /// Of those, the ones this processor had to interrupt.
+    pub interrupted: u32,
     /// Spins the wait took.
     pub spins: u64,
     /// Whether the wait gave up without every acknowledgement.
@@ -340,6 +348,8 @@ fn wait_for_mask(generation: u64, expected_mask: u64) -> Ack {
                 generation,
                 acknowledged,
                 expected,
+                live: expected,
+                interrupted: expected.saturating_sub(1),
                 spins,
                 timed_out: false,
             };
@@ -358,6 +368,8 @@ fn wait_for_mask(generation: u64, expected_mask: u64) -> Ack {
                 generation,
                 acknowledged,
                 expected,
+                live: expected,
+                interrupted: expected.saturating_sub(1),
                 spins,
                 timed_out: true,
             };
@@ -388,24 +400,39 @@ pub fn shootdown() -> Ack {
 /// it to happen.
 pub fn shootdown_space(domain: usize) -> Ack {
     let generation = publish();
-    let live = live_mask(domain) & ONLINE.load(Ordering::SeqCst);
+    let online = ONLINE.load(Ordering::SeqCst);
+    let live = live_mask(domain) & online;
     let me = crate::percpu::index();
     let others = live & !(1u64 << me);
+    // The claim is still about every processor, and it is still that none of
+    // them holds a translation this invalidation removed. It is obtained two
+    // ways. A processor with the space loaded is waited for. A processor
+    // without it loaded left the space by writing `CR3`, which retired every
+    // entry of it -- no mapping here is global and there are no address-space
+    // identifiers -- so it was already holding nothing, and an interrupt
+    // asking it to flush everything it holds of somebody else's space would
+    // establish nothing this did not already know.
+    let elsewhere = (online & !live).count_ones();
     if others == 0 {
-        // This processor's own record is not moved: it removed the entries page
-        // by page as it went, which retires exactly what had to be retired,
-        // and the object it just unmapped records that. Making it flush
-        // everything else it holds as well, to move one counter, is the cost
-        // this path exists to avoid.
+        // This processor's own record is not moved either: it removed the
+        // entries page by page as it went, which retires exactly what had to
+        // be retired, and the object it just unmapped records that.
         return Ack {
             generation,
-            acknowledged: (live & (1u64 << me)).count_ones(),
-            expected: live.count_ones(),
+            acknowledged: online.count_ones(),
+            expected: online.count_ones(),
+            live: live.count_ones(),
+            interrupted: 0,
             spins: 0,
             timed_out: false,
         };
     }
-    wait_for_mask(generation, live)
+    let mut ack = wait_for_mask(generation, live);
+    ack.acknowledged += elsewhere;
+    ack.expected = online.count_ones();
+    ack.live = live.count_ones();
+    ack.interrupted = others.count_ones();
+    ack
 }
 
 /// Whether every processor in `mask` has flushed at `generation` or later.

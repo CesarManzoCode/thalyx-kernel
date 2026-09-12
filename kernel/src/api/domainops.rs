@@ -345,12 +345,15 @@ pub fn unmap(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64
         "mem.unmapped",
         "domain={target} vaddr=0x{:x} pages={pages} active_in_space={live} \
          space_cpu_mask=0x{mask:x} space_cpus={} invalidation_generation={} \
-         acknowledged_cpus={} expected_cpus={} acknowledged={}",
+         acknowledged_cpus={} expected_cpus={} loaded_cpus={} interrupted_cpus={} \
+         acknowledged={}",
         request.vaddr,
         mask.count_ones(),
         ack.generation,
         ack.acknowledged,
         ack.expected,
+        ack.live,
+        ack.interrupted,
         u8::from(!ack.timed_out)
     );
     // Now that the processors that could hold a translation have acknowledged,

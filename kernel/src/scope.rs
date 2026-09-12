@@ -941,7 +941,8 @@ pub fn reserve_cpu(scope: ScopeId, amount: u64, recovery: bool, window: u64) -> 
         }
         if !recovery {
             // Recorded at every level where the commitment was made, so a
-            // parent's peak reflects what its children promised together.
+            // parent's peak reflects what its children promised together. A
+            // peak that is already higher needs no write.
             for &index in nodes {
                 let node = &SCOPES[index as usize];
                 let committed = if index == scope {
@@ -949,8 +950,10 @@ pub fn reserve_cpu(scope: ScopeId, amount: u64, recovery: bool, window: u64) -> 
                 } else {
                     node.cpu_committed_ns.load(Ordering::Relaxed)
                 };
-                node.max_committed_ns
-                    .fetch_max(committed, Ordering::Relaxed);
+                if node.max_committed_ns.load(Ordering::Relaxed) < committed {
+                    node.max_committed_ns
+                        .fetch_max(committed, Ordering::Relaxed);
+                }
             }
         }
         return true;
@@ -1000,7 +1003,13 @@ pub fn take_running(scope: ScopeId) -> bool {
             node.running.fetch_sub(1, Ordering::AcqRel);
             break;
         }
-        node.max_running.fetch_max(previous + 1, Ordering::Relaxed);
+        // The peak is a high-water mark, and a high-water mark that is already
+        // higher needs no write. Read first: this runs on every dispatch, at
+        // every level of the chain, and the levels near the root are lines
+        // every processor in the machine is touching.
+        if node.max_running.load(Ordering::Relaxed) < previous + 1 {
+            node.max_running.fetch_max(previous + 1, Ordering::Relaxed);
+        }
         done += 1;
     }
     if done == nodes.len() {
@@ -1017,18 +1026,14 @@ pub fn take_running(scope: ScopeId) -> bool {
 /// Returns one simultaneity slot to `scope` and every ancestor.
 pub fn drop_running(scope: ScopeId) {
     for node in Chain::of(scope).iter() {
-        let mut current = node.running.load(Ordering::Relaxed);
-        loop {
-            let next = current.saturating_sub(1);
-            match node.running.compare_exchange_weak(
-                current,
-                next,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(seen) => current = seen,
-            }
+        // One instruction where a compare-and-swap loop used to be. The
+        // counter is only ever decremented by a dispatch that incremented it,
+        // so it cannot be at zero here; the guard below is for a slot that was
+        // reset underneath a settle, and it costs a read that the
+        // decrement's own return value provides anyway.
+        let previous = node.running.fetch_sub(1, Ordering::AcqRel);
+        if previous == 0 {
+            node.running.store(0, Ordering::Relaxed);
         }
     }
 }

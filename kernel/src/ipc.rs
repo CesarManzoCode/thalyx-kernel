@@ -72,6 +72,15 @@ pub struct Endpoint {
     pub label: [u8; 16],
     /// Capability entries naming this endpoint.
     pub refs: u32,
+    /// Threads believed to be blocked waiting to receive here, one bit each.
+    ///
+    /// A hint and only a hint: a wake still checks, under the thread's own
+    /// lock, that the thread is blocked on exactly this endpoint and this
+    /// generation, so a stale bit wakes nobody and a missing one cannot
+    /// happen -- the bit is set under the same lock that registers the wait.
+    /// What it replaces is a walk of the whole thread table on every message
+    /// admitted.
+    pub receivers: u64,
 }
 
 impl Endpoint {
@@ -99,6 +108,7 @@ impl Endpoint {
             delivered: 0,
             label: [0; 16],
             refs: 0,
+            receivers: 0,
         }
     }
 

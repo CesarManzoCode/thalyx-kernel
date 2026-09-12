@@ -17,6 +17,7 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::arch::x86_64::cpu;
+use crate::limits::MAX_CPUS;
 
 /// Which hardware the monotonic clock reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,8 +48,16 @@ impl Source {
 static EPOCH_TSC: AtomicU64 = AtomicU64::new(0);
 static TSC_HZ: AtomicU64 = AtomicU64::new(0);
 static SOURCE: AtomicU64 = AtomicU64::new(0);
-static HIGH_WATER_NS: AtomicU64 = AtomicU64::new(0);
-static OBSERVATIONS: AtomicU64 = AtomicU64::new(0);
+/// Newest reading each processor has published, and how many it has taken.
+///
+/// One line per processor rather than one for the machine. The check is the
+/// same -- a reading is compared against what another processor published
+/// before it was taken -- but a high-water mark every processor writes on
+/// every reading is a cache line four processors fight over thousands of
+/// times a second, and the scheduler reads the clock on every decision. Here
+/// each processor writes only its own line and reads the others'.
+static PUBLISHED_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static READINGS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static REGRESSIONS: AtomicU64 = AtomicU64::new(0);
 static WORST_REGRESSION_NS: AtomicU64 = AtomicU64::new(0);
 
@@ -109,16 +118,23 @@ pub fn monotonic_ns() -> Option<u64> {
 /// visible: hundreds of thousands of "regressions" a run, none of them a
 /// violation of anything.
 pub fn observe() -> u64 {
-    let published = HIGH_WATER_NS.load(Ordering::Acquire);
+    let me = crate::percpu::index().min(MAX_CPUS - 1);
+    let mut published = 0u64;
+    for slot in &PUBLISHED_NS {
+        published = published.max(slot.load(Ordering::Acquire));
+    }
     let Some(now) = monotonic_ns() else {
         return 0;
     };
-    OBSERVATIONS.fetch_add(1, Ordering::Relaxed);
+    READINGS[me].store(READINGS[me].load(Ordering::Relaxed) + 1, Ordering::Relaxed);
     if published > now {
         REGRESSIONS.fetch_add(1, Ordering::Relaxed);
         WORST_REGRESSION_NS.fetch_max(published - now, Ordering::AcqRel);
     }
-    HIGH_WATER_NS.fetch_max(now, Ordering::Release);
+    // Only this processor writes this slot, and only ever forwards.
+    if PUBLISHED_NS[me].load(Ordering::Relaxed) < now {
+        PUBLISHED_NS[me].store(now, Ordering::Release);
+    }
     now
 }
 
@@ -127,7 +143,10 @@ pub fn observe() -> u64 {
 #[must_use]
 pub fn monotonicity() -> (u64, u64, u64) {
     (
-        OBSERVATIONS.load(Ordering::Relaxed),
+        READINGS
+            .iter()
+            .map(|slot| slot.load(Ordering::Relaxed))
+            .sum(),
         REGRESSIONS.load(Ordering::Relaxed),
         WORST_REGRESSION_NS.load(Ordering::Relaxed),
     )

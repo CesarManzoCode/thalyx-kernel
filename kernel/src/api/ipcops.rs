@@ -116,6 +116,7 @@ pub fn create_endpoint(
         delivered: 0,
         label: request.label,
         refs: 0,
+        receivers: 0,
     };
 
     let object = ObjRef::new(ObjKind::Endpoint, index as u16, generation);
@@ -521,7 +522,10 @@ fn wake_receiver(machine: &mut Machine, endpoint: usize, kick: bool) {
     // A caller that will block for the reply hands its processor to the
     // receiver; a sender that keeps running sends it to an idle one.
     let hint = if kick { WakeHint::Any } else { WakeHint::Sync };
-    for (index, _) in thread::iter() {
+    let mut waiting = machine.endpoints[endpoint].receivers;
+    while waiting != 0 {
+        let index = waiting.trailing_zeros() as usize;
+        waiting &= waiting - 1;
         if thread::wake_if(
             index,
             |record| record.wait == Wait::Receive(endpoint as u16, generation),
@@ -529,8 +533,12 @@ fn wake_receiver(machine: &mut Machine, endpoint: usize, kick: bool) {
             0,
             hint,
         ) {
+            machine.endpoints[endpoint].receivers &= !(1u64 << index);
             return;
         }
+        // It is not waiting here any more: a timeout, a cancellation or a
+        // message it already took. The bit goes with it.
+        machine.endpoints[endpoint].receivers &= !(1u64 << index);
     }
 }
 
@@ -684,6 +692,9 @@ pub fn receive(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i
                 Wait::Receive(endpoint as u16, machine.endpoints[endpoint].generation),
                 ctx.deadline,
             );
+            // Registered under the same lock as the wait, so a sender that
+            // takes the lock after this finds the bit.
+            machine.endpoints[endpoint].receivers |= 1u64 << ctx.thread;
         }
         crate::sched::block_current();
         let (woken, _) = thread::take_wake_status(ctx.thread);

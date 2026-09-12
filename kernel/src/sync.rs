@@ -31,7 +31,31 @@
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+/// Acquisitions of the control lock, and time-stamp counter cycles spent
+/// waiting for it.
+///
+/// Retained rather than written: a record per acquisition would cost more than
+/// the acquisition and would not survive its own measurement. What a run
+/// reports is the total and the worst wait, which is what "the lock was the
+/// limit" or "the lock was not the limit" is an argument about.
+static CONTENDED_WAITS: AtomicU64 = AtomicU64::new(0);
+static CONTENDED_CYCLES: AtomicU64 = AtomicU64::new(0);
+static WORST_WAIT_CYCLES: AtomicU64 = AtomicU64::new(0);
+static ACQUISITIONS: AtomicU64 = AtomicU64::new(0);
+
+/// Acquisitions, acquisitions that had to wait, cycles spent waiting and the
+/// longest single wait.
+#[must_use]
+pub fn contention() -> (u64, u64, u64, u64) {
+    (
+        ACQUISITIONS.load(Ordering::Relaxed),
+        CONTENDED_WAITS.load(Ordering::Relaxed),
+        CONTENDED_CYCLES.load(Ordering::Relaxed),
+        WORST_WAIT_CYCLES.load(Ordering::Relaxed),
+    )
+}
 
 /// A mutual-exclusion cell that never blocks and never yields while held.
 pub struct SpinLock<T> {
@@ -65,10 +89,19 @@ impl<T> SpinLock<T> {
     /// holder that is no longer running.
     pub fn lock(&self) -> SpinGuard<'_, T> {
         let ticket = self.next.fetch_add(1, Ordering::Relaxed);
+        ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
+        if self.serving.load(Ordering::Acquire) == ticket {
+            return SpinGuard { lock: self };
+        }
+        let began = crate::arch::x86_64::cpu::rdtsc();
         while self.serving.load(Ordering::Acquire) != ticket {
             crate::tlb::refresh_local();
             core::hint::spin_loop();
         }
+        let waited = crate::arch::x86_64::cpu::rdtsc().wrapping_sub(began);
+        CONTENDED_WAITS.fetch_add(1, Ordering::Relaxed);
+        CONTENDED_CYCLES.fetch_add(waited, Ordering::Relaxed);
+        WORST_WAIT_CYCLES.fetch_max(waited, Ordering::Relaxed);
         SpinGuard { lock: self }
     }
 

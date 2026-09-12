@@ -242,12 +242,6 @@ static READY_EPOCH: AtomicU64 = AtomicU64::new(0);
 static NEXT_DEADLINE: AtomicU64 = AtomicU64::new(u64::MAX);
 /// The window the machine is in, as last rolled to.
 static CURRENT_WINDOW: AtomicU64 = AtomicU64::new(0);
-/// Timer ticks since the timer was armed, summed over every processor.
-static TICKS: AtomicU64 = AtomicU64::new(0);
-/// Involuntary switches away from a user thread.
-static PREEMPTIONS: AtomicU64 = AtomicU64::new(0);
-/// Dispatches refused because a scope had no budget or no parallelism slot.
-static BUDGET_STALLS: AtomicU64 = AtomicU64::new(0);
 /// Detailed preemption records already emitted, before coalescing.
 static PREEMPT_RECORDS: AtomicU32 = AtomicU32::new(0);
 /// Longest interval a single charge covered.
@@ -322,10 +316,22 @@ pub fn current_thread() -> usize {
 /// longest charge interval, for the run's summary.
 #[must_use]
 pub fn totals() -> (u64, u64, u64, u32, u64) {
+    // Summed from the processors' own counters rather than kept in three
+    // machine-wide words. A counter every processor increments on every tick
+    // is a cache line every processor takes exclusively thousands of times a
+    // second, for a number nothing reads until the run ends.
+    let mut ticks = 0;
+    let mut preemptions = 0;
+    let mut stalls = 0;
+    for state in &CPUS {
+        ticks += state.ticks.load(Ordering::Relaxed);
+        preemptions += state.preemptions.load(Ordering::Relaxed);
+        stalls += state.budget_stalls.load(Ordering::Relaxed);
+    }
     (
-        TICKS.load(Ordering::Relaxed),
-        PREEMPTIONS.load(Ordering::Relaxed),
-        BUDGET_STALLS.load(Ordering::Relaxed),
+        ticks,
+        preemptions,
+        stalls,
         PREEMPT_RECORDS.load(Ordering::Relaxed),
         MAX_CHARGE_INTERVAL_NS.load(Ordering::Relaxed),
     )
@@ -619,7 +625,6 @@ fn pick_and_reserve(rq: &mut RunQueue, cpu: usize, current: usize, now: u64, fai
         CPUS[cpu]
             .budget_stalls
             .fetch_add(stalled, Ordering::Relaxed);
-        BUDGET_STALLS.fetch_add(stalled, Ordering::Relaxed);
         // Everything this processor could have run belongs to a scope that
         // is out of budget for this window. It waits for the boundary rather
         // than asking again: the answer cannot change until then, and asking
@@ -668,7 +673,9 @@ fn charge(cpu: usize, index: usize, now: u64) {
     }
     // Measured on user execution only: an idle thread's first interval spans
     // the processor's whole bring-up and would say nothing about scheduling.
-    MAX_CHARGE_INTERVAL_NS.fetch_max(ran, Ordering::Relaxed);
+    if MAX_CHARGE_INTERVAL_NS.load(Ordering::Relaxed) < ran {
+        MAX_CHARGE_INTERVAL_NS.fetch_max(ran, Ordering::Relaxed);
+    }
     CPUS[cpu].user_ns.fetch_add(ran, Ordering::Relaxed);
     let scope = cell.effective_scope();
     if sched.dispatched {
@@ -1381,7 +1388,6 @@ fn tick_bookkeeping(now: u64) {
 /// timer interrupt with interrupts masked.
 pub fn on_tick(frame: &trap::TrapFrame) {
     let cpu = percpu::index();
-    TICKS.fetch_add(1, Ordering::Relaxed);
     CPUS[cpu].ticks.fetch_add(1, Ordering::Relaxed);
     let now = time::observe();
     tick_bookkeeping(now);
@@ -1449,7 +1455,6 @@ pub fn on_tick(frame: &trap::TrapFrame) {
         let sched = unsafe { cell.sched() };
         sched.preemptions += 1;
     }
-    PREEMPTIONS.fetch_add(1, Ordering::Relaxed);
     CPUS[cpu].preemptions.fetch_add(1, Ordering::Relaxed);
     if let Some((domain, scope_id, used)) = record {
         trace!(
