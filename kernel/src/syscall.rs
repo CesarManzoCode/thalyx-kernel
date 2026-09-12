@@ -246,6 +246,9 @@ fn thread_pointer_set(domain: usize, thread: usize, frame: &mut TrapFrame) {
     // SAFETY: the value is zero or canonical and in the user half, checked
     // above, so the write cannot fault; the kernel never uses FS.
     unsafe { cpu::wrmsr(cpu::MSR_FS_BASE, value) };
+    // The processor's record of what it last wrote, so the next dispatch does
+    // not write it again for nothing.
+    crate::sched::note_fs_base(value);
     if first {
         let name = crate::domain::domain_name(domain);
         trace!(

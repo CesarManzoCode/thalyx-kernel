@@ -400,6 +400,9 @@ impl Scope {
     /// Resets every field of the slot but its generation. Under the machine
     /// lock, while nothing names the slot.
     pub fn reset(&self) {
+        // Through the accessor, so the count of fenced scopes stays right for
+        // a slot that is reset while it was fenced.
+        self.set_state(State::Empty);
         let generation = self.generation.load(Ordering::Relaxed);
         let fresh = Scope::empty();
         // Every field is an atomic; copying them one by one keeps this the
@@ -463,7 +466,24 @@ impl Scope {
     /// Moves the scope to `state`. Under the machine lock only; the store is
     /// a release, so a sweep that follows it is ordered after it everywhere.
     pub fn set_state(&self, state: State) {
+        // The count of fenced scopes is kept here, where every state change
+        // passes, rather than at the places that fence and retire: a barrier
+        // is placed in one function and lifted in three, and a count that has
+        // to be maintained in four places is a count that will be wrong in
+        // one. Every processor asks "is anything fenced" on every timer tick,
+        // and a walk of the table to answer "no" is a walk of the table
+        // thousands of times a second.
+        let was = self.state();
+        if was == state {
+            return;
+        }
         self.state.store(state as u8, Ordering::Release);
+        if was == State::Fenced {
+            FENCED.fetch_sub(1, Ordering::AcqRel);
+        }
+        if state == State::Fenced {
+            FENCED.fetch_add(1, Ordering::AcqRel);
+        }
     }
 
     /// Parent scope, if any.
@@ -1267,8 +1287,13 @@ pub fn advance_quiescence(now_ns: u64) -> u32 {
 /// worth scanning for.
 #[must_use]
 pub fn any_fenced() -> bool {
-    SCOPES.iter().any(|node| node.state() == State::Fenced)
+    FENCED.load(Ordering::Acquire) != 0
 }
+
+/// Scopes currently fenced. Every processor asks this on every timer tick, and
+/// a walk of the table to answer "no" is a walk of the table thousands of
+/// times a second for a state that changes when a barrier is placed.
+static FENCED: AtomicU32 = AtomicU32::new(0);
 
 const _: () = assert!(MAX_CPUS <= 64);
 const _: () = assert!(MAX_SCOPES < NO_SCOPE as usize);

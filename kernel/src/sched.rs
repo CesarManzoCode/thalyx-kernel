@@ -167,6 +167,8 @@ pub struct CpuState {
     /// that is out of budget for the current window. Cleared by the window
     /// roll and by anything that makes a new thread runnable here.
     throttled: AtomicBool,
+    /// Last value this processor wrote to `IA32_FS_BASE`.
+    fs_base: AtomicU64,
     /// Time-stamp counter value at which the current dispatch's reservation
     /// runs out, or `u64::MAX` when nothing user-visible is dispatched here.
     ///
@@ -212,6 +214,7 @@ impl CpuState {
             need_resched: AtomicBool::new(false),
             sync_since: AtomicU64::new(0),
             throttled: AtomicBool::new(false),
+            fs_base: AtomicU64::new(0),
             deadline_tsc: AtomicU64::new(u64::MAX),
             ticks: AtomicU64::new(0),
             dispatches: AtomicU64::new(0),
@@ -880,6 +883,14 @@ fn roll(now: u64) {
     CURRENT_WINDOW.store(now / CPU_WINDOW_NS, Ordering::Relaxed);
 }
 
+/// Records a thread pointer this processor has just written itself, so the
+/// next dispatch onto it knows the register already holds that value.
+pub fn note_fs_base(value: u64) {
+    CPUS[percpu::index()]
+        .fs_base
+        .store(value, Ordering::Relaxed);
+}
+
 /// Runs one scheduling decision on this processor and performs the switch it
 /// asks for. Returns the thread now running here.
 fn schedule_with(cpu: usize, fair: bool) -> usize {
@@ -919,11 +930,17 @@ fn schedule_with(cpu: usize, fair: bool) -> usize {
         gdt::set_kernel_stack(plan.kstack_top);
         trap::set_syscall_stack(plan.kstack_top);
         tlb::switch_space(plan.cr3, plan.domain);
-        // The incoming thread's own FS base, written unconditionally: the value
-        // this processor holds is whatever the last thread here set, and a
-        // thread must never run with another's. The kernel does not use FS, so
-        // writing it before the switch changes nothing on this side.
-        cpu::wrmsr(cpu::MSR_FS_BASE, plan.fs_base);
+        // The incoming thread's own FS base. A thread must never run with
+        // another's, and the value this processor holds is whatever the last
+        // thread here left -- so it is written whenever it differs, and only
+        // then. The write is a model-specific register, which on a virtual
+        // machine may leave the guest entirely; almost every thread on this
+        // system has no thread pointer at all, and writing the same zero on
+        // every switch was paying that price for nothing.
+        if CPUS[cpu].fs_base.load(Ordering::Relaxed) != plan.fs_base {
+            CPUS[cpu].fs_base.store(plan.fs_base, Ordering::Relaxed);
+            cpu::wrmsr(cpu::MSR_FS_BASE, plan.fs_base);
+        }
         context::switch_context(plan.save_rsp, plan.load_rsp);
     }
 
@@ -1414,6 +1431,10 @@ pub fn on_tick(frame: &trap::TrapFrame) {
         // Another thread is waiting here and the running one has had its
         // quantum: its turn is over even though its reservation is not.
         let competition = user && rq.ready != 0 && sched.dispatch_charged_ns >= QUANTUM_NS;
+        // Asked of the accounts only when the dispatch has spent what it was
+        // promised. A walk of the scope chain on every tick of every
+        // processor answers a question that only arises when a reservation
+        // has run out.
         let starved = user
             && sched.dispatched
             && sched.dispatch_charged_ns >= sched.dispatch_reserved_ns
