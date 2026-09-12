@@ -37,8 +37,32 @@ use crate::limits::MAX_CPUS;
 /// Published invalidations. Starts at one so a processor that has recorded
 /// nothing is distinguishable from one that has recorded the first generation.
 static GENERATION: AtomicU64 = AtomicU64::new(1);
-/// Generation each processor has flushed to.
-static SEEN: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(1) }; MAX_CPUS];
+/// What one processor has flushed to and what it has loaded, on a line of
+/// its own.
+///
+/// Eight words in one line were a line every processor wrote on every switch
+/// -- its own slot, but the line is what moves -- and read on every refresh.
+#[repr(C, align(64))]
+struct Processor {
+    /// Generation the processor has flushed to.
+    seen: AtomicU64,
+    /// Space the processor has loaded, or `usize::MAX`.
+    space: core::sync::atomic::AtomicUsize,
+    /// Root the processor has loaded, or zero before it loaded one here.
+    ///
+    /// What a switch compares against instead of reading `CR3`: on this
+    /// platform the read was a third of the switch's architectural work,
+    /// and the value it returns is the one this processor wrote last.
+    loaded: AtomicU64,
+}
+
+static PROCESSORS: [Processor; MAX_CPUS] = [const {
+    Processor {
+        seen: AtomicU64::new(1),
+        space: core::sync::atomic::AtomicUsize::new(usize::MAX),
+        loaded: AtomicU64::new(0),
+    }
+}; MAX_CPUS];
 /// Bitmask of processors that have completed their handshake with the kernel.
 static ONLINE: AtomicU64 = AtomicU64::new(0);
 
@@ -88,10 +112,6 @@ static SPACE_MASKS: [AtomicU64; crate::limits::MAX_DOMAINS] =
 /// microsecond spent to make a processor flush nothing.
 static SPACE_LIVE: [AtomicU64; crate::limits::MAX_DOMAINS] =
     [const { AtomicU64::new(0) }; crate::limits::MAX_DOMAINS];
-
-/// Space each processor has loaded, or `usize::MAX`.
-static CURRENT_SPACE: [core::sync::atomic::AtomicUsize; MAX_CPUS] =
-    [const { core::sync::atomic::AtomicUsize::new(usize::MAX) }; MAX_CPUS];
 
 /// Notes that `cpu` is dispatching a thread of `domain`.
 ///
@@ -161,14 +181,24 @@ pub unsafe fn switch_space(cr3: u64, domain: usize) {
         return;
     }
     let bit = 1u64 << me;
-    if cr3 == 0 || cr3 == cpu::read_cr3() {
+    let processor = &PROCESSORS[me];
+    // The root this processor wrote last, or the one it booted with when it
+    // has written none here yet. Only this processor writes its own record,
+    // and nothing else writes `CR3` once a processor schedules.
+    let mut loaded = processor.loaded.load(Ordering::Relaxed);
+    if loaded == 0 {
+        loaded = cpu::read_cr3();
+        processor.loaded.store(loaded, Ordering::Relaxed);
+    }
+    if cr3 == 0 || cr3 == loaded {
         // Nothing is loaded and nothing is retired, so nothing this processor
         // holds has changed and the sets stay as they are.
         return;
     }
-    let leaving = CURRENT_SPACE[me].swap(domain, Ordering::Relaxed);
+    let leaving = processor.space.swap(domain, Ordering::Relaxed);
     // SAFETY: the caller's contract.
     unsafe { cpu::write_cr3(cr3) };
+    processor.loaded.store(cr3, Ordering::Relaxed);
     // The write retired every entry of the space just left -- no mapping in
     // this kernel is global and there are no address-space identifiers -- so
     // this processor now holds nothing of it. Cleared afterwards, so the set
@@ -189,7 +219,9 @@ pub fn mark_online(cpu: usize) {
     if cpu >= MAX_CPUS {
         return;
     }
-    SEEN[cpu].store(GENERATION.load(Ordering::Acquire), Ordering::Release);
+    PROCESSORS[cpu]
+        .seen
+        .store(GENERATION.load(Ordering::Acquire), Ordering::Release);
     ONLINE.fetch_or(1u64 << cpu, Ordering::AcqRel);
 }
 
@@ -202,7 +234,7 @@ pub fn mark_offline(cpu: usize) {
     if cpu >= MAX_CPUS {
         return;
     }
-    SEEN[cpu].store(u64::MAX, Ordering::Release);
+    PROCESSORS[cpu].seen.store(u64::MAX, Ordering::Release);
     ONLINE.fetch_and(!(1u64 << cpu), Ordering::AcqRel);
 }
 
@@ -242,14 +274,14 @@ pub fn refresh_local() {
         return;
     }
     let wanted = GENERATION.load(Ordering::Acquire);
-    if SEEN[cpu].load(Ordering::Relaxed) >= wanted {
+    if PROCESSORS[cpu].seen.load(Ordering::Relaxed) >= wanted {
         return;
     }
     // SAFETY: the value written back is the address space this processor is
     // already executing in, so the code and stack running here stay mapped.
     unsafe { cpu::flush_tlb_all() };
     FLUSHES.fetch_add(1, Ordering::Relaxed);
-    SEEN[cpu].store(wanted, Ordering::Release);
+    PROCESSORS[cpu].seen.store(wanted, Ordering::Release);
 }
 
 /// The interrupt one processor sends another to make it refresh.
@@ -333,7 +365,7 @@ fn wait_for_mask(generation: u64, expected_mask: u64) -> Ack {
             if expected_mask & (1u64 << cpu) == 0 {
                 continue;
             }
-            if SEEN[cpu].load(Ordering::Acquire) >= generation {
+            if PROCESSORS[cpu].seen.load(Ordering::Acquire) >= generation {
                 acknowledged += 1;
             } else {
                 outstanding = true;
@@ -449,7 +481,7 @@ pub fn flushed_by(mask: u64, generation: u64) -> bool {
         if online & (1u64 << cpu) == 0 {
             continue;
         }
-        if SEEN[cpu].load(Ordering::Acquire) < generation {
+        if PROCESSORS[cpu].seen.load(Ordering::Acquire) < generation {
             return false;
         }
     }
@@ -472,7 +504,7 @@ pub fn safe_generation() -> u64 {
         if online & (1u64 << cpu) == 0 {
             continue;
         }
-        let seen = SEEN[cpu].load(Ordering::Acquire);
+        let seen = PROCESSORS[cpu].seen.load(Ordering::Acquire);
         if seen < safe {
             safe = seen;
         }

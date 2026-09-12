@@ -928,7 +928,7 @@ fn scheduling_summary() {
     // written after the others have parked.
     let online = sched::cpus_started();
     let peak = crate::scope::peak_running();
-    let mut rows = [(0usize, 0u32, 0u64, 0u64, 0u64, 0u64, 0u64); crate::limits::MAX_CPUS];
+    let mut rows = [(0usize, 0u32, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64); crate::limits::MAX_CPUS];
     let mut count = 0usize;
     for cpu in 0..crate::limits::MAX_CPUS {
         let slot = sched::cpu_state(cpu);
@@ -945,6 +945,7 @@ fn scheduling_summary() {
             slot.budget_stalls
                 .load(core::sync::atomic::Ordering::Relaxed),
             slot.user_ns.load(core::sync::atomic::Ordering::Relaxed),
+            slot.kicks.load(core::sync::atomic::Ordering::Relaxed),
         );
         count += 1;
     }
@@ -952,11 +953,15 @@ fn scheduling_summary() {
     let (_, _, _, _, interval) = sched::totals();
 
     for slot in 0..count {
-        let (cpu, apic_id, ticks, dispatches, preemptions, stalls, user_ns) = rows[slot];
+        let (cpu, apic_id, ticks, dispatches, preemptions, stalls, user_ns, kicks) = rows[slot];
+        // The interrupts this processor sent to make another one look at its
+        // queue: each is a microsecond and a half of the sender's time on
+        // this platform, and a round trip that pays one is not on one
+        // processor.
         event!(
             "sched.cpu_summary",
             "cpu={cpu} apic_id={apic_id} ticks={ticks} dispatches={dispatches} \
-             preemptions={preemptions} budget_stalls={stalls} user_ns={user_ns}"
+             preemptions={preemptions} budget_stalls={stalls} user_ns={user_ns} kicks={kicks}"
         );
     }
     // Every scope that was ever given a budget, with the most it was actually

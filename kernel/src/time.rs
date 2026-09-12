@@ -56,8 +56,21 @@ static SOURCE: AtomicU64 = AtomicU64::new(0);
 /// every reading is a cache line four processors fight over thousands of
 /// times a second, and the scheduler reads the clock on every decision. Here
 /// each processor writes only its own line and reads the others'.
-static PUBLISHED_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
-static READINGS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+/// One processor's published reading and its count of readings, on a line
+/// of its own: eight of each in one line was a line every processor wrote on
+/// every observation and every other processor read on its next.
+#[repr(C, align(64))]
+struct Observer {
+    published_ns: AtomicU64,
+    readings: AtomicU64,
+}
+
+static OBSERVERS: [Observer; MAX_CPUS] = [const {
+    Observer {
+        published_ns: AtomicU64::new(0),
+        readings: AtomicU64::new(0),
+    }
+}; MAX_CPUS];
 static REGRESSIONS: AtomicU64 = AtomicU64::new(0);
 static WORST_REGRESSION_NS: AtomicU64 = AtomicU64::new(0);
 
@@ -120,20 +133,22 @@ pub fn monotonic_ns() -> Option<u64> {
 pub fn observe() -> u64 {
     let me = crate::percpu::index().min(MAX_CPUS - 1);
     let mut published = 0u64;
-    for slot in &PUBLISHED_NS {
-        published = published.max(slot.load(Ordering::Acquire));
+    for observer in &OBSERVERS {
+        published = published.max(observer.published_ns.load(Ordering::Acquire));
     }
     let Some(now) = monotonic_ns() else {
         return 0;
     };
-    READINGS[me].store(READINGS[me].load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+    let readings = &OBSERVERS[me].readings;
+    readings.store(readings.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
     if published > now {
         REGRESSIONS.fetch_add(1, Ordering::Relaxed);
         WORST_REGRESSION_NS.fetch_max(published - now, Ordering::AcqRel);
     }
     // Only this processor writes this slot, and only ever forwards.
-    if PUBLISHED_NS[me].load(Ordering::Relaxed) < now {
-        PUBLISHED_NS[me].store(now, Ordering::Release);
+    let published = &OBSERVERS[me].published_ns;
+    if published.load(Ordering::Relaxed) < now {
+        published.store(now, Ordering::Release);
     }
     now
 }
@@ -143,9 +158,9 @@ pub fn observe() -> u64 {
 #[must_use]
 pub fn monotonicity() -> (u64, u64, u64) {
     (
-        READINGS
+        OBSERVERS
             .iter()
-            .map(|slot| slot.load(Ordering::Relaxed))
+            .map(|observer| observer.readings.load(Ordering::Relaxed))
             .sum(),
         REGRESSIONS.load(Ordering::Relaxed),
         WORST_REGRESSION_NS.load(Ordering::Relaxed),
