@@ -69,11 +69,15 @@ CASES = [
     # look at an abort record: a leg that runs to the end compacts the arena
     # and the resolution is carried forward in a checkpoint instead.
     ("abort-visible", 1, 2, ["1:AFTER_PREPARE:STOP", "2:BEFORE_PREPARE:STOP"]),
-    # The control plane is lost: the auditor stops reading and the log fills.
-    # A full log refuses the admissions its receipts would have covered, so
-    # what this case has to show is a publication refused for a reason it can
-    # name -- not one that happened with nobody able to account for it.
-    ("control-lost", 5, 1, []),
+    # The control plane is lost: the auditor stops reading and the log fills,
+    # with a preparation durable. A full log refuses the admissions its
+    # receipts would have covered, so what this case has to show is a
+    # publication refused for a reason it can name, and a caller told that
+    # nobody can say -- not a version that happened with nobody able to
+    # account for it. The fill is a directive at a point, like every other
+    # cut: filled from the supervisor against clients that were consuming the
+    # log at the same time, which admission met the full log was a race.
+    ("control-lost", 5, 1, ["1:AFTER_PREPARE:LOSE_CONTROL:0:0"]),
 ]
 
 

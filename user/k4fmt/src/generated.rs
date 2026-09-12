@@ -236,6 +236,8 @@ pub mod fault_mode {
     pub const IO_ERROR: u32 = 6;
     /// Hold the write at the named point and issue it after the next one, so an unflushed sequence is not the order the medium sees.
     pub const REORDER: u32 = 7;
+    /// At the named point, fill the control plane's ordinary cells with the service's own notes and leave none, so the next covered admission meets a full log. Nothing is lost: the plane is full, not overrun. The auditor has to have stopped reading for the fill to hold.
+    pub const LOSE_CONTROL: u32 = 8;
 }
 
 /// `FaultPoint` from the schema.

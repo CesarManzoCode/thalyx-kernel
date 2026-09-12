@@ -418,7 +418,7 @@ pub mod note {
     pub const AUDIT_HIGH_WATER: u64 = 0x4048;
     /// Service notes the supervisor wrote to bring the log near full before
     /// the scenario that loses the control plane. Value: how many.
-    pub const LOG_PREFILLED: u64 = 0x4049;
+    pub const CONTROL_FILLED: u64 = 0x4049;
     /// The control plane could not cover the call, so the kernel refused it
     /// before it had any effect. Value: the status, as a positive number.
     ///
