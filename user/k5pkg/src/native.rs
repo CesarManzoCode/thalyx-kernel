@@ -111,9 +111,26 @@ pub struct Config {
     pub arg2: u64,
     /// Role-specific.
     pub arg3: u64,
+    /// What the runtime itself should do, independent of the role. See
+    /// [`flag`].
+    pub flags: u64,
 }
 
-const _: () = assert!(size_of::<Config>() == 104);
+const _: () = assert!(size_of::<Config>() == 112);
+
+/// Bits of [`Config::flags`].
+pub mod flag {
+    /// The runtime keeps its own startup evidence instead of writing it.
+    ///
+    /// Every note a program writes is a record the kernel puts on the
+    /// diagnostic plane synchronously, and on this platform that costs about
+    /// two milliseconds each -- measured, in `diag.summary`. Five of them
+    /// while a domain starts is five of them inside whatever a launcher is
+    /// timing. K5 reads those notes and asks for them; K6 times the start and
+    /// does not, so K6 asks for the quiet runtime and the evidence it does
+    /// consume is unaffected.
+    pub const QUIET_STARTUP: u64 = 1;
+}
 
 // SAFETY: `repr(C)`, integers only, no padding, every bit pattern valid.
 unsafe impl Pod for Config {}

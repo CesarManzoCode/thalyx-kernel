@@ -179,6 +179,7 @@ fn run_tool(
         arg1: 0,
         arg2: 0,
         arg3: 0,
+        flags: 0,
     };
     let recipe = Recipe {
         name: "ncheck",
@@ -364,6 +365,7 @@ fn start_runtime(
         arg1: 40_000_000,
         arg2: 256,
         arg3: 3 * 1024 * 1024,
+        flags: 0,
     };
     let recipe = Recipe {
         name: "nhacer",

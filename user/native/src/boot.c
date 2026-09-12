@@ -52,6 +52,14 @@ static const th_config *config_page = (const th_config *)(uintptr_t)TH_CONFIG_VA
 
 const th_config *th_boot(void) { return config_page; }
 
+/* Whether this domain's launcher asked for a runtime that does not narrate its
+ * own start. Safe before the configuration is checked: an absent page answers
+ * "narrate", which is what every launcher that predates the flag wants. */
+int th_quiet_startup(void)
+{
+    return config_page != NULL && (config_page->flags & TH_FLAG_QUIET_STARTUP) != 0;
+}
+
 uint64_t thalyx_boot_handle_of(uint32_t slot)
 {
     /* Generation one: the supervisor installs into slots that have never been
@@ -90,7 +98,7 @@ _Noreturn void th_runtime_start(void)
     }
     th_heap_init();
     th_files_init(config_page);
-    th_note(TH_NOTE_RUNTIME_UP, config_page->role);
+    if (!th_quiet_startup()) { th_note(TH_NOTE_RUNTIME_UP, config_page->role); }
     /* Built threads have been parked since activation; the runtime they share
      * is standing now, so they may start. Before the constructors, because a
      * constructor may start a thread. */
