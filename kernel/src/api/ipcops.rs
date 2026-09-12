@@ -29,7 +29,7 @@ use crate::obj::{NO_GRANT, ObjKind, ObjRef, ScopeId};
 use crate::sched::WakeHint;
 use crate::scope::{self, Resource};
 use crate::state::{FaultRecord, MACHINE, Machine, Wait};
-use crate::thread;
+use crate::thread::{self, Handoff};
 use crate::ucopy::Staging;
 use crate::{event, trace};
 
@@ -290,41 +290,29 @@ fn admit(
         return Err(exhausted("receiver_cap_slots", count as u64, free));
     }
 
-    let message_index = match machine.messages.iter().position(|message| !message.used) {
-        Some(index) => index,
-        None => {
-            let used = machine
-                .messages
-                .iter()
-                .filter(|message| message.used)
-                .count() as u64;
-            return Err(exhausted("messages", used, machine.messages.len() as u64));
-        }
+    // Found now, so the refusal comes before anything is reserved; claimed
+    // only when written, which a message handed straight to a waiting
+    // receiver never is.
+    let Some(message_index) = machine.free_message() else {
+        return Err(exhausted(
+            "messages",
+            machine.messages_used(),
+            machine.messages.len() as u64,
+        ));
     };
-    let invocation_index = match machine
-        .invocations
-        .iter()
-        .position(|invocation| invocation.state == State::Empty)
-    {
-        Some(index) => index,
-        None => {
-            let used = machine
-                .invocations
-                .iter()
-                .filter(|invocation| invocation.state != State::Empty)
-                .count() as u64;
-            return Err(exhausted(
-                "invocations",
-                used,
-                machine.invocations.len() as u64,
-            ));
-        }
+    let Some(invocation_index) = machine.claim_invocation() else {
+        return Err(exhausted(
+            "invocations",
+            machine.invocations_used(),
+            machine.invocations.len() as u64,
+        ));
     };
 
     let origin_scope = thread::get(ctx.thread).effective_scope();
     let charged = if ordinary {
         let bytes = MESSAGE_OVERHEAD_BYTES + u64::from(request.payload_len);
         if !scope::reserve(origin_scope, Resource::QueueBytes, bytes) {
+            machine.release_invocation(invocation_index);
             let scope = &scope::table()[origin_scope as usize];
             return Err(exhausted(
                 "queue_bytes",
@@ -338,6 +326,7 @@ fn admit(
     };
 
     if !reserve_receipt(machine) {
+        machine.release_invocation(invocation_index);
         if charged != 0 {
             scope::release(origin_scope, Resource::QueueBytes, charged);
         }
@@ -385,6 +374,7 @@ fn admit(
             crate::api::cap_release_slot(machine, receiver, entry.slot as usize);
         }
         crate::api::release_receipt(machine);
+        machine.release_invocation(invocation_index);
         if charged != 0 {
             scope::release(origin_scope, Resource::QueueBytes, charged);
         }
@@ -458,8 +448,68 @@ fn admit(
         slot.reply_result = 0;
     }
     machine.grants[ctx.cap.grant as usize].refs += 1;
+    machine.endpoints[endpoint].admitted += 1;
+    scope::table()[origin_scope as usize]
+        .invocations_pending
+        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
-    {
+    // A receiver waiting for exactly this message takes it now, without the
+    // message ever being queued: the queue cell was found free above, so the
+    // refusals are the ones a queued admission would have met, and what is
+    // saved is writing three hundred and fifty bytes into the cell and
+    // reading them straight back out. A receiver that cannot take it -- its
+    // handle no longer resolves, its domain cannot hold the ticket -- is
+    // woken empty-handed and the message is queued for it to find.
+    //
+    // A caller that will block for the reply leaves its processor free, and
+    // that processor picks the receiver up on its way to idle; kicking another
+    // one would turn a round trip on one processor into two interrupts across
+    // two. A sender that keeps running has no free processor to offer.
+    let hint = if waiter.is_none() {
+        WakeHint::Any
+    } else {
+        WakeHint::Sync
+    };
+    let mut wake = None;
+    let mut delivered = false;
+    if let Some((thread, offer)) = take_receiver(machine, endpoint, ctx.now) {
+        wake = Some(thread);
+        // SAFETY: the wait was consumed by `take_receiver`, under the control
+        // lock, and the wake is deferred to after this hold.
+        if machine.endpoints[endpoint].head == NO_MESSAGE
+            && let Some(staging) = unsafe { offer.staging() }
+        {
+            let receiver = machine.endpoints[endpoint].receiver_domain as usize;
+            if let Ok(ticket) = issue_ticket(machine, receiver, invocation_index) {
+                machine.invocations[invocation_index].state = State::Delivered;
+                machine.invocations[invocation_index].message = NO_MESSAGE;
+                machine.endpoints[endpoint].delivered += 1;
+                lay_out_receive(
+                    staging,
+                    machine,
+                    invocation_index,
+                    kind,
+                    &request.payload[..request.payload_len as usize],
+                    &installed[..count],
+                );
+                thread::set_wake_aux(thread, ticket);
+                trace!(
+                    "ipc.delivered",
+                    "invocation={id} endpoint={} receiver_domain={} facet={} caps={} \
+                     payload_len={} cancel=live ticket=0x{ticket:x} route=direct",
+                    machine.endpoints[endpoint].id,
+                    machine.domains[receiver].id,
+                    ctx.cap.facet,
+                    request.cap_count,
+                    request.payload_len
+                );
+                delivered = true;
+            }
+        }
+    }
+
+    if !delivered {
+        machine.claim_message(message_index);
         let length = request.payload_len as usize;
         let slot = &mut machine.messages[message_index];
         slot.used = true;
@@ -478,23 +528,19 @@ fn admit(
         slot.caps = installed;
         slot.cap_count = request.cap_count;
         slot.charged_bytes = charged;
-    }
 
-    let tail = machine.endpoints[endpoint].tail;
-    if tail == NO_MESSAGE {
-        machine.endpoints[endpoint].head = message_index as u16;
-    } else {
-        machine.messages[tail as usize].next = message_index as u16;
+        let tail = machine.endpoints[endpoint].tail;
+        if tail == NO_MESSAGE {
+            machine.endpoints[endpoint].head = message_index as u16;
+        } else {
+            machine.messages[tail as usize].next = message_index as u16;
+        }
+        machine.endpoints[endpoint].tail = message_index as u16;
+        machine.endpoints[endpoint].queued += 1;
+        if !ordinary {
+            machine.endpoints[endpoint].reserved_used += 1;
+        }
     }
-    machine.endpoints[endpoint].tail = message_index as u16;
-    machine.endpoints[endpoint].queued += 1;
-    if !ordinary {
-        machine.endpoints[endpoint].reserved_used += 1;
-    }
-    machine.endpoints[endpoint].admitted += 1;
-    scope::table()[origin_scope as usize]
-        .invocations_pending
-        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
     trace!(
         "ipc.admitted",
@@ -524,12 +570,9 @@ fn admit(
         ctx.cap.facet,
         true,
     );
-
-    // A caller that will block for the reply leaves its processor free, and
-    // that processor picks the receiver up on its way to idle; kicking another
-    // one would turn a round trip on one processor into two interrupts across
-    // two. A sender that keeps running has no free processor to offer.
-    hand_to_receiver(machine, endpoint, waiter.is_none(), ctx.now);
+    if let Some(thread) = wake {
+        crate::sched::defer_wake(thread, hint);
+    }
     Ok(Admitted {
         invocation: invocation_index as u16,
         generation,
@@ -537,23 +580,19 @@ fn admit(
     })
 }
 
-/// Wakes a thread waiting to receive on `endpoint`, delivering the head of
-/// the queue to it on the way if it offered its buffer.
+/// Claims a thread waiting to receive on `endpoint`, for the admission to
+/// deliver to.
 ///
-/// The delivery is the one the receiver would perform on waking, done in the
-/// hold of the control lock the admission already has: the receiver's handle
-/// is resolved as the receiver would resolve it, the ticket is installed in
-/// the receiver's domain, and the message is laid out in the receiver's own
-/// staging buffer. What the receiver saves is a hold of the lock -- one
-/// handover fewer of a lock four processors queue for -- and it wakes with
-/// its message in hand. A receiver whose handle no longer resolves, or whose
-/// domain cannot take the ticket, is woken empty-handed and finds that out
-/// for itself, exactly as it would have.
-fn hand_to_receiver(machine: &mut Machine, endpoint: usize, kick: bool, now: u64) {
+/// Returns the thread and its offer, which is empty when the receiver cannot
+/// take the message on the sender's behalf: it offered no buffer, or its
+/// handle no longer resolves as the receiver itself would resolve it on
+/// waking -- the same check, made for it. The caller wakes the thread either
+/// way, once its hold of the control lock ends: the delivery is the one the
+/// receiver would perform on waking, done in the hold the admission already
+/// has, and what the receiver saves is a hold of its own -- one handover
+/// fewer of a lock four processors queue for.
+fn take_receiver(machine: &mut Machine, endpoint: usize, now: u64) -> Option<(usize, Handoff)> {
     let generation = machine.endpoints[endpoint].generation;
-    // A caller that will block for the reply hands its processor to the
-    // receiver; a sender that keeps running sends it to an idle one.
-    let hint = if kick { WakeHint::Any } else { WakeHint::Sync };
     let mut waiting = machine.endpoints[endpoint].receivers;
     while waiting != 0 {
         let index = waiting.trailing_zeros() as usize;
@@ -570,32 +609,99 @@ fn hand_to_receiver(machine: &mut Machine, endpoint: usize, kick: bool, now: u64
         ) else {
             continue;
         };
-        // SAFETY: the wait was consumed just above, under the control lock,
-        // and the wake is issued only after this hold, at the end of this
-        // function.
-        if let Some(staging) = unsafe { offer.staging() } {
-            let receiver = machine.endpoints[endpoint].receiver_domain as usize;
-            let head = machine.endpoints[endpoint].head;
-            let resolved = resolve(
-                machine,
-                receiver,
-                offer.handle,
-                object_type::ENDPOINT,
-                right::ENDPOINT_RECEIVE,
-                now,
-            );
-            if head != NO_MESSAGE
-                && resolved.is_ok_and(|cap| cap.object.index as usize == endpoint)
-                && let Ok((ticket, result)) = deliver(machine, receiver, endpoint, head as usize)
-            {
-                begin_response(staging, op::ENDPOINT_RECEIVE);
-                staging.write(BODY, result);
-                thread::set_wake_aux(index, ticket);
-            }
+        let receiver = machine.endpoints[endpoint].receiver_domain as usize;
+        let resolved = resolve(
+            machine,
+            receiver,
+            offer.handle,
+            object_type::ENDPOINT,
+            right::ENDPOINT_RECEIVE,
+            now,
+        );
+        if resolved.is_ok_and(|cap| cap.object.index as usize == endpoint) {
+            return Some((index, offer));
         }
-        crate::sched::defer_wake(index, hint);
-        return;
+        return Some((index, Handoff::NONE));
     }
+    None
+}
+
+/// Issues `receiver` a ticket for the invocation: a grant on it, sponsored
+/// by the receiver's scope, installed in the receiver's table. Nothing is
+/// changed when either step fails.
+fn issue_ticket(machine: &mut Machine, receiver: usize, invocation: usize) -> Result<u64, i64> {
+    let object = ObjRef::new(
+        ObjKind::Invocation,
+        invocation as u16,
+        machine.invocations[invocation].generation,
+    );
+    let sponsor = machine.domains[receiver].owner_scope;
+    let grant = crate::api::grant_alloc(
+        machine,
+        sponsor,
+        NO_GRANT,
+        object,
+        TICKET_RIGHTS,
+        0,
+        None,
+        machine.invocations[invocation].facet,
+    )
+    .ok_or(status::LIMIT_EXHAUSTED)?;
+    let Some(ticket) = crate::api::cap_install(machine, receiver, object, grant, None) else {
+        crate::api::collect_grant(machine, grant);
+        return Err(status::LIMIT_EXHAUSTED);
+    };
+    machine.invocations[invocation].receiver_domain = receiver as u16;
+    Ok(ticket)
+}
+
+/// Lays out the response a receiver reads: the header the kernel states
+/// about the invocation, the capabilities already installed for it, and the
+/// bytes.
+///
+/// Written field by field into the response, whose body `begin_response`
+/// has just zeroed, so the payload's tail is the zeroes already there and
+/// only the significant bytes move. Building the record whole -- a zeroed
+/// payload of two hundred and fifty-six bytes, then the copy of the record
+/// into the buffer -- was six hundred bytes of stores for every delivery,
+/// most of them under the control lock.
+fn lay_out_receive(
+    staging: &mut Staging,
+    machine: &Machine,
+    invocation: usize,
+    kind: u32,
+    payload: &[u8],
+    caps: &[DeliveredCap],
+) {
+    let record = &machine.invocations[invocation];
+    let mut header = MessageHeader {
+        epoch: record.epoch,
+        invocation_id: record.id,
+        sender_domain_id: record.origin_domain_id,
+        sender_scope_id: record.origin_scope_id,
+        parent_invocation_id: record.parent_id,
+        facet: record.facet,
+        grant_id: machine.grants[record.grant as usize].id,
+        sent_ns: record.admitted_ns,
+        rights_transferred: 0,
+        cancel_state: record.cancel.abi(),
+        kind,
+        payload_len: payload.len() as u32,
+    };
+    let mut handles = [0u64; 4];
+    for (index, cap) in caps.iter().enumerate() {
+        handles[index] = cap.handle;
+        header.rights_transferred |= machine.grants[cap.grant as usize].rights;
+    }
+    begin_response(staging, op::ENDPOINT_RECEIVE);
+    staging.write(BODY + core::mem::offset_of!(ReceiveResult, header), header);
+    staging.write(
+        BODY + core::mem::offset_of!(ReceiveResult, cap_count),
+        caps.len() as u32,
+    );
+    staging.write(BODY + core::mem::offset_of!(ReceiveResult, caps), handles);
+    let at = BODY + core::mem::offset_of!(ReceiveResult, payload);
+    staging.bytes[at..at + payload.len()].copy_from_slice(payload);
 }
 
 fn wake_waiter(machine: &mut Machine, invocation: usize, code: i64, hint: WakeHint) {
@@ -677,20 +783,14 @@ pub fn call(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
     };
     if replied {
         let slot = &machine.invocations[index];
-        let result = CallResult {
-            payload_len: slot.reply_len,
-            cap_count: slot.reply_cap_count,
-            caps: slot.reply_caps,
-            result: slot.reply_result,
-            invocation_id: slot.id,
-            payload: slot.reply_payload,
-        };
+        lay_out_reply(
+            staging,
+            &slot.reply_payload[..slot.reply_len as usize],
+            &slot.reply_caps[..slot.reply_cap_count as usize],
+            slot.reply_result,
+            slot.id,
+        );
         release_invocation(&mut machine, index);
-        drop(machine);
-        // The reply is this thread's own from here; laying it out in the
-        // response is work nothing else waits for.
-        begin_response(staging, ctx.operation);
-        staging.write(BODY, result);
         return Ok(id);
     }
     if state == State::Resolved {
@@ -755,15 +855,10 @@ pub fn receive(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i
 
             let head = machine.endpoints[endpoint].head;
             if head != NO_MESSAGE {
-                let delivered = deliver(&mut machine, ctx.domain, endpoint, head as usize);
+                let delivered = deliver(&mut machine, ctx.domain, endpoint, head as usize, staging);
                 drop(machine);
                 crate::sched::flush_wakes();
-                let (ticket, result) = delivered?;
-                // The message is this thread's own from here; laying it out
-                // in the response is work nothing else waits for.
-                begin_response(staging, ctx.operation);
-                staging.write(BODY, result);
-                return Ok(ticket);
+                return delivered;
             }
             if ctx.flags & thalyx_abi::generated::flag::NONBLOCKING != 0 {
                 return Err(status::WOULD_BLOCK);
@@ -793,18 +888,15 @@ pub fn receive(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i
     }
 }
 
-/// Takes the message at the head of `endpoint`'s queue for `ctx.domain`,
-/// returning the receiver's ticket and the response to lay out for it.
-///
-/// The response is returned rather than written: the caller lays it out in
-/// its staging after the control lock is dropped, and only the reading of the
-/// slots is done under it.
+/// Takes the message at the head of `endpoint`'s queue for `receiver`,
+/// laying it out in `staging` and returning the receiver's ticket.
 fn deliver(
     machine: &mut Machine,
     receiver: usize,
     endpoint: usize,
     message_index: usize,
-) -> Result<(u64, ReceiveResult), i64> {
+    staging: &mut Staging,
+) -> Result<u64, i64> {
     // The header fields, not the record: a message is three hundred and fifty
     // bytes and an invocation six hundred, and the delivery needs a dozen
     // numbers out of them.
@@ -833,27 +925,7 @@ fn deliver(
     // The receiver needs a handle on the obligation before the message leaves
     // the queue: if the table is full the message stays where it was, which is
     // what "the message is kept if the delivery cannot be prepared" means.
-    let object = ObjRef::new(
-        ObjKind::Invocation,
-        invocation_index as u16,
-        machine.invocations[invocation_index].generation,
-    );
-    let sponsor = machine.domains[receiver].owner_scope;
-    let grant = crate::api::grant_alloc(
-        machine,
-        sponsor,
-        NO_GRANT,
-        object,
-        TICKET_RIGHTS,
-        0,
-        None,
-        machine.invocations[invocation_index].facet,
-    )
-    .ok_or(status::LIMIT_EXHAUSTED)?;
-    let Some(ticket) = crate::api::cap_install(machine, receiver, object, grant, None) else {
-        crate::api::collect_grant(machine, grant);
-        return Err(status::LIMIT_EXHAUSTED);
-    };
+    let ticket = issue_ticket(machine, receiver, invocation_index)?;
 
     // Dequeue only now that the delivery is certain.
     machine.endpoints[endpoint].head = message_next;
@@ -869,41 +941,25 @@ fn deliver(
 
     machine.invocations[invocation_index].state = State::Delivered;
     machine.invocations[invocation_index].message = NO_MESSAGE;
-    machine.invocations[invocation_index].receiver_domain = receiver as u16;
 
-    let grant_id = {
-        let grant = machine.invocations[invocation_index].grant;
-        machine.grants[grant as usize].id
+    let (invocation_id, invocation_facet, cancel) = {
+        let invocation = &machine.invocations[invocation_index];
+        (invocation.id, invocation.facet, invocation.cancel)
     };
-    let invocation = &machine.invocations[invocation_index];
-    let (invocation_id, invocation_facet) = (invocation.id, invocation.facet);
-    let message = &machine.messages[message_index];
-    let mut result = ReceiveResult {
-        header: MessageHeader {
-            epoch: invocation.epoch,
-            invocation_id: invocation.id,
-            sender_domain_id: invocation.origin_domain_id,
-            sender_scope_id: invocation.origin_scope_id,
-            parent_invocation_id: invocation.parent_id,
-            facet: invocation.facet,
-            grant_id,
-            sent_ns: invocation.admitted_ns,
-            rights_transferred: 0,
-            cancel_state: invocation.cancel.abi(),
-            kind: message_kind,
-            payload_len: message.payload_len,
-        },
-        cap_count: message.cap_count,
-        reserved0: 0,
-        caps: [0; 4],
-        payload: message.payload,
+    let (cap_count, payload_len) = {
+        let message = &machine.messages[message_index];
+        (message.cap_count as usize, message.payload_len as usize)
     };
-    let (cap_count, payload_len, cancel) =
-        (message.cap_count, message.payload_len, invocation.cancel);
-    let caps = message.caps;
-    for index in 0..cap_count as usize {
-        result.caps[index] = caps[index].handle;
-        result.header.rights_transferred |= machine.grants[caps[index].grant as usize].rights;
+    {
+        let message = &machine.messages[message_index];
+        lay_out_receive(
+            staging,
+            machine,
+            invocation_index,
+            message_kind,
+            &message.payload[..payload_len],
+            &message.caps[..cap_count],
+        );
     }
     // The message's slot is free from here: everything it carried is in the
     // response. Freed by its flag and its link, not by rewriting the whole
@@ -918,16 +974,17 @@ fn deliver(
         slot.cap_count = 0;
         slot.payload_len = 0;
     }
+    machine.release_message(message_index);
 
     trace!(
         "ipc.delivered",
         "invocation={invocation_id} endpoint={} receiver_domain={} facet={invocation_facet} \
-         caps={cap_count} payload_len={payload_len} cancel={} ticket=0x{ticket:x}",
+         caps={cap_count} payload_len={payload_len} cancel={} ticket=0x{ticket:x} route=queue",
         machine.endpoints[endpoint].id,
         machine.domains[receiver].id,
         cancel.name()
     );
-    Ok((ticket, result))
+    Ok(ticket)
 }
 
 /// What releasing an invocation has to know about it.
@@ -1100,17 +1157,12 @@ pub fn reply(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<
             // SAFETY: the wait was consumed just above, under the control
             // lock, and the wake is deferred to after this hold.
             if let Some(staging) = unsafe { offer.staging() } {
-                begin_response(staging, op::ENDPOINT_CALL);
-                staging.write(
-                    BODY,
-                    CallResult {
-                        payload_len: request.payload_len,
-                        cap_count: request.cap_count,
-                        caps: installed,
-                        result: request.result,
-                        invocation_id,
-                        payload: request.payload,
-                    },
+                lay_out_reply(
+                    staging,
+                    &request.payload[..request.payload_len as usize],
+                    &installed[..count],
+                    request.result,
+                    invocation_id,
                 );
                 release_invocation(machine, index);
                 thread::set_wake_aux(waiter, invocation_id);
@@ -1127,6 +1179,27 @@ pub fn reply(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<
         }
     }
     Ok(invocation_id)
+}
+
+/// Lays out the reply a caller reads, as [`lay_out_receive`] does a message:
+/// the significant bytes over a body already zeroed.
+fn lay_out_reply(staging: &mut Staging, payload: &[u8], caps: &[u64], result: u64, id: u64) {
+    let mut handles = [0u64; 4];
+    handles[..caps.len()].copy_from_slice(caps);
+    begin_response(staging, op::ENDPOINT_CALL);
+    staging.write(
+        BODY + core::mem::offset_of!(CallResult, payload_len),
+        payload.len() as u32,
+    );
+    staging.write(
+        BODY + core::mem::offset_of!(CallResult, cap_count),
+        caps.len() as u32,
+    );
+    staging.write(BODY + core::mem::offset_of!(CallResult, caps), handles);
+    staging.write(BODY + core::mem::offset_of!(CallResult, result), result);
+    staging.write(BODY + core::mem::offset_of!(CallResult, invocation_id), id);
+    let at = BODY + core::mem::offset_of!(CallResult, payload);
+    staging.bytes[at..at + payload.len()].copy_from_slice(payload);
 }
 
 /// Keeps a reply on its invocation for a caller that will read it from there.
@@ -1499,6 +1572,7 @@ pub fn withdraw_undelivered(machine: &mut Machine, root: ScopeId, _now: u64) -> 
                     crate::api::cap_release_slot(machine, receiver, entry.slot as usize);
                 }
                 machine.messages[current as usize] = Message::empty();
+                machine.release_message(current as usize);
                 machine.invocations[invocation].cancel = Cancel::OriginFenced;
                 machine.invocations[invocation].outcome = outcome_value::ABORTED;
                 wake_waiter(machine, invocation, status::CANCELLED, WakeHint::Any);
@@ -1568,6 +1642,7 @@ pub fn on_domain_death(machine: &mut Machine, domain: usize) {
                     crate::api::cap_release_slot(machine, receiver, entry.slot as usize);
                 }
                 machine.messages[current as usize] = Message::empty();
+                machine.release_message(current as usize);
                 machine.invocations[invocation].cancel = Cancel::OriginDead;
                 machine.invocations[invocation].outcome = outcome_value::ABORTED;
                 release_invocation(machine, invocation);

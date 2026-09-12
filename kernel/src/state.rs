@@ -291,8 +291,17 @@ pub struct Machine {
     pub endpoints: [Endpoint; MAX_ENDPOINTS],
     /// Messages in flight.
     pub messages: [Message; MAX_MESSAGES],
+    /// One bit per free message slot.
+    ///
+    /// The tables are searched on every admission, and a search of the
+    /// records themselves reads a line of each record it passes -- lines
+    /// other processors write -- to find the one that is free. The bits are
+    /// one word, kept beside the records they describe.
+    pub message_free: u64,
     /// Admitted work.
     pub invocations: [Invocation; MAX_INVOCATIONS],
+    /// One bit per free invocation slot; see `message_free`.
+    pub invocation_free: u64,
     /// Signals.
     pub signals: [Signal; MAX_SIGNALS],
     /// Timers.
@@ -350,7 +359,9 @@ impl Machine {
             maps: [MapRecord::empty(); MAX_MAPS],
             endpoints: [const { Endpoint::empty() }; MAX_ENDPOINTS],
             messages: [const { Message::empty() }; MAX_MESSAGES],
+            message_free: (1u64 << MAX_MESSAGES) - 1,
             invocations: [Invocation::empty(); MAX_INVOCATIONS],
+            invocation_free: (1u64 << MAX_INVOCATIONS) - 1,
             signals: [Signal::empty(); MAX_SIGNALS],
             timers: [Timer::empty(); MAX_TIMERS],
             logs: [const { ControlLog::empty() }; MAX_CONTROL_LOGS],
@@ -379,6 +390,56 @@ impl Machine {
         self.memory
             .as_mut()
             .expect("frame allocator established during bootstrap")
+    }
+
+    /// A free message slot, if any, left free: the caller claims it with
+    /// [`Machine::claim_message`] once it writes it.
+    #[must_use]
+    pub fn free_message(&self) -> Option<usize> {
+        let free = self.message_free;
+        (free != 0).then(|| free.trailing_zeros() as usize)
+    }
+
+    /// Marks message slot `index` in use.
+    pub fn claim_message(&mut self, index: usize) {
+        debug_assert!(!self.messages[index].used);
+        self.message_free &= !(1u64 << index);
+    }
+
+    /// Marks message slot `index` free, its record already marked so.
+    pub fn release_message(&mut self, index: usize) {
+        debug_assert!(!self.messages[index].used);
+        self.message_free |= 1u64 << index;
+    }
+
+    /// Message slots in use.
+    #[must_use]
+    pub fn messages_used(&self) -> u64 {
+        MAX_MESSAGES as u64 - u64::from(self.message_free.count_ones())
+    }
+
+    /// Claims a free invocation slot, if any.
+    pub fn claim_invocation(&mut self) -> Option<usize> {
+        let free = self.invocation_free;
+        if free == 0 {
+            return None;
+        }
+        let index = free.trailing_zeros() as usize;
+        debug_assert!(self.invocations[index].state == crate::ipc::State::Empty);
+        self.invocation_free &= !(1u64 << index);
+        Some(index)
+    }
+
+    /// Marks invocation slot `index` free, its record already marked so.
+    pub fn release_invocation(&mut self, index: usize) {
+        debug_assert!(self.invocations[index].state == crate::ipc::State::Empty);
+        self.invocation_free |= 1u64 << index;
+    }
+
+    /// Invocation slots in use.
+    #[must_use]
+    pub fn invocations_used(&self) -> u64 {
+        MAX_INVOCATIONS as u64 - u64::from(self.invocation_free.count_ones())
     }
 
     /// Next diagnostic identity, or `None` once the space is exhausted.

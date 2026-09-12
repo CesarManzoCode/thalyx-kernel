@@ -279,15 +279,20 @@ fn release_entry(machine: &mut Machine, domain: usize, entry: crate::obj::CapEnt
 /// discharge is what made a service that keeps its tickets exhaust the table
 /// with requests it had already answered.
 pub fn collect_invocation(machine: &mut Machine, index: usize) {
-    let Some(invocation) = machine.invocations.get(index) else {
+    let Some(invocation) = machine.invocations.get_mut(index) else {
         return;
     };
     if invocation.state != crate::ipc::State::Resolved || invocation.refs != 0 {
         return;
     }
-    let generation = invocation.generation;
-    machine.invocations[index] = crate::ipc::Invocation::empty();
-    machine.invocations[index].generation = generation;
+    // Freed by its state, which every reader of the table checks first, and
+    // not by rewriting the record: an admission writes every field of the
+    // slot it takes, and the record is six hundred bytes. The generation
+    // stays, so a ticket that outlived the invocation names nothing.
+    invocation.state = crate::ipc::State::Empty;
+    invocation.waiter = None;
+    invocation.refs = 0;
+    machine.release_invocation(index);
 }
 
 /// Frees a grant node once nothing refers to it and it has no children.
