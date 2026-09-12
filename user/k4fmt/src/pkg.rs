@@ -419,6 +419,14 @@ pub mod note {
     /// Service notes the supervisor wrote to bring the log near full before
     /// the scenario that loses the control plane. Value: how many.
     pub const LOG_PREFILLED: u64 = 0x4049;
+    /// The control plane could not cover the call, so the kernel refused it
+    /// before it had any effect. Value: the status, as a positive number.
+    ///
+    /// Named rather than reported as a surprise: a run whose auditor has
+    /// stopped reading fills the log, and a full log refuses exactly the
+    /// admissions its receipts would have covered. That is the scenario, not
+    /// an accident, and a caller that meets it has been told why.
+    pub const CONTROL_FULL: u64 = 0x404A;
 }
 
 /// What the service asks a broker to do, and the key it must be idempotent on.

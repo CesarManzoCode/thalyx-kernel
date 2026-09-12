@@ -369,6 +369,24 @@ impl Service {
         Some(index)
     }
 
+    /// Writes a service note, unless the control log has no ordinary room.
+    ///
+    /// A note is diagnostic: it says what this service did, for a reader that
+    /// drains the log. When nobody is draining and the log is full, writing is
+    /// not a way to be heard -- the note cannot be kept, and the kernel has to
+    /// declare the hole to whoever reads the log next. A service that knows the
+    /// control plane is saturated does not add to it. What the run still has to
+    /// show is not this note but the refusal of the work the receipts covered,
+    /// and that one is the kernel's, unaffected.
+    fn note_to_log(&self, kind: u64, value: u64) {
+        match k2::log_query(self.log) {
+            Ok(info) if info.used >= info.capacity.saturating_sub(info.reserved_cells) => {}
+            _ => {
+                let _ = k2::log_append(self.log, receipt_kind::SERVICE_NOTE, kind, value, 0);
+            }
+        }
+    }
+
     /// Asks the broker what became of an intent, and records the answer.
     ///
     /// What is recorded is what the broker said. `UNKNOWN` is written down as
@@ -874,13 +892,7 @@ impl Service {
             return refused(store_status::EFFECT_REFUSED);
         }
         k2::note(note::EFFECT_ADMITTED, invocation);
-        let _ = k2::log_append(
-            self.log,
-            receipt_kind::SERVICE_NOTE,
-            0x4B34_0001,
-            request.request_sequence,
-            0,
-        );
+        self.note_to_log(0x4B34_0001, request.request_sequence);
 
         match self.store.publish(
             principal,
@@ -912,13 +924,7 @@ impl Service {
                 // itself a commit -- the kernel marks the outcome `COMMITTED`
                 // when a responder answers -- so answering is the discharge,
                 // and it is the only discharge that carries the answer.
-                let _ = k2::log_append(
-                    self.log,
-                    receipt_kind::SERVICE_NOTE,
-                    0x4B34_0002,
-                    generation,
-                    0,
-                );
+                self.note_to_log(0x4B34_0002, generation);
                 if after == Fault::LoseResponse {
                     self.store.demanded = Some(Fault::LoseResponse);
                 }
