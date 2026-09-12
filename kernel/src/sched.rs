@@ -97,6 +97,23 @@ pub const WAKE_GRACE_NS: u64 = 10_000;
 /// sides of the comparison idle the same way.
 pub const IDLE_POLL_NS: u64 = 200_000;
 
+/// How often a polling processor looks at the *other* processors' queues for
+/// work to take, within its poll.
+///
+/// Not on every turn of the loop. The words it reads there -- a busy
+/// processor's queue bits and the time-stamp of its last synchronous
+/// hand-off -- are words that processor writes several times per IPC round
+/// trip, and a line another processor has just read is a line the writer
+/// has to take back before it can write it. Three idle processors reading
+/// those words as fast as they could made every write on the busy one a
+/// transfer: an IPC round trip on one processor measured 3.7 us with the
+/// scan on every turn and 2.4 us with no scan at all. At this interval the
+/// busy processor pays for perhaps one write in seven, and a thread queued
+/// behind a running one still waits no longer than this to be taken. The
+/// look on entering idle, before the loop, is what makes the common case --
+/// a processor going idle while work waits elsewhere -- cost nothing extra.
+const IDLE_SCAN_INTERVAL_NS: u64 = 16_000;
+
 /// A thread index that names no thread.
 const NO_THREAD: usize = usize::MAX;
 
@@ -1127,19 +1144,34 @@ fn steal_work(me: usize) -> bool {
     } else {
         (&mut *second, &mut *first)
     };
-    // Not the one they are about to take: their cursor points at it.
+    // Not the one they are about to take: their cursor points at it, and
+    // their hint is a hand-off that is theirs. The candidates are the set
+    // bits walked from the far side of the cursor, so the scan is as long as
+    // the queue and not as long as the table, under two queue locks.
     let mut taken = NO_THREAD;
-    for step in 0..MAX_THREADS {
-        let index = (theirs.cursor + MAX_THREADS - 1 - step) % MAX_THREADS;
-        if theirs.ready & bit(index) == 0 || index == theirs.hint {
-            continue;
+    let mut candidates = theirs.ready;
+    if theirs.hint != NO_THREAD {
+        candidates &= !bit(theirs.hint);
+    }
+    // Furthest from the cursor first: the bits below it, highest first, then
+    // the bits at or above it, highest first.
+    let below = candidates & (bit(theirs.cursor) - 1);
+    let above = candidates & !(bit(theirs.cursor) - 1);
+    for set in [below, above] {
+        let mut remaining = set;
+        while remaining != 0 {
+            let index = (u64::BITS - 1 - remaining.leading_zeros()) as usize;
+            remaining &= !bit(index);
+            let cell = thread::get(index);
+            if cell.state() != ThreadState::Ready || cell.on_cpu.load(Ordering::Acquire) != 0 {
+                continue;
+            }
+            taken = index;
+            break;
         }
-        let cell = thread::get(index);
-        if cell.state() != ThreadState::Ready || cell.on_cpu.load(Ordering::Acquire) != 0 {
-            continue;
+        if taken != NO_THREAD {
+            break;
         }
-        taken = index;
-        break;
     }
     if taken == NO_THREAD {
         return false;
@@ -1710,6 +1742,7 @@ fn poll_before_halt(cpu: usize) -> bool {
         return false;
     }
     let budget = IDLE_POLL_NS * hz / 1_000_000_000;
+    let scan_interval = IDLE_SCAN_INTERVAL_NS * hz / 1_000_000_000;
     let start = cpu::rdtsc();
     CPUS[cpu].idle.store(IDLE_POLLING, Ordering::Release);
     IDLE_MASK.fetch_or(bit(cpu), Ordering::AcqRel);
@@ -1723,15 +1756,28 @@ fn poll_before_halt(cpu: usize) -> bool {
     // The loop therefore only *looks*; the queues are moved below, masked.
     let found = unsafe {
         cpu::with_interrupts_enabled(|| {
+            let mut last_scan = start;
+            // Once on the way in: a processor going idle while work waits
+            // behind a running thread elsewhere takes it now.
+            if aged_sync_elsewhere(cpu) || stealable(cpu) {
+                return true;
+            }
             loop {
                 if smp::shutting_down() {
                     return true;
                 }
-                if has_local_work(cpu) || aged_sync_elsewhere(cpu) || stealable(cpu) {
+                if has_local_work(cpu) {
                     return true;
                 }
-                if cpu::rdtsc().wrapping_sub(start) > budget {
+                let now = cpu::rdtsc();
+                if now.wrapping_sub(start) > budget {
                     return false;
+                }
+                if now.wrapping_sub(last_scan) >= scan_interval {
+                    last_scan = now;
+                    if aged_sync_elsewhere(cpu) || stealable(cpu) {
+                        return true;
+                    }
                 }
                 core::hint::spin_loop();
             }
@@ -1759,12 +1805,26 @@ fn aged_sync_elsewhere(me: usize) -> bool {
     })
 }
 
-/// Whether some busy processor has a thread waiting behind the one it runs.
-/// A lock-free look, for the idle loop.
+/// Whether some busy processor has a thread waiting behind the one it runs
+/// that an idle processor may take. A lock-free look, for the idle loop.
+///
+/// A queue whose only occupant is a synchronous hand-off is not that: the
+/// thread there was handed to that processor by a caller about to block,
+/// and it is taken at the caller's switch, a microsecond away. Counting it
+/// made every idle processor leave its poll on every reply of every IPC
+/// round trip on the machine, take the busy processor's queue lock to find
+/// nothing it may steal, and hold that lock through a scan of the thread
+/// table while the busy processor waited for it to switch -- measured as a
+/// third of an IPC round trip. The hand-off that ages past its grace is the
+/// aged-sync path's business, not this one's.
 fn stealable(me: usize) -> bool {
     let idle = IDLE_MASK.load(Ordering::Acquire);
     (0..MAX_CPUS).any(|other| {
-        other != me && CPUS[other].is_online() && idle & bit(other) == 0 && queue_depth(other) != 0
+        if other == me || !CPUS[other].is_online() || idle & bit(other) != 0 {
+            return false;
+        }
+        let handed_off = u32::from(CPUS[other].sync_since.load(Ordering::Relaxed) != 0);
+        queue_depth(other) > handed_off
     })
 }
 
