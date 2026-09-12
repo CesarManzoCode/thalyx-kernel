@@ -375,10 +375,13 @@ impl Grant {
 /// The walk is a repeated sweep rather than recursion: the depth is bounded by
 /// the interface's derivation depth, and a sweep needs no stack in a path that
 /// may run from an interrupt-masked section.
-pub fn fence_lineage(grants: &[crate::sync::SpinLock<Grant>; MAX_GRANTS], root: GrantId) -> u32 {
+pub fn fence_lineage(
+    grants: &mut [crate::sync::SpinLock<Grant>; MAX_GRANTS],
+    root: GrantId,
+) -> u32 {
     let mut changed = 0;
-    if let Some(node) = grants.get(root as usize) {
-        let mut node = node.lock();
+    if let Some(node) = grants.get_mut(root as usize) {
+        let node = node.get_mut();
         if node.used && !node.fenced {
             node.fenced = true;
             changed += 1;
@@ -388,19 +391,19 @@ pub fn fence_lineage(grants: &[crate::sync::SpinLock<Grant>; MAX_GRANTS], root: 
     for _ in 0..depth_bound {
         let mut progressed = false;
         for index in 0..MAX_GRANTS {
-            // One node at a time, the child released before its parent is
-            // read: the sweep converges on the same set either way, and a
-            // holder of two nodes at once would have to agree with everything
-            // else about which of them comes first.
+            // No acquisition: the sweep runs with the machine held
+            // exclusively, so nothing else can reach a node, and taking two
+            // hundred and fifty-six locks per pass to say so cost more than
+            // the sweep.
             let (used, fenced, parent) = {
-                let node = grants[index].lock();
+                let node = grants[index].get_mut();
                 (node.used, node.fenced, node.parent)
             };
             if !used || fenced || parent == NO_GRANT {
                 continue;
             }
-            if grants[parent as usize].lock().fenced {
-                grants[index].lock().fenced = true;
+            if grants[parent as usize].get_mut().fenced {
+                grants[index].get_mut().fenced = true;
                 changed += 1;
                 progressed = true;
             }

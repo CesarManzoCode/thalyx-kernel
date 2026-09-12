@@ -158,7 +158,7 @@ pub fn close(machine: &Machine, ctx: &Ctx) -> Result<u64, i64> {
 
 /// Places a barrier on this grant and everything derived or copied from it.
 pub fn fence(machine: &mut Machine, ctx: &Ctx) -> Result<u64, i64> {
-    let changed = crate::obj::fence_lineage(&machine.grants.nodes, ctx.cap.grant);
+    let changed = crate::obj::fence_lineage(&mut machine.grants.nodes, ctx.cap.grant);
     let grant_id = machine.grants.nodes[ctx.cap.grant as usize].lock().id;
     let object = crate::api::object_id(machine, ctx.cap.object);
     let scope = machine.domains[ctx.domain].owner_scope;
