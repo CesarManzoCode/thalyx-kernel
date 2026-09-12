@@ -11,8 +11,18 @@
 //! actually executed; it is not a proof about the hardware, and the counter is
 //! reported either way.
 //!
-//! The frequency is measured against the PIT rather than assumed, and the
-//! conversion to nanoseconds is overflow-checked.
+//! The frequency is measured against the PIT rather than assumed. The
+//! conversion to nanoseconds is a fixed-point multiply rather than a division:
+//! `1e9 / hz` is computed once, at the scale of [`SCALE_SHIFT`], and every
+//! reading multiplies by it and shifts. Dividing a 128-bit product by a
+//! frequency only known at run time is a call into the compiler's software
+//! divide, and the clock is read two to four times in every kernel entry --
+//! for the deadline the operation is judged against, for the receipt it
+//! writes, and for the progress its scope records. The multiply is exact
+//! arithmetic on a fixed scale, so the result stays monotonic in the counter
+//! by construction; what rounding the scale costs is a relative error under
+//! 2^-32, a quarter of a microsecond over a run of four minutes, and it is a
+//! scale error rather than a jitter.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -45,8 +55,22 @@ impl Source {
     }
 }
 
+/// Binary places the nanoseconds-per-tick factor is held at.
+///
+/// High enough that the factor's own rounding is negligible, low enough that
+/// the factor fits in a word for every frequency a calibration can report:
+/// at a gigahertz it is about 1.1e9, and it stays inside a `u64` down to a
+/// few hundred hertz.
+const SCALE_SHIFT: u32 = 32;
+
 static EPOCH_TSC: AtomicU64 = AtomicU64::new(0);
 static TSC_HZ: AtomicU64 = AtomicU64::new(0);
+/// Nanoseconds per tick, at the scale of [`SCALE_SHIFT`]; zero before
+/// calibration.
+static TSC_MULT: AtomicU64 = AtomicU64::new(0);
+/// Ticks per nanosecond, at the same scale and for the same reason: the
+/// scheduler turns every reservation it grants into a counter value.
+static TICKS_MULT: AtomicU64 = AtomicU64::new(0);
 static SOURCE: AtomicU64 = AtomicU64::new(0);
 /// Newest reading each processor has published, and how many it has taken.
 ///
@@ -77,6 +101,16 @@ static WORST_REGRESSION_NS: AtomicU64 = AtomicU64::new(0);
 /// Establishes the clock from a measured TSC frequency.
 pub fn init(tsc_hz: u64, invariant: bool) {
     TSC_HZ.store(tsc_hz, Ordering::Relaxed);
+    let mult = if tsc_hz == 0 {
+        0
+    } else {
+        u64::try_from((1_000_000_000u128 << SCALE_SHIFT) / u128::from(tsc_hz)).unwrap_or(0)
+    };
+    TSC_MULT.store(mult, Ordering::Relaxed);
+    TICKS_MULT.store(
+        u64::try_from((u128::from(tsc_hz) << SCALE_SHIFT) / 1_000_000_000u128).unwrap_or(0),
+        Ordering::Relaxed,
+    );
     EPOCH_TSC.store(cpu::rdtsc(), Ordering::Relaxed);
     SOURCE.store(if invariant { 1 } else { 2 }, Ordering::Release);
 }
@@ -104,14 +138,30 @@ pub fn monotonic_ns() -> Option<u64> {
     if source() == Source::None {
         return None;
     }
-    let hz = TSC_HZ.load(Ordering::Relaxed);
-    if hz == 0 {
+    let mult = TSC_MULT.load(Ordering::Relaxed);
+    if mult == 0 {
         return None;
     }
     let delta = cpu::rdtsc().wrapping_sub(EPOCH_TSC.load(Ordering::Relaxed));
     // 128-bit intermediate: a 64-bit product overflows after a few seconds at
-    // gigahertz frequencies, which is well inside a K1 run.
-    Some(((u128::from(delta) * 1_000_000_000u128) / u128::from(hz)) as u64)
+    // gigahertz frequencies, which is well inside a K1 run. The shift that
+    // follows is the scale the factor was computed at, so this is one widening
+    // multiply and one shift, not a division.
+    Some(((u128::from(delta) * u128::from(mult)) >> SCALE_SHIFT) as u64)
+}
+
+/// Counter ticks a span of `ns` nanoseconds lasts, or zero before the clock
+/// is established.
+///
+/// The other direction of [`monotonic_ns`], and a multiply for the same
+/// reason: the scheduler converts every reservation it grants.
+#[must_use]
+pub fn ticks_for_ns(ns: u64) -> u64 {
+    let mult = TICKS_MULT.load(Ordering::Relaxed);
+    if mult == 0 {
+        return 0;
+    }
+    ((u128::from(ns) * u128::from(mult)) >> SCALE_SHIFT) as u64
 }
 
 /// Publishes one reading and reports whether it went backwards relative to a

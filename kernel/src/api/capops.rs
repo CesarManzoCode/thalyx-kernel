@@ -22,7 +22,7 @@ use crate::trace;
 use crate::ucopy::Staging;
 
 /// Reports what a capability names and what its lineage still permits.
-pub fn inspect(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u64, i64> {
+pub fn inspect(machine: &Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u64, i64> {
     let node = *machine.grants.nodes[ctx.cap.grant as usize].lock();
     let lineage = match crate::api::lineage_status(machine, ctx.cap.grant, ctx.now) {
         status::OK => cap_lineage::LIVE,
@@ -54,7 +54,7 @@ pub fn inspect(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Resul
 
 /// Creates a child grant that removes rights, brings the deadline forward, or
 /// adds a bounding scope.
-pub fn derive(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u64, i64> {
+pub fn derive(machine: &Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u64, i64> {
     let request: DeriveRequest = staging.read(BODY);
     if request.reserved0 != 0 {
         return Err(status::INVALID_ARGUMENT);
@@ -142,7 +142,7 @@ pub fn derive(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
 }
 
 /// Installs a second handle on the same grant.
-pub fn copy(machine: &mut Machine, ctx: &Ctx) -> Result<u64, i64> {
+pub fn copy(machine: &Machine, ctx: &Ctx) -> Result<u64, i64> {
     crate::api::cap_install(machine, ctx.domain, ctx.cap.object, ctx.cap.grant, None)
         .ok_or(status::LIMIT_EXHAUSTED)
 }

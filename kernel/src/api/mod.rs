@@ -1121,7 +1121,12 @@ fn shared(
 ) -> Option<Result<u64, i64>> {
     if !matches!(
         operation,
-        op::INVOCATION_REPLY | op::ENDPOINT_SEND | op::CAP_CLOSE
+        op::INVOCATION_REPLY
+            | op::ENDPOINT_SEND
+            | op::CAP_CLOSE
+            | op::CAP_DERIVE
+            | op::CAP_COPY
+            | op::CAP_INSPECT
     ) {
         return None;
     }
@@ -1154,6 +1159,9 @@ fn shared(
                 op::INVOCATION_REPLY => ipcops::reply(&machine, &ctx, staging),
                 op::ENDPOINT_SEND => ipcops::send(&machine, &ctx, staging),
                 op::CAP_CLOSE => capops::close(&machine, &ctx),
+                op::CAP_DERIVE => capops::derive(&machine, &ctx, staging),
+                op::CAP_COPY => capops::copy(&machine, &ctx),
+                op::CAP_INSPECT => capops::inspect(&machine, &ctx, staging),
                 _ => Err(status::NOT_SUPPORTED),
             }
         }

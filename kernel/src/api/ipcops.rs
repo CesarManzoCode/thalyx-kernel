@@ -1041,7 +1041,6 @@ fn deliver(
 
 /// What releasing an invocation has to know about it.
 struct ReleaseFacts {
-    state: State,
     charged_bytes: u64,
     origin_scope: ScopeId,
     effect: Effect,
@@ -1063,7 +1062,6 @@ fn release_invocation(machine: &Machine, index: usize) {
             return;
         }
         let facts = ReleaseFacts {
-            state: slot.state,
             charged_bytes: slot.charged_bytes,
             origin_scope: slot.origin_scope,
             effect: slot.effect,

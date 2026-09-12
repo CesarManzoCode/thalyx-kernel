@@ -983,11 +983,14 @@ fn plan(cpu: usize, fair: bool) -> Option<Plan> {
 
 /// The counter value a reservation of `grant` nanoseconds runs out at.
 fn deadline_tsc(grant_ns: u64) -> u64 {
-    let hz = time::hz();
-    if hz == 0 || grant_ns == 0 {
+    if grant_ns == 0 {
         return u64::MAX;
     }
-    cpu::rdtsc().saturating_add((u128::from(grant_ns) * u128::from(hz) / 1_000_000_000) as u64)
+    let ticks = time::ticks_for_ns(grant_ns);
+    if ticks == 0 {
+        return u64::MAX;
+    }
+    cpu::rdtsc().saturating_add(ticks)
 }
 
 /// Rolls the window forward, once per boundary machine-wide.
