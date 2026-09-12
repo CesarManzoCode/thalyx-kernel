@@ -1655,16 +1655,16 @@ fn tick_bookkeeping(now: u64) {
         roll(now);
     }
     if crate::api::evtops::timer_due(now) {
-        let mut machine = MACHINE.lock();
+        let mut machine = MACHINE.write();
         crate::api::evtops::expire(&mut machine, now);
     }
     expire_waits(now);
     if scope::any_fenced() {
-        let _machine = MACHINE.lock();
+        let _machine = MACHINE.write();
         scope::advance_quiescence(now);
     }
     if crate::mm::frame::quarantine_pending() {
-        let mut machine = MACHINE.lock();
+        let mut machine = MACHINE.write();
         if let Some(allocator) = machine.memory.as_mut() {
             allocator.drain_quarantine();
         }

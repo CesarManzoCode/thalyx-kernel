@@ -77,7 +77,7 @@ pub fn create_signal(machine: &mut Machine, ctx: &Ctx) -> Result<u64, i64> {
         bits: 0,
         sequence: 0,
         waiters: 0,
-        refs: 0,
+        refs: core::sync::atomic::AtomicU32::new(0),
     };
     let object = ObjRef::new(ObjKind::Signal, index as u16, generation);
     let owner = machine.domains[ctx.domain].owner_scope;
@@ -144,7 +144,7 @@ pub fn create_timer(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> 
         deadline_ns: 0,
         armed: false,
         fired: 0,
-        refs: 0,
+        refs: core::sync::atomic::AtomicU32::new(0),
     };
     let object = ObjRef::new(ObjKind::Timer, index as u16, generation);
     let owner = machine.domains[ctx.domain].owner_scope;
@@ -228,7 +228,7 @@ pub fn wait(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
     loop {
         let index;
         {
-            let mut machine = MACHINE.lock();
+            let mut machine = MACHINE.write();
             let cap = resolve(
                 &machine,
                 ctx.domain,
@@ -266,7 +266,7 @@ pub fn wait(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
         crate::sched::block_current();
         let (woken, _) = thread::take_wake_status(ctx.thread);
         {
-            let mut machine = MACHINE.lock();
+            let mut machine = MACHINE.write();
             if machine.signals.get(index).is_some_and(|signal| signal.used) {
                 machine.signals[index].waiters = machine.signals[index].waiters.saturating_sub(1);
             }

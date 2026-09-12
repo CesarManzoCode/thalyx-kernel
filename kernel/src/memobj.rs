@@ -89,7 +89,7 @@ pub struct MemoryObject {
     /// Diagnostic label. A name grants nothing.
     pub label: [u8; 16],
     /// Capability entries naming this object.
-    pub refs: u32,
+    pub refs: core::sync::atomic::AtomicU32,
     /// Invalidation generation published when the object's last mapping was
     /// withdrawn, zero if it was never mapped. An object nothing can reach any
     /// more gives its frames straight back to the pool once every processor
@@ -126,7 +126,7 @@ impl MemoryObject {
             writable_maps: 0,
             dma_grants: 0,
             label: [0; 16],
-            refs: 0,
+            refs: core::sync::atomic::AtomicU32::new(0),
             unmapped_at: 0,
             unmapped_cpus: 0,
         }

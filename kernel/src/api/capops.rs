@@ -23,7 +23,7 @@ use crate::ucopy::Staging;
 
 /// Reports what a capability names and what its lineage still permits.
 pub fn inspect(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u64, i64> {
-    let node = machine.grants[ctx.cap.grant as usize];
+    let node = *machine.grants.nodes[ctx.cap.grant as usize].lock();
     let lineage = match crate::api::lineage_status(machine, ctx.cap.grant, ctx.now) {
         status::OK => cap_lineage::LIVE,
         status::EXPIRED => cap_lineage::EXPIRED,
@@ -38,7 +38,7 @@ pub fn inspect(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Resul
         parent_grant_id: if node.parent == NO_GRANT {
             0
         } else {
-            machine.grants[node.parent as usize].id
+            machine.grants.nodes[node.parent as usize].lock().id
         },
         deadline_ns: node.deadline_ns,
         life_scope_id: node
@@ -59,7 +59,7 @@ pub fn derive(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
     if request.reserved0 != 0 {
         return Err(status::INVALID_ARGUMENT);
     }
-    let parent = machine.grants[ctx.cap.grant as usize];
+    let parent = *machine.grants.nodes[ctx.cap.grant as usize].lock();
 
     // Amplification is refused rather than clamped: a caller that asked for
     // more than it holds asked for something that does not exist, and silently
@@ -109,7 +109,7 @@ pub fn derive(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
 
     match crate::api::cap_install(machine, ctx.domain, ctx.cap.object, child, None) {
         Some(handle) => {
-            let child_id = machine.grants[child as usize].id;
+            let child_id = machine.grants.nodes[child as usize].lock().id;
             let name = machine.domains[ctx.domain].name_str();
             trace!(
                 "cap.derive",
@@ -121,19 +121,19 @@ pub fn derive(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
                 child_id,
                 parent.rights,
                 request.rights_mask,
-                machine.grants[child as usize].depth
+                machine.grants.nodes[child as usize].lock().depth
             );
             Ok(handle)
         }
         None => {
             // The child grant never became reachable, so undoing it is the whole
             // of the rollback.
-            machine.grants[ctx.cap.grant as usize].children = machine.grants
-                [ctx.cap.grant as usize]
-                .children
-                .saturating_sub(1);
-            let sponsor = machine.grants[child as usize].sponsor;
-            machine.grants[child as usize] = crate::obj::Grant::empty();
+            {
+                let mut node = machine.grants.nodes[ctx.cap.grant as usize].lock();
+                node.children = node.children.saturating_sub(1);
+            }
+            let sponsor = machine.grants.nodes[child as usize].lock().sponsor;
+            *machine.grants.nodes[child as usize].lock() = crate::obj::Grant::empty();
             crate::api::free_grant_hint(machine, child as usize);
             crate::scope::release(sponsor, crate::scope::Resource::Metadata, 1);
             Err(status::LIMIT_EXHAUSTED)
@@ -148,7 +148,7 @@ pub fn copy(machine: &mut Machine, ctx: &Ctx) -> Result<u64, i64> {
 }
 
 /// Releases the caller's own table entry.
-pub fn close(machine: &mut Machine, ctx: &Ctx) -> Result<u64, i64> {
+pub fn close(machine: &Machine, ctx: &Ctx) -> Result<u64, i64> {
     if crate::api::cap_release(machine, ctx.domain, ctx.handle) {
         Ok(0)
     } else {
@@ -158,8 +158,8 @@ pub fn close(machine: &mut Machine, ctx: &Ctx) -> Result<u64, i64> {
 
 /// Places a barrier on this grant and everything derived or copied from it.
 pub fn fence(machine: &mut Machine, ctx: &Ctx) -> Result<u64, i64> {
-    let changed = crate::obj::fence_lineage(&mut machine.grants, ctx.cap.grant);
-    let grant_id = machine.grants[ctx.cap.grant as usize].id;
+    let changed = crate::obj::fence_lineage(&machine.grants.nodes, ctx.cap.grant);
+    let grant_id = machine.grants.nodes[ctx.cap.grant as usize].lock().id;
     let object = crate::api::object_id(machine, ctx.cap.object);
     let scope = machine.domains[ctx.domain].owner_scope;
     trace!(
@@ -188,7 +188,7 @@ pub fn fence(machine: &mut Machine, ctx: &Ctx) -> Result<u64, i64> {
 pub fn drain_status(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u64, i64> {
     let root = ctx.cap.grant;
     let mut report = DrainReport::zeroed();
-    report.state = if machine.grants[root as usize].fenced {
+    report.state = if machine.grants.nodes[root as usize].lock().fenced {
         scope_state::FENCED
     } else {
         scope_state::OPEN
@@ -199,6 +199,7 @@ pub fn drain_status(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> 
         }
     }
     for invocation in machine.invocations.iter() {
+        let invocation = invocation.lock();
         if invocation.state == crate::ipc::State::Empty {
             continue;
         }
@@ -212,7 +213,7 @@ pub fn drain_status(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> 
         }
     }
     report.last_progress_ns = ctx.now;
-    report.token = machine.grants[root as usize].id;
+    report.token = machine.grants.nodes[root as usize].lock().id;
     begin_response(staging, ctx.operation);
     staging.write(BODY, report);
     Ok(u64::from(report.invocations_pending))

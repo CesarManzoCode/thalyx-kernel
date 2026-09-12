@@ -15,7 +15,7 @@
 use crate::obj::ScopeId;
 
 /// A coalescing bit set with a sequence.
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub struct Signal {
     /// Whether the slot is in use.
     pub used: bool,
@@ -33,7 +33,7 @@ pub struct Signal {
     /// Threads currently waiting.
     pub waiters: u32,
     /// Capability entries naming this signal.
-    pub refs: u32,
+    pub refs: core::sync::atomic::AtomicU32,
 }
 
 impl Signal {
@@ -48,13 +48,13 @@ impl Signal {
             bits: 0,
             sequence: 0,
             waiters: 0,
-            refs: 0,
+            refs: core::sync::atomic::AtomicU32::new(0),
         }
     }
 }
 
 /// A monotonic expiry bound to a signal.
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub struct Timer {
     /// Whether the slot is in use.
     pub used: bool,
@@ -78,7 +78,7 @@ pub struct Timer {
     /// Expiries delivered.
     pub fired: u64,
     /// Capability entries naming this timer.
-    pub refs: u32,
+    pub refs: core::sync::atomic::AtomicU32,
 }
 
 impl Timer {
@@ -96,7 +96,7 @@ impl Timer {
             deadline_ns: 0,
             armed: false,
             fired: 0,
-            refs: 0,
+            refs: core::sync::atomic::AtomicU32::new(0),
         }
     }
 }

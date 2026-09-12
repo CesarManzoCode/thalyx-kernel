@@ -154,7 +154,7 @@ fn limits_query(thread: usize, frame: &mut TrapFrame) {
     }
 
     let (boot_epoch, cpus_online) = {
-        let machine = MACHINE.lock();
+        let machine = MACHINE.write();
         (machine.boot_epoch, crate::sched::cpus_online() as u32)
     };
     let limits = Limits {
@@ -263,7 +263,7 @@ fn diag_note(domain: usize, thread: usize, frame: &mut TrapFrame) {
     let second = frame.r10;
 
     let (sequence, cpu_ns, preemptions, syscalls) = {
-        let mut machine = MACHINE.lock();
+        let mut machine = MACHINE.write();
         machine.domains[domain].notes += 1;
         let cell = crate::thread::get(thread);
         // SAFETY: the scheduler fields of the thread running on this

@@ -41,7 +41,7 @@ pub fn read(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
     let mut final_pass = false;
     loop {
         {
-            let mut machine = MACHINE.lock();
+            let mut machine = MACHINE.write();
             let now = crate::api::now_ns();
             let cap = resolve(
                 &machine,
@@ -53,12 +53,12 @@ pub fn read(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
             )?;
             let index = cap.object.index as usize;
             let mut records = [ReceiptRecord::zeroed(); BATCH];
-            let count = machine.logs[index].read(&mut records);
+            let count = machine.logs[index].get_mut().read(&mut records);
             if count >= BATCH || ctx.deadline == 0 || final_pass || now >= ctx.deadline {
                 let result = LogReadResult {
                     count: count as u32,
-                    lost: machine.logs[index].lost,
-                    next_sequence: machine.logs[index].next_sequence,
+                    lost: machine.logs[index].get_mut().lost,
+                    next_sequence: machine.logs[index].get_mut().next_sequence,
                     records,
                 };
                 drop(machine);
@@ -74,7 +74,7 @@ pub fn read(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
                 Wait::Log(index as u16, cap.object.generation),
                 ctx.deadline,
             );
-            machine.logs[index].readers |= 1u64 << ctx.thread;
+            machine.logs[index].get_mut().readers |= 1u64 << ctx.thread;
         }
         crate::sched::block_current();
         let (woken, _) = thread::take_wake_status(ctx.thread);
@@ -89,15 +89,18 @@ pub fn read(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
 }
 
 /// Wakes a thread waiting on `index`, once the log holds a full batch for it.
-pub fn wake_reader(machine: &mut Machine, index: usize, generation: u32) {
-    if machine.logs[index].count < BATCH {
-        return;
-    }
-    let mut waiting = machine.logs[index].readers;
+pub fn wake_reader(machine: &Machine, index: usize, generation: u32) {
+    let mut waiting = {
+        let log = machine.logs[index].lock();
+        if log.count < BATCH {
+            return;
+        }
+        log.readers
+    };
     while waiting != 0 {
         let thread = waiting.trailing_zeros() as usize;
         waiting &= waiting - 1;
-        machine.logs[index].readers &= !(1u64 << thread);
+        machine.logs[index].lock().readers &= !(1u64 << thread);
         if thread::defer_wake_if(
             thread,
             |record| record.wait == Wait::Log(index as u16, generation),
@@ -136,9 +139,9 @@ pub fn append(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
         scope,
         u64::from(request.kind),
         0,
-        thread::get(ctx.thread)
-            .bound()
-            .map_or(0, |(index, _)| machine.invocations[index as usize].id),
+        thread::get(ctx.thread).bound().map_or(0, |(index, _)| {
+            machine.invocations[index as usize].lock().id
+        }),
         status::OK,
         request.a,
         request.b,
@@ -154,14 +157,16 @@ pub fn append(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
 pub fn acknowledge(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u64, i64> {
     let request: LogAckRequest = staging.read(BODY);
     let index = ctx.cap.object.index as usize;
-    let dropped = machine.logs[index].acknowledge(request.through_sequence);
+    let dropped = machine.logs[index]
+        .get_mut()
+        .acknowledge(request.through_sequence);
     Ok(dropped as u64)
 }
 
 /// Reports capacity, reservation and loss.
 pub fn query(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u64, i64> {
     let index = ctx.cap.object.index as usize;
-    let log = &machine.logs[index];
+    let log = &machine.logs[index].get_mut();
     let info = LogInfo {
         capacity: crate::limits::CONTROL_LOG_CAPACITY as u32,
         reserved_cells: crate::limits::CONTROL_LOG_RESERVED as u32,

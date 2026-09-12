@@ -107,7 +107,7 @@ pub fn create(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
         writable_maps: 0,
         dma_grants: 0,
         label: request.label,
-        refs: 0,
+        refs: core::sync::atomic::AtomicU32::new(0),
         unmapped_at: 0,
         unmapped_cpus: 0,
     };
@@ -380,7 +380,10 @@ pub fn withdraw_map_deferring(machine: &mut Machine, map_index: usize) -> (u32, 
     // here, after the record is gone, is what lets a node whose last handle was
     // closed while the mapping stood be collected now.
     if grant != crate::obj::NO_GRANT {
-        machine.grants[grant as usize].refs = machine.grants[grant as usize].refs.saturating_sub(1);
+        {
+            let mut node = machine.grants.nodes[grant as usize].lock();
+            node.refs = node.refs.saturating_sub(1);
+        }
         crate::api::collect_grant(machine, grant);
     }
     if removed != 0 {
@@ -441,7 +444,7 @@ pub fn collect_memory_acked(machine: &mut Machine, index: usize, acknowledged: b
         return;
     };
     if object.state == State::Empty
-        || object.refs != 0
+        || object.refs.load(core::sync::atomic::Ordering::Relaxed) != 0
         || object.map_count != 0
         || object.dma_grants != 0
     {
@@ -538,7 +541,7 @@ fn describe(machine: &Machine, index: usize) -> MemoryInfo {
 /// finishes the transition; declaring the bytes immutable is not.
 pub fn seal(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64> {
     let (index, id, generation, withdrawn, pages, live, mask) = {
-        let mut machine = MACHINE.lock();
+        let mut machine = MACHINE.write();
         let mut writers = [false; crate::state::MAX_DOMAINS];
         let cap = resolve(
             &machine,
@@ -624,7 +627,7 @@ pub fn seal(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
     // No lock is held here, which is the point.
     let ack = crate::tlb::shootdown();
 
-    let mut machine = MACHINE.lock();
+    let mut machine = MACHINE.write();
     if machine.memories[index].generation != generation
         || machine.memories[index].state == State::Empty
     {

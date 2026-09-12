@@ -87,7 +87,7 @@ pub fn shutting_down() -> bool {
 /// simultaneously faulting onto.
 pub fn map_emergency_stacks(cpu: usize) -> [u64; layout::IST_COUNT] {
     let mut tops = [0u64; layout::IST_COUNT];
-    let mut guard = MACHINE.lock();
+    let mut guard = MACHINE.write();
     let machine = &mut *guard;
     for (slot, top) in tops.iter_mut().enumerate() {
         let base = layout::ist_slot_base(cpu * layout::IST_COUNT + slot);
@@ -144,7 +144,7 @@ pub fn bootstrap_online(apic_id: u32) {
 /// It is executable and not writable: the trampoline is code, and the parameter
 /// block it reads is written before the processor exists.
 fn build_ap_space() -> Option<u64> {
-    let mut guard = MACHINE.lock();
+    let mut guard = MACHINE.write();
     let machine = &mut *guard;
     let allocator = machine.memory.as_mut()?;
     let mut space = AddressSpace::new(allocator, Owner::Kernel).ok()?;
@@ -172,7 +172,7 @@ fn build_ap_space() -> Option<u64> {
 /// the three absolute addresses it cannot know until the page is chosen.
 fn install_trampoline(cr3: u64) -> Option<Frame> {
     let frame = {
-        let mut machine = MACHINE.lock();
+        let mut machine = MACHINE.write();
         machine
             .allocator()
             .alloc_below(STARTUP_LIMIT, Owner::Kernel)
@@ -249,7 +249,7 @@ fn spin_ns(ns: u64) {
 
 /// Allocates the idle thread of processor `cpu` and returns its stack top.
 fn establish_ap_idle(cpu: usize) -> Option<u64> {
-    let mut machine = MACHINE.lock();
+    let mut machine = MACHINE.write();
     let index = idle_thread(cpu);
     let (slot, top) = crate::domain::allocate_kernel_stack(&mut machine).ok()?;
     let cr3 = machine.kernel_space.as_ref()?.cr3();
@@ -491,7 +491,7 @@ extern "C" fn ap_entry(cpu_index: u64) -> ! {
     // mapping the trampoline needed. From here the identity mapping is gone
     // from this processor's view.
     let kernel_cr3 = {
-        let machine = MACHINE.lock();
+        let machine = MACHINE.write();
         machine
             .kernel_space
             .as_ref()

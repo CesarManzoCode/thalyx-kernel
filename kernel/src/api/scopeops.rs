@@ -383,7 +383,7 @@ fn withdraw_everywhere(machine: &mut Machine, object: ObjRef) {
             continue;
         }
         for slot in 0..crate::limits::MAX_CAPS {
-            let entry = machine.domains[domain].caps.slots[slot];
+            let entry = machine.domains[domain].caps.get_mut().slots[slot];
             if entry.live && entry.object == object {
                 crate::api::cap_release_slot(machine, domain, slot);
             }
@@ -457,10 +457,11 @@ fn release_sponsored(machine: &mut Machine, root: ScopeId) -> (u64, u64) {
     }
 
     for index in 0..machine.endpoints.len() {
-        let (used, owner_scope, generation) = {
-            let endpoint = &machine.endpoints[index];
-            (endpoint.used, endpoint.owner_scope, endpoint.generation)
-        };
+        let (used, generation) = (
+            machine.endpoint_ids[index].used,
+            machine.endpoint_ids[index].generation,
+        );
+        let owner_scope = machine.endpoints[index].get_mut().owner_scope;
         if !used || !scope::is_within(root, owner_scope) {
             continue;
         }
@@ -469,8 +470,8 @@ fn release_sponsored(machine: &mut Machine, root: ScopeId) -> (u64, u64) {
             ObjRef::new(ObjKind::Endpoint, index as u16, generation),
         );
         scope::release(owner_scope, Resource::Metadata, 1);
-        machine.endpoints[index] = crate::ipc::Endpoint::empty();
-        machine.endpoints[index].generation = generation;
+        *machine.endpoints[index].get_mut() = crate::ipc::Endpoint::empty();
+        machine.endpoint_ids[index].used = false;
         objects += 1;
     }
 
@@ -518,6 +519,7 @@ fn release_sponsored(machine: &mut Machine, root: ScopeId) -> (u64, u64) {
 pub fn outstanding(machine: &Machine, root: ScopeId) -> u32 {
     let mut count = 0;
     for invocation in machine.invocations.iter() {
+        let invocation = invocation.lock();
         if invocation.state != ipc::State::Empty
             && invocation.state != ipc::State::Resolved
             && scope::is_within(root, invocation.origin_scope)

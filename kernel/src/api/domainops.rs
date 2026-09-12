@@ -243,8 +243,10 @@ pub fn map(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u6
     // and reused under the record while the mapping is still installed: a
     // withdrawal would then consult an unrelated grant.
     if memory.grant != crate::obj::NO_GRANT {
-        machine.grants[memory.grant as usize].refs =
-            machine.grants[memory.grant as usize].refs.saturating_add(1);
+        {
+            let mut node = machine.grants.nodes[memory.grant as usize].lock();
+            node.refs = node.refs.saturating_add(1);
+        }
     }
     // The tables the mapping actually took, and the rest of the reserve back.
     let charged_after = machine.allocator().charged(Owner::Domain(target as u16)) as u64;
@@ -301,7 +303,7 @@ pub fn unmap(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64
         return Err(status::INVALID_ARGUMENT);
     }
     let (target, pages, live, mask, memory) = {
-        let mut machine = MACHINE.lock();
+        let mut machine = MACHINE.write();
         let cap = resolve(
             &machine,
             ctx.domain,
@@ -360,7 +362,7 @@ pub fn unmap(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64
     // an object nothing else names goes straight back to the pool instead of
     // through the quarantine.
     if let Some(memory) = memory {
-        let mut machine = MACHINE.lock();
+        let mut machine = MACHINE.write();
         crate::api::memops::collect_memory_acked(&mut machine, memory, !ack.timed_out);
     }
     if ack.timed_out {
@@ -395,7 +397,7 @@ pub fn install_cap(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> R
         if request.rights_mask & !source.rights != 0 {
             return Err(status::INSUFFICIENT_RIGHTS);
         }
-        let parent = machine.grants[source.grant as usize];
+        let parent = *machine.grants.nodes[source.grant as usize].lock();
         let deadline = if request.deadline_ns == 0 {
             parent.deadline_ns
         } else {
@@ -418,15 +420,16 @@ pub fn install_cap(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> R
         .ok_or(status::LIMIT_EXHAUSTED)?
     };
 
-    let rights = machine.grants[grant as usize].rights;
+    let rights = machine.grants.nodes[grant as usize].lock().rights;
     if source.object.kind == ObjKind::Endpoint && rights & right::ENDPOINT_RECEIVE != 0 {
         let endpoint = source.object.index as usize;
-        let current = machine.endpoints[endpoint].receiver_domain;
+        let current = machine.endpoints[endpoint].get_mut().receiver_domain;
         if current != u16::MAX && current as usize != target {
             return Err(status::STATE_CONFLICT);
         }
-        machine.endpoints[endpoint].receiver_domain = target as u16;
-        machine.endpoints[endpoint].receiver_generation = machine.domains[target].generation;
+        machine.endpoints[endpoint].get_mut().receiver_domain = target as u16;
+        machine.endpoints[endpoint].get_mut().receiver_generation =
+            machine.domains[target].generation;
     }
 
     let handle = crate::api::cap_install(
@@ -445,7 +448,7 @@ pub fn install_cap(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> R
         request.target_slot,
         source.object.kind.name(),
         crate::api::object_id(machine, source.object),
-        machine.grants[grant as usize].id
+        machine.grants.nodes[grant as usize].lock().id
     );
     Ok(handle)
 }
@@ -533,11 +536,15 @@ pub fn set_fault_channel(
         ctx.now,
     )?;
     let index = endpoint.object.index as usize;
-    if machine.endpoints[index].reserved_cells + 1 >= machine.endpoints[index].capacity {
-        return Err(status::LIMIT_EXHAUSTED);
-    }
-    machine.endpoints[index].reserved_cells += 1;
-    machine.grants[endpoint.grant as usize].refs += 1;
+    let (endpoint_id, reserved_cells) = {
+        let slot = machine.endpoints[index].get_mut();
+        if slot.reserved_cells + 1 >= slot.capacity {
+            return Err(status::LIMIT_EXHAUSTED);
+        }
+        slot.reserved_cells += 1;
+        (slot.id, slot.reserved_cells)
+    };
+    machine.grants.nodes[endpoint.grant as usize].lock().refs += 1;
     machine.domains[target].fault_endpoint = Some(endpoint.object);
     machine.domains[target].fault_grant = endpoint.grant;
     machine.domains[target].fault_facet = endpoint.facet;
@@ -546,9 +553,9 @@ pub fn set_fault_channel(
         "domain.fault_channel",
         "domain={target} name={} endpoint={} facet={} reserved_cells={}",
         machine.domains[target].name_str(),
-        machine.endpoints[index].id,
+        endpoint_id,
         endpoint.facet,
-        machine.endpoints[index].reserved_cells
+        reserved_cells
     );
     Ok(0)
 }

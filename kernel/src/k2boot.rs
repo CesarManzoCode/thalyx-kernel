@@ -102,17 +102,17 @@ pub fn establish_root(machine: &mut Machine) -> ScopeId {
 
 /// Creates the system control log the kernel writes its receipts to.
 pub fn establish_control_log(machine: &mut Machine, sponsor: ScopeId) -> Option<u16> {
-    let index = machine.logs.iter().position(|log| !log.used)?;
+    let index = machine.logs.iter().position(|log| !log.lock().used)?;
     if !scope::reserve(sponsor, Resource::Metadata, 1) {
         return None;
     }
     let id = machine.next_id()?;
-    let generation = machine.logs[index].generation.saturating_add(1);
-    machine.logs[index] = crate::ctrl::ControlLog::empty();
-    machine.logs[index].used = true;
-    machine.logs[index].generation = generation;
-    machine.logs[index].id = id;
-    machine.logs[index].owner_scope = sponsor;
+    let generation = machine.logs[index].get_mut().generation.saturating_add(1);
+    *machine.logs[index].get_mut() = crate::ctrl::ControlLog::empty();
+    machine.logs[index].get_mut().used = true;
+    machine.logs[index].get_mut().generation = generation;
+    machine.logs[index].get_mut().id = id;
+    machine.logs[index].get_mut().owner_scope = sponsor;
     machine.system_log = Some(index as u16);
     event!(
         "ctrl.log_established",
@@ -222,7 +222,7 @@ fn image_object(
         writable_maps: 0,
         dma_grants: 0,
         label,
-        refs: 0,
+        refs: core::sync::atomic::AtomicU32::new(0),
         unmapped_at: 0,
         unmapped_cpus: 0,
     };
@@ -268,7 +268,7 @@ fn install(
          grant={} rights=0x{rights:x}",
         object.kind.name(),
         crate::api::object_id(machine, object),
-        machine.grants[grant as usize].id
+        machine.grants.nodes[grant as usize].lock().id
     );
     Some(handle)
 }
@@ -358,7 +358,7 @@ pub fn establish_supervisor(
     let log = ObjRef::new(
         ObjKind::ControlLog,
         log_index,
-        machine.logs[log_index as usize].generation,
+        machine.logs[log_index as usize].get_mut().generation,
     );
     install(
         machine,

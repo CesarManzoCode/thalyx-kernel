@@ -224,7 +224,7 @@ pub fn map_region(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Re
 pub fn unmap_region(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64> {
     let request: DeviceMapRequest = staging.read(BODY);
     let (id, pages) = {
-        let mut machine = MACHINE.lock();
+        let mut machine = MACHINE.write();
         let cap = resolve(
             &machine,
             ctx.domain,
@@ -608,7 +608,7 @@ fn revoke_grant(machine: &mut Machine, slot: usize) -> u32 {
 /// a protocol rather than a delay.
 pub fn reset(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64> {
     let (index, id, common, ecam, bdf, msix) = {
-        let mut machine = MACHINE.lock();
+        let mut machine = MACHINE.write();
         let cap = resolve(
             &machine,
             ctx.domain,
@@ -646,7 +646,7 @@ pub fn reset(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64
             "device={id} status=0x{observed:x} expected=0x0 bus_master=0 \
              grants_retained={} reason=transport_did_not_confirm_reset",
             MACHINE
-                .lock()
+                .write()
                 .dma_grants
                 .iter()
                 .filter(|grant| grant.used && grant.device as usize == index)
@@ -655,7 +655,7 @@ pub fn reset(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64
         return Err(status::DRAIN_INCOMPLETE);
     }
 
-    let mut machine = MACHINE.lock();
+    let mut machine = MACHINE.write();
     machine.devices[index].bus_master = false;
 
     let mut unbound = 0u32;

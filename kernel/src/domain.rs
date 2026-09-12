@@ -328,7 +328,7 @@ pub const TABLE_RESERVE_PAGES: u64 = 12;
 
 /// Creates a domain, taking the machine lock.
 pub fn create(name: &str, image: &[u8], owner_scope: ScopeId) -> Result<usize, CreateError> {
-    let mut machine = MACHINE.lock();
+    let mut machine = MACHINE.write();
     create_in(&mut machine, name, image, owner_scope, false)
 }
 
@@ -535,7 +535,7 @@ fn demolish(machine: &mut Machine, index: usize, owner: Owner) {
 /// so a future construction path that forgets one is refused rather than
 /// trusted.
 pub fn activate(index: usize) -> Result<(), ActivationRefusal> {
-    let mut machine = MACHINE.lock();
+    let mut machine = MACHINE.write();
     activate_in(&mut machine, index)
 }
 
@@ -605,7 +605,7 @@ pub fn terminate_on_fault(frame: &TrapFrame, cr2: u64) -> ! {
         let thread_index = crate::sched::current_thread();
         let cell = thread::get(thread_index);
         let domain_index = cell.domain();
-        let mut machine = MACHINE.lock();
+        let mut machine = MACHINE.write();
         // A thread that was stopped by authority while it was running, and
         // whose withdrawn mappings caught up with it before the kick did. It
         // has not done anything its program should be charged with; it leaves,
@@ -663,7 +663,7 @@ pub fn terminate_voluntarily(code: u64) -> ! {
     {
         let thread_index = crate::sched::current_thread();
         let domain_index = thread::get(thread_index).domain();
-        let mut machine = MACHINE.lock();
+        let mut machine = MACHINE.write();
         terminate_in(&mut machine, domain_index, ExitReason::Voluntary, code);
     }
     crate::sched::switch_away_from_dead()
@@ -732,7 +732,7 @@ fn kick_running_threads(machine: &Machine, index: usize) {
 pub fn collect_dead(machine: &mut Machine, index: usize) -> bool {
     let domain = &machine.domains[index];
     if domain.state != DomainState::Dead
-        || domain.refs != 0
+        || domain.refs.load(core::sync::atomic::Ordering::Relaxed) != 0
         || domain.space.is_some()
         || domain.thread_count() != 0
     {
@@ -779,7 +779,7 @@ pub fn reap_dead() {
         return;
     }
     loop {
-        let mut machine = MACHINE.lock();
+        let mut machine = MACHINE.write();
         let candidate = (0..MAX_DOMAINS).find(|&index| {
             matches!(
                 machine.domains[index].state,
@@ -1010,7 +1010,9 @@ pub fn terminate_in(machine: &mut Machine, index: usize, reason: ExitReason, cod
         machine.domains[index].thread_count(),
         machine.domains[index].notes,
         machine.domains[index].invocations,
-        machine.domains[index].refusals
+        machine.domains[index]
+            .refusals
+            .load(core::sync::atomic::Ordering::Relaxed)
     );
     true
 }

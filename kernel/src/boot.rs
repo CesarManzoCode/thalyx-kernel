@@ -211,7 +211,7 @@ pub unsafe fn start(bootinfo_phys: u64) -> ! {
     );
 
     {
-        let mut machine = MACHINE.lock();
+        let mut machine = MACHINE.write();
         machine.memory = Some(allocator);
     }
 
@@ -220,7 +220,7 @@ pub unsafe fn start(bootinfo_phys: u64) -> ! {
     // SAFETY: the kernel's own tables are installed and every mapping the
     // kernel executes from, and its stack, exist in them.
     unsafe {
-        let machine = MACHINE.lock();
+        let machine = MACHINE.write();
         let space = machine
             .kernel_space
             .as_ref()
@@ -346,7 +346,7 @@ pub unsafe fn start(bootinfo_phys: u64) -> ! {
     // creates from here on is unaccounted: every object is charged to a scope,
     // starting with the root scope that owns the machine.
     let root = {
-        let mut machine = MACHINE.lock();
+        let mut machine = MACHINE.write();
         machine.boot_epoch = info.boot_epoch;
         let root = k2boot::establish_root(&mut machine);
         k2boot::establish_control_log(&mut machine, root);
@@ -499,7 +499,7 @@ fn report_smp(platform: &acpi::Platform) {
 }
 
 fn map_kernel_range(space: &mut AddressSpace, start: u64, end: u64, rights: Rights, delta: u64) {
-    let mut guard = MACHINE.lock();
+    let mut guard = MACHINE.write();
     let allocator = guard.memory.as_mut().expect("frame allocator established");
     let mut vaddr = start;
     while vaddr < end {
@@ -513,7 +513,7 @@ fn map_kernel_range(space: &mut AddressSpace, start: u64, end: u64, rights: Righ
 
 fn build_kernel_space(info: &BootInfo, lapic_phys: u64, backend: lapic::Backend) {
     let mut space = {
-        let mut guard = MACHINE.lock();
+        let mut guard = MACHINE.write();
         let allocator = guard.memory.as_mut().expect("frame allocator established");
         let mut space = AddressSpace::new(allocator, Owner::Kernel).expect("kernel PML4");
         space
@@ -570,7 +570,7 @@ fn build_kernel_space(info: &BootInfo, lapic_phys: u64, backend: lapic::Backend)
         layout::LAPIC_VADDR
     );
 
-    let mut machine = MACHINE.lock();
+    let mut machine = MACHINE.write();
     machine.kernel_space = Some(space);
 }
 
@@ -628,7 +628,7 @@ fn start_timer(lapic_phys: u64, backend: lapic::Backend) -> lapic::Calibration {
 
 fn establish_idle_thread(info: &BootInfo) {
     let stack_top = HHDM_BASE + info.boot_stack_phys + info.boot_stack_pages * PAGE_SIZE;
-    let machine = MACHINE.lock();
+    let machine = MACHINE.write();
     let cr3 = machine
         .kernel_space
         .as_ref()
@@ -685,7 +685,7 @@ fn create_supervisor(root: ScopeId, supervisor: &thalyx_boot_protocol::BootModul
         .count();
 
     let index = {
-        let mut machine = MACHINE.lock();
+        let mut machine = MACHINE.write();
         // The package chose this path, and the run records which one it took.
         // Two images built from one kernel differ only here, so a log that did
         // not say which it was would be ambiguous about the thing that matters.
@@ -705,7 +705,7 @@ fn create_supervisor(root: ScopeId, supervisor: &thalyx_boot_protocol::BootModul
     match domain::activate(index) {
         Ok(()) => {
             let (entry, segments, thread) = {
-                let machine = MACHINE.lock();
+                let machine = MACHINE.write();
                 (
                     machine.domains[index].entry,
                     machine.domains[index].segments,
@@ -743,7 +743,7 @@ fn create_k1_domains(root: ScopeId) -> usize {
                 "name={name} reason=unsupported_kind kind={}",
                 module.kind
             );
-            MACHINE.lock().modules_rejected += 1;
+            MACHINE.write().modules_rejected += 1;
             continue;
         }
 
@@ -769,7 +769,7 @@ fn create_k1_domains(root: ScopeId) -> usize {
                 match domain::activate(index) {
                     Ok(()) => {
                         let (entry, segments, thread) = {
-                            let machine = MACHINE.lock();
+                            let machine = MACHINE.write();
                             (
                                 machine.domains[index].entry,
                                 machine.domains[index].segments,
@@ -793,7 +793,7 @@ fn create_k1_domains(root: ScopeId) -> usize {
                 }
             }
             Err(error) => {
-                MACHINE.lock().modules_rejected += 1;
+                MACHINE.write().modules_rejected += 1;
                 event!(
                     "module.rejected",
                     "name={name} reason={} expected_reject={}",
@@ -807,7 +807,7 @@ fn create_k1_domains(root: ScopeId) -> usize {
 }
 
 fn report_domain(index: usize, name: &str) {
-    let machine = MACHINE.lock();
+    let machine = MACHINE.write();
     let Some(space) = machine.domains[index].space.as_ref() else {
         return;
     };
@@ -818,7 +818,7 @@ fn report_domain(index: usize, name: &str) {
     let charged = {
         // The lock is already held; read through the same guard.
         drop(machine);
-        let mut machine = MACHINE.lock();
+        let mut machine = MACHINE.write();
         machine.allocator().charged(Owner::Domain(index as u16))
     };
     trace!(
@@ -831,7 +831,7 @@ fn report_domain(index: usize, name: &str) {
         layout::USER_STACK_PAGES
     );
 
-    let machine = MACHINE.lock();
+    let machine = MACHINE.write();
     let Some(space) = machine.domains[index].space.as_ref() else {
         return;
     };
@@ -858,7 +858,7 @@ fn reclaim_boot_memory(info: &BootInfo) {
 
     let mut modules_frames = 0usize;
     let mut boot_frames = 0usize;
-    let mut machine = MACHINE.lock();
+    let mut machine = MACHINE.write();
     for region in regions() {
         let start = region.base;
         let end = region.base + region.pages * PAGE_SIZE;
@@ -902,7 +902,7 @@ fn reclaim_boot_memory(info: &BootInfo) {
 fn drain_quarantine() {
     tlb::refresh_local();
     let (released, held, peak, retained, total) = {
-        let mut machine = MACHINE.lock();
+        let mut machine = MACHINE.write();
         let allocator = machine.allocator();
         let released = allocator.drain_quarantine();
         (
@@ -1044,6 +1044,12 @@ fn scheduling_summary() {
         ("lock.runqueue", crate::sync::LockClass::RunQueue),
         ("lock.wait", crate::sync::LockClass::Wait),
         ("lock.other", crate::sync::LockClass::Other),
+        ("lock.shared", crate::sync::LockClass::Shared),
+        ("lock.channel", crate::sync::LockClass::Channel),
+        ("lock.record", crate::sync::LockClass::Record),
+        ("lock.caps", crate::sync::LockClass::Caps),
+        ("lock.grants", crate::sync::LockClass::Grants),
+        ("lock.log", crate::sync::LockClass::Log),
     ] {
         let (acquisitions, waits, cycles, worst_wait) = crate::sync::contention(class);
         event!(
@@ -1061,13 +1067,13 @@ fn scheduling_summary() {
 
 fn summarize(terminal: sched::Terminal) {
     let (ticks, preemptions, _, records, _) = sched::totals();
-    let machine = MACHINE.lock();
+    let machine = MACHINE.write();
     let faults = machine.user_faults;
     let rejected = machine.modules_rejected;
     drop(machine);
 
     for index in 0..crate::state::MAX_DOMAINS {
-        let machine = MACHINE.lock();
+        let machine = MACHINE.write();
         let state = machine.domains[index].state;
         if state == crate::state::DomainState::Empty {
             continue;
@@ -1078,14 +1084,14 @@ fn summarize(terminal: sched::Terminal) {
             .map_or("none", crate::state::ExitReason::name);
         let charged = {
             drop(machine);
-            let mut machine = MACHINE.lock();
+            let mut machine = MACHINE.write();
             machine.allocator().charged(Owner::Domain(index as u16))
         };
         let name = domain::domain_name(index);
         let (handles, scope_id) = {
-            let machine = MACHINE.lock();
+            let machine = MACHINE.write();
             (
-                machine.domains[index].caps.live(),
+                machine.domains[index].caps.lock().live(),
                 crate::scope::table()[machine.domains[index].owner_scope as usize].id(),
             )
         };
@@ -1097,7 +1103,7 @@ fn summarize(terminal: sched::Terminal) {
         );
     }
 
-    let mut machine = MACHINE.lock();
+    let mut machine = MACHINE.write();
     let free = machine.allocator().free_frames();
     let usable = machine.allocator().usable();
     let kernel_charged = machine.allocator().charged(Owner::Kernel);
@@ -1108,7 +1114,7 @@ fn summarize(terminal: sched::Terminal) {
     // ended tidily while an invocation was still charged somewhere would look
     // exactly like one that did not, without the first number.
     let (outstanding, managed) = {
-        let machine = MACHINE.lock();
+        let machine = MACHINE.write();
         let outstanding = machine
             .root_scope
             .map_or(0, |root| crate::api::scopeops::outstanding(&machine, root));
