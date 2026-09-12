@@ -278,13 +278,14 @@ pub fn halt_forever() -> ! {
     }
 }
 
-/// Invalidates every translation this processor caches.
+/// Invalidates every translation this processor caches, global ones included.
 ///
 /// A `CR3` reload retires every non-global entry and every paging-structure
-/// cache entry for the space it names. This kernel marks no mapping global —
-/// `CR4.PGE` is never set and no leaf carries the global bit — so "non-global"
-/// is every mapping there is, and the reload is a complete invalidation rather
-/// than a partial one that needs a second mechanism for the rest.
+/// cache entry for the space it names, which is the user half: this kernel
+/// marks every kernel-half leaf global and no user-half leaf. The global
+/// entries are retired by turning `CR4.PGE` off and on, and on a virtual
+/// machine those two writes are the expensive kind, so this is for a
+/// withdrawal in the kernel half; [`flush_tlb_user`] is the ordinary case.
 ///
 /// # Safety
 ///
@@ -293,8 +294,30 @@ pub fn halt_forever() -> ! {
 /// space this kernel builds because they all share the kernel's upper half.
 #[inline]
 pub unsafe fn flush_tlb_all() {
+    // A `CR3` write retires every non-global entry; the kernel half is
+    // global, and clearing and restoring `CR4.PGE` is the architecturally
+    // defined way to retire those as well. Both writes keep every other bit.
+    //
+    // SAFETY: the values written back are the ones already loaded, apart
+    // from the paging-global bit going off and on, which changes no
+    // translation.
+    unsafe {
+        let cr4 = read_cr4();
+        write_cr4(cr4 & !CR4_PGE);
+        write_cr4(cr4);
+    }
+}
+
+/// Invalidates every cached translation of the user half: the non-global
+/// entries, which are the ones a `CR3` reload retires.
+///
+/// # Safety
+///
+/// As [`flush_tlb_all`].
+#[inline]
+pub unsafe fn flush_tlb_user() {
     // SAFETY: writing back the value already loaded changes no translation and
-    // is the architecturally defined way to invalidate the cached ones.
+    // is the architecturally defined way to invalidate the non-global ones.
     unsafe { write_cr3(read_cr3()) }
 }
 

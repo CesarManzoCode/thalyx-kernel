@@ -450,7 +450,7 @@ extern "C" fn ap_entry(cpu_index: u64) -> ! {
     unsafe {
         cpu::wrmsr(cpu::MSR_EFER, cpu::rdmsr(cpu::MSR_EFER) | cpu::EFER_NXE);
         cpu::write_cr0(cpu::read_cr0() | cpu::CR0_WP);
-        let mut cr4 = cpu::read_cr4();
+        let mut cr4 = cpu::read_cr4() | cpu::CR4_PGE;
         if features.smep {
             cr4 |= cpu::CR4_SMEP;
         }

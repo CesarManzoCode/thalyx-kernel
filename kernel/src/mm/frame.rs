@@ -263,16 +263,13 @@ impl FrameAllocator {
         self.quarantine_released
     }
 
-    /// Hands a frame to the quarantine instead of to the pool.
+    /// Hands a frame to the quarantine instead of to the pool, at a
+    /// generation the caller has taken.
     ///
     /// The stamp is a fresh invalidation generation, so the frame is released
-    /// only after every online processor has flushed at a point later than this
-    /// call — whether or not the caller published an invalidation of its own.
-    pub fn retire(&mut self, frame: Frame, owner: Owner) {
-        self.retire_at(frame, owner, crate::tlb::retire_stamp());
-    }
-
-    /// Retires a frame at a generation the caller has already taken.
+    /// only after every online processor has flushed at a point later than the
+    /// call that took it -- whether or not the caller published an
+    /// invalidation of its own.
     ///
     /// Tearing a domain down retires hundreds of frames in one critical
     /// section, and a generation taken for each of them is a generation every

@@ -152,8 +152,9 @@ pub(crate) fn allocate_kernel_stack(machine: &mut Machine) -> Result<(usize, u64
             if let Some(frame) = space.unmap(vaddr) {
                 // The range was never handed to a thread, but the kernel half
                 // is shared, so the entry could have been walked on another
-                // processor. Quarantine rather than immediate reuse.
-                allocator.retire(frame, Owner::Kernel);
+                // processor. Quarantine rather than immediate reuse, at a
+                // generation that retires global entries.
+                allocator.retire_at(frame, Owner::Kernel, crate::tlb::retire_stamp_kernel());
                 // SAFETY: the entry was just removed from the address space
                 // this processor is running in.
                 unsafe { cpu::invlpg(vaddr) };
@@ -171,8 +172,9 @@ fn release_kernel_stack(machine: &mut Machine, slot: usize) {
         return;
     }
     // One generation for the whole stack: every page of it has its entry
-    // cleared here, under one lock.
-    let stamp = crate::tlb::retire_stamp();
+    // cleared here, under one lock. A kernel-half one: the entries are
+    // global, and the flush that retires them is the one this asks for.
+    let stamp = crate::tlb::retire_stamp_kernel();
     let base = layout::kstack_slot_base(slot);
     for page in 0..layout::KSTACK_PAGES {
         let vaddr = base + (page + 1) * PAGE_SIZE;

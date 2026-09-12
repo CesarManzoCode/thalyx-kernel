@@ -9,8 +9,10 @@
 //! * a **generation** counts published invalidations. Every removal or
 //!   narrowing of a mapping bumps it, after the entry itself is written;
 //! * every processor records the generation it has flushed to. Flushing is
-//!   complete — a `CR3` reload, which retires every entry because this kernel
-//!   marks no mapping global — so a later generation subsumes every earlier
+//!   complete — a `CR3` reload retires every entry of the user half, which
+//!   this kernel never marks global, and a withdrawal in the kernel half,
+//!   whose entries are global, is counted separately and retired by a flush
+//!   that reaches them too — so a later generation subsumes every earlier
 //!   one. That is what makes coalescing safe: an acknowledgement of generation
 //!   three cannot leave an obligation from generation two behind, which is the
 //!   race a range-tracking scheme has to solve separately;
@@ -37,6 +39,11 @@ use crate::limits::MAX_CPUS;
 /// Published invalidations. Starts at one so a processor that has recorded
 /// nothing is distinguishable from one that has recorded the first generation.
 static GENERATION: AtomicU64 = AtomicU64::new(1);
+/// Of those, the ones that withdrew a kernel-half mapping, whose entries are
+/// global and survive a `CR3` reload. Bumped before the generation that
+/// carries them, so a processor that catches up with the generation sees
+/// this counter's step too.
+static KERNEL_GENERATION: AtomicU64 = AtomicU64::new(1);
 /// What one processor has flushed to and what it has loaded, on a line of
 /// its own.
 ///
@@ -46,6 +53,9 @@ static GENERATION: AtomicU64 = AtomicU64::new(1);
 struct Processor {
     /// Generation the processor has flushed to.
     seen: AtomicU64,
+    /// Kernel-half generation the processor's last flush reached: the
+    /// generation at which it last retired its global entries as well.
+    seen_kernel: AtomicU64,
     /// Space the processor has loaded, or `usize::MAX`.
     space: core::sync::atomic::AtomicUsize,
     /// Root the processor has loaded, or zero before it loaded one here.
@@ -59,6 +69,7 @@ struct Processor {
 static PROCESSORS: [Processor; MAX_CPUS] = [const {
     Processor {
         seen: AtomicU64::new(1),
+        seen_kernel: AtomicU64::new(1),
         space: core::sync::atomic::AtomicUsize::new(usize::MAX),
         loaded: AtomicU64::new(0),
     }
@@ -264,6 +275,18 @@ pub fn retire_stamp() -> u64 {
     GENERATION.fetch_add(1, Ordering::AcqRel) + 1
 }
 
+/// A fresh generation for a frame whose mapping was in the kernel half.
+///
+/// Kernel-half entries are global: a `CR3` reload does not retire them, so a
+/// processor catching up with this generation flushes them explicitly. The
+/// kernel counter steps first, and the generation's own step is what
+/// publishes it: a processor that observes the generation observes the
+/// kernel step behind it.
+pub fn retire_stamp_kernel() -> u64 {
+    KERNEL_GENERATION.fetch_add(1, Ordering::AcqRel);
+    GENERATION.fetch_add(1, Ordering::AcqRel) + 1
+}
+
 /// Brings the calling processor up to the published generation.
 ///
 /// Safe to call from anywhere, including from inside a lock's spin loop: it
@@ -273,15 +296,32 @@ pub fn refresh_local() {
     if cpu >= MAX_CPUS {
         return;
     }
+    let processor = &PROCESSORS[cpu];
     let wanted = GENERATION.load(Ordering::Acquire);
-    if PROCESSORS[cpu].seen.load(Ordering::Relaxed) >= wanted {
+    if processor.seen.load(Ordering::Relaxed) >= wanted {
         return;
     }
-    // SAFETY: the value written back is the address space this processor is
-    // already executing in, so the code and stack running here stay mapped.
-    unsafe { cpu::flush_tlb_all() };
+    // Read after the generation, with the order the publisher wrote them
+    // in: a kernel-half withdrawal this generation carries is visible here.
+    let wanted_kernel = KERNEL_GENERATION.load(Ordering::Acquire);
+    // SAFETY: the values written back are the ones this processor is already
+    // executing with, so the code and stack running here stay mapped.
+    unsafe {
+        if processor.seen_kernel.load(Ordering::Relaxed) < wanted_kernel {
+            // Something left the kernel half: the global entries go too. On a
+            // virtual machine the control-register writes this takes are the
+            // expensive kind, which is why the ordinary case below does not
+            // pay for them.
+            cpu::flush_tlb_all();
+        } else {
+            cpu::flush_tlb_user();
+        }
+    }
     FLUSHES.fetch_add(1, Ordering::Relaxed);
-    PROCESSORS[cpu].seen.store(wanted, Ordering::Release);
+    processor
+        .seen_kernel
+        .store(wanted_kernel, Ordering::Relaxed);
+    processor.seen.store(wanted, Ordering::Release);
 }
 
 /// The interrupt one processor sends another to make it refresh.

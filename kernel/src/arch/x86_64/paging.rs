@@ -21,6 +21,7 @@ const USER: u64 = 1 << 2;
 const WRITE_THROUGH: u64 = 1 << 3;
 const CACHE_DISABLE: u64 = 1 << 4;
 const HUGE: u64 = 1 << 7;
+const GLOBAL: u64 = 1 << 8;
 const NO_EXECUTE: u64 = 1 << 63;
 
 /// Leaf flag reported by [`AddressSpace::translate`]: the page is writable.
@@ -159,6 +160,16 @@ fn leaf_flags(rights: Rights) -> u64 {
     }
     if rights.user {
         flags |= USER;
+    } else {
+        // The kernel half is the same in every address space, so a switch
+        // between two spaces changes nothing in it; marking its entries
+        // global keeps them across the `CR3` write, where every switch
+        // between two domains used to retire the kernel's own translations
+        // and pay for their walks again on the way back in. What a switch
+        // must retire is the user half, and that stays non-global. A
+        // withdrawal in the kernel half is retired by `flush_tlb_all`, which
+        // flushes the global entries too.
+        flags |= GLOBAL;
     }
     if !rights.execute {
         flags |= NO_EXECUTE;

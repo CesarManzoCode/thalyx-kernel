@@ -272,7 +272,7 @@ pub unsafe fn start(bootinfo_phys: u64) -> ! {
     // Supervisor execution and access prevention are enabled only now: before
     // the kernel's own tables were installed, a firmware mapping that marked
     // kernel memory user-accessible would have faulted immediately.
-    let mut cr4 = cpu::read_cr4();
+    let mut cr4 = cpu::read_cr4() | cpu::CR4_PGE;
     if features.smep {
         cr4 |= cpu::CR4_SMEP;
     }
@@ -280,7 +280,9 @@ pub unsafe fn start(bootinfo_phys: u64) -> ! {
         cr4 |= cpu::CR4_SMAP;
     }
     // SAFETY: the bits are enabled only when CPUID advertised them, and the
-    // kernel neither executes from nor reads user pages.
+    // kernel neither executes from nor reads user pages. Global pages are a
+    // base feature of the architecture; the kernel half's entries carry the
+    // bit and the user half's never do.
     unsafe { cpu::write_cr4(cr4) };
     event!(
         "cpu.profile",
@@ -288,13 +290,13 @@ pub unsafe fn start(bootinfo_phys: u64) -> ! {
          kernel_simd=off user_fp=x87+sse2 fp_switch=eager global_pages={}",
         if features.smep { "on" } else { "absent" },
         if features.smap { "on" } else { "absent" },
-        // Read back rather than assumed. Cross-processor invalidation reloads
-        // `CR3` and calls that complete, which is only true while no mapping is
-        // global, and no mapping can be global while this bit is clear.
+        // Read back rather than assumed. A switch retires the user half by
+        // reloading `CR3`; a refresh retires the kernel half as well, by
+        // clearing and restoring this bit.
         if cpu::read_cr4() & cpu::CR4_PGE == 0 {
-            "off"
+            "off_unexpected"
         } else {
-            "on_unexpected"
+            "kernel"
         }
     );
 
