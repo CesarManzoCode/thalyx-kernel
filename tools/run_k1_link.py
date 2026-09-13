@@ -108,7 +108,7 @@ def main() -> int:
             handle.truncate(run_k5.MEDIUM_MIB * 1024 * 1024)
 
     argv = run_k5.qemu_command(
-        tools, vars_copy, arguments.image, medium, arguments.processors, debug_exit=False
+        tools, vars_copy, arguments.image, medium, arguments.processors, debug_exit=True
     )
     # Insert the console device before the trailing -serial/-display flags; any
     # position is fine, so append.
