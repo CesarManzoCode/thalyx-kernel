@@ -1,0 +1,21 @@
+[package]
+name = "thalyx-user-k5link"
+description = "K5 link domain: Thalyx-Kernel's platform boundary for the real Thalyx, over a virtio-console transport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "k5link"
+path = "src/main.rs"
+
+[dependencies]
+thalyx-abi.workspace = true
+thalyx-user-rt.workspace = true
+thalyx-user-k4fmt.workspace = true
+thalyx-user-k5pkg.workspace = true
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

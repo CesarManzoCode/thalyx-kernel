@@ -33,18 +33,33 @@ use thalyx_user_rt::k2;
 use crate::disk::{Disk, slot_bytes};
 
 /// Objects the in-memory index can name at once.
+///
+/// Forty is the research size K4 was gated at, and the K4 matrix depends on
+/// it: the staging sweep is only exercised because the tables fill. The
+/// `large-index` feature is the same service with tables sized for a consumer
+/// whose transactions carry real trees and real evidence -- the format on the
+/// medium does not change, only how much of it one run can name.
+#[cfg(not(feature = "large-index"))]
 pub const MAX_OBJECTS: usize = 40;
+#[cfg(feature = "large-index")]
+pub const MAX_OBJECTS: usize = 384;
 /// Objects that may be staged but not yet durable.
 /// Staging slots. Bigger than the most the loop can ask to keep, which is one
 /// candidate closure plus a few offers per principal: a protection set larger
 /// than the staging area means a sweep can free nothing and the service
 /// refuses work it has no reason to refuse.
+#[cfg(not(feature = "large-index"))]
 pub const MAX_STAGED: usize = 24;
+#[cfg(feature = "large-index")]
+pub const MAX_STAGED: usize = 128;
 
 /// Digests the loop may ask the engine to keep staged at once: one candidate
 /// root per principal, the last few objects each principal staged, and every
 /// binding of every live workspace.
+#[cfg(not(feature = "large-index"))]
 pub const MAX_PROTECTED: usize = 40;
+#[cfg(feature = "large-index")]
+pub const MAX_PROTECTED: usize = 128;
 
 const _: () = assert!(MAX_PRINCIPALS * 4 + MAX_PRINCIPALS < MAX_STAGED);
 /// Largest object this service accepts.

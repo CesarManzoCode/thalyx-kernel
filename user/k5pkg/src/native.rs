@@ -223,4 +223,8 @@ pub mod stage {
     pub const WORK: u32 = 3;
     /// The resident inference engine and the toolchain the workload needs.
     pub const ENGINE: u32 = 4;
+    /// The real Thalyx, outside the machine, over the services inside it:
+    /// the state service, a work scope per transaction and the link that
+    /// carries its managed protocol in. EXP-13's third arm.
+    pub const THALYX: u32 = 5;
 }

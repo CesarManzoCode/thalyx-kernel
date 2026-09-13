@@ -11,6 +11,13 @@ publish.workspace = true
 name = "k4store"
 path = "src/main.rs"
 
+[features]
+# Tables sized for a consumer with real trees and real evidence; the medium
+# format is unchanged. See `state.rs`.
+large-index = []
+# Every bound principal may publish, not only the two K4's package names.
+every-principal-publishes = []
+
 [dependencies]
 thalyx-abi.workspace = true
 thalyx-user-rt.workspace = true

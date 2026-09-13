@@ -15,6 +15,7 @@
 #![no_std]
 
 pub mod generated;
+pub mod link;
 pub mod native;
 pub mod plan;
 pub mod proto;

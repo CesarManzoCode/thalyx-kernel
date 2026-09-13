@@ -196,10 +196,27 @@ impl Workspace {
 /// refusal below about publishing rather than about reaching the service.
 fn permitted(principal: u64, op: u32) -> bool {
     match op {
-        store_op::PUBLISH => principal == facet::PUBLISHER || principal == facet::RIVAL,
+        store_op::PUBLISH => may_publish(principal),
         store_op::COMPACT => principal == facet::PUBLISHER,
         _ => principal != 0,
     }
+}
+
+/// Which principals the package lets publish.
+///
+/// K4's package names two, and the reader's refusal is one of its criteria.
+/// Under `every-principal-publishes` every bound principal may, which is what
+/// a service shared by several independent consumers needs; the policy object
+/// of each publication still narrows it further, and the facet is still the
+/// only identity.
+#[cfg(not(feature = "every-principal-publishes"))]
+fn may_publish(principal: u64) -> bool {
+    principal == facet::PUBLISHER || principal == facet::RIVAL
+}
+
+#[cfg(feature = "every-principal-publishes")]
+fn may_publish(principal: u64) -> bool {
+    principal != 0 && (principal as usize) < state::MAX_PRINCIPALS
 }
 
 /// A reply carrying nothing but a status.
