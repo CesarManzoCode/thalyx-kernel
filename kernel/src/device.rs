@@ -539,12 +539,33 @@ pub unsafe fn reset_transport(common: u64) -> bool {
     }
 }
 
-/// Whether a candidate function is the device this revision assigns.
+/// The virtio device classes this revision assigns, by modern PCI device id.
+///
+/// Modern virtio only: the transitional identifiers are not treated as modern
+/// because they happen to work under an emulator. The class decides nothing
+/// but the label a driver reads back through `DEVICE_QUERY`; every function
+/// goes through the same validation, the same session and the same DMA
+/// profile, which is what makes "the kernel assigns a device" one claim rather
+/// than one per device type.
+const ASSIGNED_CLASSES: [(u16, &[u8; 9]); 2] = [
+    // virtio-blk: the medium the durable state stands on (K3, K4).
+    (0x1042, b"virtioblk"),
+    // virtio-console: a byte channel to whatever is outside the machine, which
+    // is how a consumer that is not inside this kernel reaches a service that
+    // is (EXP-13).
+    (0x1043, b"virtiocon"),
+];
+
+/// The label of a function this revision assigns, or nothing.
 #[must_use]
-pub fn is_virtio_block(function: &pci::Function) -> bool {
-    // Modern virtio only. A legacy identifier is not treated as modern because
-    // it happens to work under an emulator.
-    function.vendor == 0x1AF4 && function.device == 0x1042
+pub fn assigned_label(function: &pci::Function) -> Option<&'static [u8; 9]> {
+    if function.vendor != 0x1AF4 {
+        return None;
+    }
+    ASSIGNED_CLASSES
+        .iter()
+        .find(|(id, _)| *id == function.device)
+        .map(|(_, label)| *label)
 }
 
 /// Result of validating a function's advertised structures.
@@ -835,10 +856,10 @@ pub fn discover(platform: &crate::acpi::Platform, sponsor: ScopeId) {
 
     for index in 0..inventory.count {
         let function = inventory.functions[index];
-        if !is_virtio_block(&function) {
+        let Some(label) = assigned_label(&function) else {
             continue;
-        }
-        if assign(&ecam, &inventory, &function, sponsor).is_none() {
+        };
+        if assign(&ecam, &inventory, &function, label, sponsor).is_none() {
             continue;
         }
     }
@@ -849,6 +870,7 @@ fn assign(
     ecam: &pci::Ecam,
     inventory: &pci::Inventory,
     function: &pci::Function,
+    label: &[u8; 9],
     sponsor: ScopeId,
 ) -> Option<usize> {
     let validated = validate(function);
@@ -912,7 +934,7 @@ fn assign(
     device.state = State::Ready;
     device.session = 1;
     device.sponsor = sponsor;
-    device.label[..9].copy_from_slice(b"virtioblk");
+    device.label[..9].copy_from_slice(label);
     device.bdf = function.bdf;
     device.vendor = function.vendor;
     device.device_id = function.device;
