@@ -134,18 +134,29 @@ K5_STAGE_PROGRAMS: dict[str, list[str]] = {
     "surface": ["k4disk", "k4store", "k5work"],
     "work": ["k4disk", "k4store", "k5work"],
     "engine": ["k4disk", "k4store", "k5work"],
+    # The `thalyx` stage is the K1 backend: the durable service and the block
+    # driver, plus the link that carries the real Thalyx's managed protocol in
+    # over a virtio-console function. No native images and no work domain -- the
+    # consumer is the host.
+    "thalyx": ["k4disk", "k4store", "k5link"],
 }
 # What each stage's modules are called in the package, which is what the
 # supervisor matches on. A K4 program keeps its own image and gets the name the
 # K5 supervisor looks for.
-K5_MODULE_NAMES = {"k4disk": "k5disk", "k4store": "k5store", "k5work": "k5work"}
+K5_MODULE_NAMES = {
+    "k4disk": "k5disk",
+    "k4store": "k5store",
+    "k5work": "k5work",
+    "k5link": "k5link",
+}
 K5_NATIVE: dict[str, list[str]] = {
     "smoke": ["nsmoke"],
     "surface": [],
     "work": ["nhacer", "ncheck"],
     "engine": ["nhacer", "ncheck", "nengine"],
+    "thalyx": [],
 }
-K5_STAGES = {"smoke": 1, "surface": 2, "work": 3, "engine": 4}
+K5_STAGES = {"smoke": 1, "surface": 2, "work": 3, "engine": 4, "thalyx": 5}
 
 # The K6 package: the native half of the paired benchmarks. One supervisor
 # that builds and audits, one C program that is every role of the benchmark,
@@ -236,10 +247,12 @@ def cargo_environment(target: str) -> dict[str, str]:
     return environment
 
 
-def cargo_build(package: str, target: str, profile: str) -> None:
+def cargo_build(package: str, target: str, profile: str, features: list[str] | None = None) -> None:
     argv = ["cargo", "build", "-p", package, "--target", target]
     if profile == "release":
         argv.append("--release")
+    if features:
+        argv += ["--features", ",".join(features)]
     run(argv, cwd=ROOT, env=cargo_environment(target))
 
 
@@ -391,8 +404,12 @@ def main() -> int:
 
     cargo_build("thalyx-boot-uefi", LOADER_TARGET, arguments.profile)
     cargo_build("thalyx-kernel", KERNEL_TARGET, arguments.profile)
+    store_features = []
+    if phase == "k5" and arguments.stage == "thalyx":
+        store_features = ["large-index"]
     for program in programs:
-        cargo_build(f"thalyx-user-{program}", KERNEL_TARGET, arguments.profile)
+        features = store_features if program == "k4store" else None
+        cargo_build(f"thalyx-user-{program}", KERNEL_TARGET, arguments.profile, features)
 
     loader = artifact(LOADER_TARGET, arguments.profile, "bootx64.efi")
     kernel = artifact(KERNEL_TARGET, arguments.profile, "kernel")

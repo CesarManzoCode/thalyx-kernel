@@ -28,6 +28,8 @@ mod launch;
 mod launcher;
 mod services;
 mod surface;
+mod thalyxlink;
+mod thalyxstage;
 mod work;
 
 use thalyx_abi::{boot_handle, handle as make_handle};
@@ -308,6 +310,7 @@ fn run() -> ! {
                 uses_engine: true,
             },
         ),
+        native::stage::THALYX => thalyxstage::run(system, supervision, plan.seed, plan.arg0),
         _ => {
             k2::note(note::BUILD_STEP_FAILED, 88);
             false
