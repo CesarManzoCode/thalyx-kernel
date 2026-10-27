@@ -1216,4 +1216,15 @@ fn run() -> ! {
     }
 }
 
+#[cfg(not(feature = "large-index"))]
 rt::entry!(run);
+
+// The large-index tables put the `Store` in `run`'s frame at about 79 KiB, and the
+// kernel maps eight pages (32 KiB) under a domain: the first boot of the thalyx
+// stage met the guard page in `run`'s own stack probe. Bring a stack, as the K5
+// work domain does. The deepest static chain measured from the disassembly,
+// `run` -> `serve` -> `compact` -> `closure` -> `load` -> `Disk::call`, is about
+// 104 KiB; this stack sits in `.bss` with no guard page under it, so the margin
+// is what keeps an overflow from writing into the buffers beside it.
+#[cfg(feature = "large-index")]
+thalyx_user_rt::entry_on_stack!(run, 128 * 1024);
