@@ -103,6 +103,9 @@ pub struct Entry {
     pub shape: u32,
     pub len: u64,
     pub k4: [u8; 32],
+    /// Where the object's bytes are in the pending arena while it is not yet
+    /// durable. Meaningless once `durable` is set.
+    pub pending_at: u32,
 }
 
 impl Entry {
@@ -114,6 +117,7 @@ impl Entry {
         shape: 0,
         len: 0,
         k4: [0; 32],
+        pending_at: 0,
     };
 }
 
@@ -174,7 +178,37 @@ pub struct Line {
     pub next_sequence: [u64; MAX_PRINCIPALS],
 }
 
+/// A line's name on the medium, `L` and these twelve bytes in hex: its index,
+/// little-endian, then zeros.
+///
+/// A line is addressed by its number -- the port a request arrives on, or the
+/// line the harness bound that port to -- and nothing else names it, so that
+/// number is its identity across a reboot. Recovery puts each line back at the
+/// index its name says, which is the index the same port reaches after the
+/// reboot.
+fn line_id(index: usize) -> [u8; 12] {
+    let mut id = [0u8; 12];
+    id[..4].copy_from_slice(&(index as u32).to_le_bytes());
+    id
+}
+
+/// The index a line's medium name says, if it names one this link serves.
+fn line_index_of(id: &[u8; 12]) -> Option<usize> {
+    if id[4..] != [0u8; 8] {
+        return None;
+    }
+    let index = u32::from_le_bytes(id[..4].try_into().ok()?) as usize;
+    (index < MAX_LINES).then_some(index)
+}
+
 impl Line {
+    /// Whether this line has anything a root must carry: a generation,
+    /// evidence or a decision's receipt. A line no request has written is
+    /// left out of the root, and comes back empty, which is what it was.
+    fn holds_state(&self) -> bool {
+        self.used || self.generation > 0 || self.evidence_count > 0 || self.receipt != [0u8; 32]
+    }
+
     const EMPTY: Line = Line {
         used: false,
         id: [0; 12],
@@ -232,6 +266,27 @@ struct Buffers {
     chunk: [u8; CHUNK],
 }
 
+/// Bytes of objects put since the last root commit that this link holds.
+///
+/// K4's `READ` serves only what is reachable from a published or retained root
+/// -- `NOT_FOUND` there means "not part of anything this store serves", and
+/// that is K4's contract, not an accident. An object Thalyx has put and not yet
+/// published is staged in K4 and reachable from nothing, so K4 cannot hand it
+/// back; yet Thalyx reads such objects before it publishes -- a seed's tree is
+/// checked whole, a `get` may name anything it put. So the link keeps their
+/// bytes here until a commit makes them durable, and serves them from here.
+/// Nothing is written to the medium for it: the only writes stay the root
+/// commits, which a fenced work's grant cannot make.
+pub const PENDING_BYTES: usize = 1024 * 1024;
+
+static mut PENDING: [u8; PENDING_BYTES] = [0; PENDING_BYTES];
+
+#[allow(clippy::deref_addrof)]
+fn pending() -> &'static mut [u8; PENDING_BYTES] {
+    // SAFETY: as `buffers`.
+    unsafe { &mut *(&raw mut PENDING) }
+}
+
 static mut BUFFERS: Buffers = Buffers {
     object: [0; OBJECT_MAX],
     chunk: [0; CHUNK],
@@ -257,6 +312,8 @@ pub struct Managed {
     pub k4_facet: u64,
     pub stage_cap: u64,
     pub store_calls: u64,
+    /// Bytes of the pending arena in use; zero again after a root commit.
+    pub pending_used: usize,
 }
 
 fn thalyx_digest(kind: u8, bytes: &[u8]) -> [u8; 32] {
@@ -311,6 +368,7 @@ impl Managed {
             k4_facet,
             stage_cap,
             store_calls: 0,
+            pending_used: 0,
         }
     }
 
@@ -339,17 +397,20 @@ impl Managed {
     }
 
     // -- blobs: Thalyx objects as K4 objects -----------------------------------
-    /// Reads a K4 object of either shape back into `out`.
-    fn load_blob(
-        &mut self,
-        principal: u32,
-        k4: &[u8; 32],
-        shape: u32,
-        len: u64,
-        out: &mut [u8],
-    ) -> Option<usize> {
+    /// Reads an object back into `out`: from the pending arena while it is
+    /// not yet durable, from K4 once a root commit has made it so.
+    fn load_blob(&mut self, principal: u32, entry: &Entry, out: &mut [u8]) -> Option<usize> {
+        if !entry.durable {
+            let at = entry.pending_at as usize;
+            let len = entry.len as usize;
+            if at + len > self.pending_used || len > out.len() {
+                return None;
+            }
+            out[..len].copy_from_slice(&pending()[at..at + len]);
+            return Some(len);
+        }
         let mut store = self.store(principal);
-        let result = load_blob_with(&mut store, k4, shape, len, out, 0);
+        let result = load_blob_with(&mut store, &entry.k4, entry.shape, entry.len, out, 0);
         self.account(&store);
         result
     }
@@ -364,7 +425,15 @@ impl Managed {
         let mut store = Store::new(grant, self.stage_cap);
         let outcome = self.commit_root_with(&mut store);
         self.account(&store);
-        outcome
+        // A root commit makes a dozen calls through `grant` before the
+        // publication itself -- objects, index, history, fork, freeze -- and
+        // the first of them is the one a fenced work's grant meets. Whichever
+        // call it was, the kernel's `SCOPE_CLOSED` is the answer, not the
+        // status word that call's caller turned its failure into.
+        match outcome {
+            Err(_) if store.last_code == thalyx_abi::status::SCOPE_CLOSED => Err(u32::MAX),
+            other => other,
+        }
     }
 
     fn commit_root_with(&mut self, store: &mut Store) -> core::result::Result<(), u32> {
@@ -421,7 +490,7 @@ impl Managed {
         root_count += 1;
         for line_index in 0..MAX_LINES {
             let line = self.lines[line_index];
-            if !line.used {
+            if !line.holds_state() {
                 continue;
             }
             let mut members: [Binding; FANOUT] = [Binding::default(); FANOUT];
@@ -478,10 +547,14 @@ impl Managed {
                     .map_err(|_| store_status::INVALID_REQUEST)?;
                 member_count += 1;
             }
+            // Canonical order, as the root below: K4 refuses a tree whose names
+            // are not sorted, and `H`, `E`, `R` in the order they were built is
+            // not -- which went unseen until a line first kept evidence.
+            members[..member_count].sort_unstable_by(|a, b| name_of(a).cmp(name_of(b)));
             let (line_tree, line_len) = stage_tree(store, &members[..member_count])?;
             let mut name = [0u8; 25];
             name[0] = b'L';
-            for (index, byte) in line.id.iter().enumerate() {
+            for (index, byte) in line_id(line_index).iter().enumerate() {
                 name[1 + index * 2] = b"0123456789abcdef"[(byte >> 4) as usize];
                 name[2 + index * 2] = b"0123456789abcdef"[(byte & 15) as usize];
             }
@@ -534,6 +607,9 @@ impl Managed {
                         entry.durable = true;
                     }
                 }
+                // Every live object is now reachable from the published root,
+                // so K4 serves all of them and the arena holds nothing needed.
+                self.pending_used = 0;
                 // The other arena is where the next root goes once this one
                 // is nearly full; asking for it early is what keeps a
                 // publication from meeting the reserve.
@@ -691,9 +767,11 @@ impl Managed {
                         };
                         *byte = (high << 4) | low;
                     }
-                    let Some(slot) = self.line_slot(&id) else {
+                    let Some(slot) = line_index_of(&id) else {
                         return false;
                     };
+                    self.lines[slot].used = true;
+                    self.lines[slot].id = id;
                     let mut members: [Binding; FANOUT] = [Binding::default(); FANOUT];
                     let Some(member_count) = read_tree(store, &binding.digest, &mut members) else {
                         return false;
@@ -763,22 +841,6 @@ impl Managed {
 
     // -- lines ---------------------------------------------------------------
 
-    /// The line with this identity, made if it is new.
-    pub fn line_slot(&mut self, id: &[u8; 12]) -> Option<usize> {
-        if let Some(found) = self
-            .lines
-            .iter()
-            .position(|line| line.used && line.id == *id)
-        {
-            return Some(found);
-        }
-        let slot = self.lines.iter().position(|line| !line.used)?;
-        self.lines[slot] = Line::EMPTY;
-        self.lines[slot].used = true;
-        self.lines[slot].id = *id;
-        Some(slot)
-    }
-
     fn record(&mut self, line: usize, principal: u32, sequence: u64, outcome: Outcome) {
         let at = self.results_next % MAX_RESULTS;
         self.results_next += 1;
@@ -829,7 +891,7 @@ impl Managed {
                     .raw(b"{\"reply\":\"hello\",\"format\":")
                     .str(FORMAT)
                     .raw(b",\"store\":\"k4-")
-                    .hex(&self.seed.to_be_bytes())
+                    .hex_digits(&self.seed.to_be_bytes())
                     .raw(b"\",\"epoch\":1}");
             }
             b"published" => {
@@ -900,6 +962,16 @@ impl Managed {
                 }
                 let digest = thalyx_digest(kind, &object[..len]);
                 if self.find(&digest).is_none() {
+                    // Refused before anything is staged, so a full arena costs
+                    // the client a retry after a publication and costs K4
+                    // nothing.
+                    if self.pending_used + len > PENDING_BYTES {
+                        return refuse(
+                            &mut writer,
+                            b"unwritable",
+                            b"the objects put since the last publication fill what this link holds",
+                        );
+                    }
                     let stored = {
                         let object = &buffers().object;
                         let mut store = self.store(principal);
@@ -914,6 +986,7 @@ impl Managed {
                             b"the state service refused to stage the object",
                         );
                     };
+                    let pending_at = self.pending_used;
                     if !self.insert(Entry {
                         thalyx: digest,
                         kind,
@@ -922,9 +995,13 @@ impl Managed {
                         shape,
                         len: len as u64,
                         k4,
+                        pending_at: pending_at as u32,
                     }) {
                         return refuse(&mut writer, b"unwritable", b"this store's index is full");
                     }
+                    pending()[pending_at..pending_at + len]
+                        .copy_from_slice(&buffers().object[..len]);
+                    self.pending_used += len;
                 }
                 writer
                     .raw(b"{\"reply\":\"stored\",\"digest\":")
@@ -945,7 +1022,7 @@ impl Managed {
                 let entry = self.index[found];
                 let loaded = {
                     let out = &mut buffers().object;
-                    self.load_blob(principal, &entry.k4, entry.shape, entry.len, out)
+                    self.load_blob(principal, &entry, out)
                 };
                 let Some(len) = loaded else {
                     return refuse(
@@ -1112,7 +1189,7 @@ impl Managed {
         }
         let loaded = {
             let out = &mut buffers().object;
-            self.load_blob(principal, &entry.k4, entry.shape, entry.len, out)
+            self.load_blob(principal, &entry, out)
         };
         let Some(len) = loaded else {
             return Err(b"the candidate's tree could not be read back");
@@ -1312,9 +1389,13 @@ impl Managed {
         if !work.open {
             return;
         }
+        // The grant first, so that what is left under the scope is the scope;
+        // then `works.close` fences and retires through `work.scope`, which is
+        // the same handle `Works` keeps -- closing it before would leave the
+        // retirement nothing to name.
         let _ = k2::cap_close(work.publish_grant);
-        let _ = k2::cap_close(work.scope);
         works.close(work.scope_work);
+        let _ = k2::cap_close(work.scope);
         self.lines[line].works[principal as usize].open = false;
     }
 

@@ -14,7 +14,8 @@
 //! layer: it is the kernel's own scope tree, used for the exact property the
 //! boundary asks of it.
 
-use thalyx_abi::ScopeLimits;
+use thalyx_abi::{ScopeLimits, status};
+use thalyx_user_k4fmt::pkg::bit as k4bit;
 use thalyx_user_rt::k2::{self, name16};
 
 /// Works the link keeps at once.
@@ -49,6 +50,9 @@ impl Slot {
 pub struct Works {
     /// The parent scope, held with `SCOPE_CREATE` and `SCOPE_FENCE`.
     parent: u64,
+    /// A signal this link may wait on, used only as a timed pause between
+    /// retirement attempts: the wait is on `NEVER`, which nobody raises.
+    pause: u64,
     /// A window of the parent's budget one work may draw on.
     work_budget_ns: u64,
     work_pages: u64,
@@ -60,9 +64,10 @@ pub struct Works {
 }
 
 impl Works {
-    pub fn new(parent: u64, work_budget_ns: u64, work_pages: u64) -> Self {
+    pub fn new(parent: u64, pause: u64, work_budget_ns: u64, work_pages: u64) -> Self {
         Works {
             parent,
+            pause,
             work_budget_ns,
             work_pages,
             slots: [Slot::EMPTY; MAX_WORKS],
@@ -152,16 +157,25 @@ impl Works {
         // Drain: wait for the scope to be quiescent. The link derived one grant
         // under it and the caller closes that grant before this, so what is
         // left is the scope itself.
+        //
+        // Only `DRAIN_INCOMPLETE` is worth waiting on: any other refusal --
+        // a handle already closed, a scope that is not fenced -- is the same
+        // on the next attempt. The pause blocks rather than spins: the first
+        // version waited on the scope handle, which is not a signal, so every
+        // wait was refused at once and a closed work cost five seconds of
+        // `SCOPE_RETIRE` calls as fast as the link could make them.
         let deadline = k2::now_ns() + 5_000_000_000;
         loop {
             let (outcome, _) = k2::scope_retire(scope);
-            if outcome.is_ok() {
-                break;
+            match outcome {
+                Ok(_) => break,
+                Err(code) if code == status::DRAIN_INCOMPLETE => {}
+                Err(_) => break,
             }
             if k2::now_ns() >= deadline {
                 break;
             }
-            let _ = k2::signal_wait(scope, 0, k2::now_ns() + 1_000_000);
+            let _ = k2::signal_wait(self.pause, k4bit::NEVER, k2::now_ns() + 1_000_000);
         }
         self.slots[index] = Slot::EMPTY;
         self.retired += 1;

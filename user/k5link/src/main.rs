@@ -328,7 +328,7 @@ fn run() -> ! {
         ),
         Err(_) => (10_000_000, 32),
     };
-    let mut works = Works::new(work_parent, work_budget, work_pages);
+    let mut works = Works::new(work_parent, ready, work_budget, work_pages);
     let _ = self_scope;
 
     if let Err(code) = k2::signal_raise(ready, k4bit::READY) {

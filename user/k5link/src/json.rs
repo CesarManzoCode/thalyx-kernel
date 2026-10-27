@@ -293,14 +293,19 @@ impl<'a> Writer<'a> {
 
     /// Bytes as lowercase hex, inside quotes.
     pub fn hex(&mut self, bytes: &[u8]) -> &mut Self {
-        self.raw(b"\"");
+        self.raw(b"\"").hex_digits(bytes).raw(b"\"")
+    }
+
+    /// Bytes as lowercase hex with no quotes, for a string the caller has
+    /// already opened -- `"k4-` and then the digits -- and will close.
+    pub fn hex_digits(&mut self, bytes: &[u8]) -> &mut Self {
         for byte in bytes {
             self.raw(&[
                 b"0123456789abcdef"[(byte >> 4) as usize],
                 b"0123456789abcdef"[(byte & 15) as usize],
             ]);
         }
-        self.raw(b"\"")
+        self
     }
 
     /// Thirty-two bytes as sixty-four hex characters, inside quotes.
