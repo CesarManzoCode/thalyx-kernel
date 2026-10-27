@@ -372,6 +372,11 @@ def main() -> int:
                         help="K5 only: which stage of the port the image runs")
     parser.add_argument("--seed", type=lambda text: int(text, 0), default=0x5EED0001,
                         help="K5 only: the seed the plan carries")
+    parser.add_argument("--trace", default="on", choices=["on", "off"],
+                        help="K5 only: off marks the supervisor TRACE_OFF, as the K6 package is")
+    parser.add_argument("--name", default=None,
+                        help="name of the stage directory and image under build/ "
+                             "(default thalyx-<phase>), so one phase can have two images")
     parser.add_argument("--size-mib", type=int, default=64)
     arguments = parser.parse_args()
 
@@ -382,8 +387,12 @@ def main() -> int:
         return 1
 
     phase = arguments.phase
-    stage = BUILD / f"thalyx-{phase}"
-    image = BUILD / f"thalyx-{phase}.img"
+    if arguments.trace == "off" and phase != "k5":
+        print("--trace off is for the k5 phase; the k6 package always has it", file=sys.stderr)
+        return 1
+    name = arguments.name or f"thalyx-{phase}"
+    stage = BUILD / name
+    image = BUILD / f"{name}.img"
     programs = {
         "k1": K1_PROGRAMS,
         "k2": K2_PROGRAMS,
@@ -461,7 +470,10 @@ def main() -> int:
         patch_malformed(stage / "worker.elf", malformed)
         entries.append(("malformed", malformed, MODULE_KIND_USER_ELF, MODULE_FLAG_EXPECT_REJECT))
     elif phase == "k5":
-        entries = [("k5super", stage / "k5super.elf", MODULE_KIND_SUPERVISOR, 0)]
+        # A measurement image asks for summaries only, for the reason the K6
+        # package below does. The gates' image keeps the traces.
+        supervisor_flags = MODULE_FLAG_TRACE_OFF if arguments.trace == "off" else 0
+        entries = [("k5super", stage / "k5super.elf", MODULE_KIND_SUPERVISOR, supervisor_flags)]
         entries += [
             (K5_MODULE_NAMES[name], stage / f"{name}.elf", MODULE_KIND_USER_ELF, 0)
             for name in K5_STAGE_PROGRAMS[arguments.stage]
@@ -513,10 +525,10 @@ def main() -> int:
         "artifacts": {
             "loader": {"path": str(loader.relative_to(ROOT)), "sha256": digest(loader)},
             "kernel": {
-                "path": f"build/thalyx-{phase}/kernel.elf",
+                "path": f"build/{name}/kernel.elf",
                 "sha256": digest(stage / "kernel.elf"),
             },
-            "package": {"path": f"build/thalyx-{phase}/boot.tbp", "sha256": digest(package)},
+            "package": {"path": f"build/{name}/boot.tbp", "sha256": digest(package)},
             "image": {"path": str(image.relative_to(ROOT)), "sha256": digest(image)},
         },
         "modules": [
@@ -525,6 +537,7 @@ def main() -> int:
                 "kind": kind,
                 "sha256": digest(path),
                 "expect_reject": bool(flags & MODULE_FLAG_EXPECT_REJECT),
+                "trace_off": bool(flags & MODULE_FLAG_TRACE_OFF),
             }
             for name, path, kind, flags in entries
         ],
@@ -533,6 +546,7 @@ def main() -> int:
     if phase == "k5":
         manifest["stage"] = arguments.stage
         manifest["seed"] = arguments.seed
+        manifest["trace"] = arguments.trace
         native_manifest = BUILD / "native" / "native-manifest.json"
         if native_manifest.exists():
             manifest["native"] = json.loads(native_manifest.read_text())
@@ -541,8 +555,13 @@ def main() -> int:
         native_manifest = BUILD / "native" / "native-manifest.json"
         if native_manifest.exists():
             manifest["native"] = json.loads(native_manifest.read_text())
-    name = "image-manifest.json" if phase == "k1" else f"image-manifest-{phase}.json"
-    (BUILD / name).write_text(json.dumps(manifest, indent=2) + "\n")
+    if arguments.name is not None:
+        manifest_name = f"image-manifest-{name}.json"
+    elif phase == "k1":
+        manifest_name = "image-manifest.json"
+    else:
+        manifest_name = f"image-manifest-{phase}.json"
+    (BUILD / manifest_name).write_text(json.dumps(manifest, indent=2) + "\n")
     print(json.dumps(manifest, indent=2))
     return 0
 

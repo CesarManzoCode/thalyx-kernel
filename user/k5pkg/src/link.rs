@@ -229,9 +229,11 @@ pub mod note {
     pub const LINK_READY: u64 = 0x5100;
     /// A port was opened to the host. Value: the port.
     pub const PORT_OPEN: u64 = 0x5101;
-    /// A frame arrived. Value: port | length << 8.
+    /// A frame arrived. Value: port | length << 8. No longer emitted: a
+    /// summary record per frame is serial I/O on every request.
     pub const FRAME_IN: u64 = 0x5102;
-    /// A frame was sent. Value: port | length << 8.
+    /// A frame was sent. Value: port | length << 8. No longer emitted, as
+    /// `FRAME_IN`.
     pub const FRAME_OUT: u64 = 0x5103;
     /// The state service refused. Value: status | op << 8.
     pub const STORE_REFUSED: u64 = 0x5104;

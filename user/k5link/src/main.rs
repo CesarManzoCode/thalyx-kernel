@@ -138,11 +138,7 @@ fn send_reply(console: &mut Console, port: u32, body_len: usize) -> bool {
     let out = &mut buffers().outgoing;
     out[..4].copy_from_slice(&(body_len as u32).to_le_bytes());
     out[4..4 + body_len].copy_from_slice(&buffers().reply[..body_len]);
-    let sent = console.send(port, &buffers().outgoing[..4 + body_len]);
-    if sent {
-        k2::note(note::FRAME_OUT, u64::from(port) | ((body_len as u64) << 8));
-    }
-    sent
+    console.send(port, &buffers().outgoing[..4 + body_len])
 }
 
 /// Handles one control-port frame. Answers a small JSON reply and says whether
@@ -347,10 +343,9 @@ fn run() -> ! {
             console.repost(port, received.buffer);
             continue;
         }
-        k2::note(
-            note::FRAME_IN,
-            u64::from(port) | ((received.len as u64) << 8),
-        );
+        // No note per frame: a note is a summary record, which TRACE_OFF does
+        // not withhold, and two per request put the serial port back on the
+        // path a measurement times. The count is noted once, at the end.
         let overflowed = {
             // `rx_bytes` borrows the console; the assembly is a different
             // static, so appending to it here is sound, and the borrow ends
