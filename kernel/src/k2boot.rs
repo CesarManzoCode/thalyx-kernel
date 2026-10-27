@@ -372,9 +372,14 @@ pub fn establish_supervisor(
     // Devices before modules, at fixed slots. A supervisor that receives none
     // is told so by their absence, and asks no question of the kernel to find
     // out: there is no call that opens a device by name.
+    //
+    // The loop variable is `device`, not `index`: `index` is the supervisor's
+    // domain, and a device index passed where the domain goes installs the
+    // capability in some other domain's table. With one device that went
+    // unnoticed, because device 0 and the supervisor are both index 0.
     let mut devices = 0;
-    for index in 0..crate::limits::MAX_DEVICES {
-        if !machine.devices[index].used {
+    for device in 0..crate::limits::MAX_DEVICES {
+        if !machine.devices[device].used {
             continue;
         }
         let slot = boot_slot::FIRST_DEVICE + devices;
@@ -383,8 +388,8 @@ pub fn establish_supervisor(
         }
         let object = ObjRef::new(
             ObjKind::Device,
-            index as u16,
-            machine.devices[index].generation,
+            device as u16,
+            machine.devices[device].generation,
         );
         if install(
             machine,
@@ -399,7 +404,7 @@ pub fn establish_supervisor(
             event!(
                 "k2.device_rejected",
                 "device={} reason=no_capability_slot",
-                machine.devices[index].id
+                machine.devices[device].id
             );
             continue;
         }
