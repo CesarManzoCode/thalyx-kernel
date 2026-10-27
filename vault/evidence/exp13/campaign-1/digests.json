@@ -1,0 +1,1173 @@
+{
+  "image": {
+    "path": "build/thalyx-k1-measure.img",
+    "sha256": "fb45ad1ccb128755c99107063842992905185fd984b91da30077281d09d72b2c",
+    "bytes": 67108864
+  },
+  "analysis": {
+    "exp13-summary.md": {
+      "path": "build/exp13/campaign-1-analysis/exp13-summary.md",
+      "sha256": "ff61a53d35bfee53dd35f8c3bf865c73f37a034ee5f00e9e2ea61de0aa14dce0",
+      "bytes": 2336
+    },
+    "exp13-results.json": {
+      "path": "build/exp13/campaign-1-analysis/exp13-results.json",
+      "sha256": "4321b5afee5b03d4576215ceac76a664aa2b76a1173a27ed71f44448f52c1a9a",
+      "bytes": 15737
+    }
+  },
+  "observations": {
+    "linux-current-r0/a-confined-check-that-may-not-run.json": {
+      "sha256": "f92b66b4defd23d81e8c3d10988d600733aff6f391636ffa1251b2826f6e702f",
+      "bytes": 8860
+    },
+    "linux-current-r0/a-failing-check-puts-it-back.json": {
+      "sha256": "16eb48f081d7af12e28699517d172bc0fa389b8490fae6a330c352281927b987",
+      "bytes": 7648
+    },
+    "linux-current-r0/a-failure-kept-on-request.json": {
+      "sha256": "eb748fedb119adba15e81c7b31a51826890853143a3b143a8f7b7b8822622b02",
+      "bytes": 7611
+    },
+    "linux-current-r0/a-loop-runs-out-of-calls.json": {
+      "sha256": "f001dac7f18892bfb85165c8b9590e2db4cb91ce591a04d03218855cfa960167",
+      "bytes": 8983
+    },
+    "linux-current-r0/a-program-cannot-settle-its-own-boundary.json": {
+      "sha256": "3d9725aba7b6af483872acb9365fdee78d96b7e48079d525ff48631403c2be5b",
+      "bytes": 8597
+    },
+    "linux-current-r0/a-program-that-looks-before-it-changes.json": {
+      "sha256": "165fc978f545137bb30d7c4bee2488f968acd07843063ced1b3b99d282a8b98d",
+      "bytes": 13149
+    },
+    "linux-current-r0/a-rust-check.json": {
+      "sha256": "d06fb879585b8c9d67e4f0397eaada86ec658188a75c9c70b4e5561c69815f6f",
+      "bytes": 9444
+    },
+    "linux-current-r0/a-step-outside-the-workspace-is-refused.json": {
+      "sha256": "06b280c961a77252628a544e232c597b616d3d466e47d76da5f63eba1e8f5d88",
+      "bytes": 7474
+    },
+    "linux-current-r0/a-verb-that-is-not-exposed-is-not-reachable.json": {
+      "sha256": "b2882dc182c24a0993c00f7dad3b909555d379d4dd2649d4a05dbd560d0a8422",
+      "bytes": 6732
+    },
+    "linux-current-r0/a-verdict-about-an-older-tree.json": {
+      "sha256": "6f60a1a03663753bd9cf4305580577f37254807e8609a6c07547326e764d0520",
+      "bytes": 8905
+    },
+    "linux-current-r0/an-assertion-stops-the-program.json": {
+      "sha256": "b358d296132a87274326b51042da4db545c6b599e72a69a37afac6b5b265f0d2",
+      "bytes": 7098
+    },
+    "linux-current-r0/context-decides-a-rename.json": {
+      "sha256": "4fa952ac7a982f2779fd23f862c69d657850f58558fc6de4dbf851c348f601fe",
+      "bytes": 15931
+    },
+    "linux-current-r0/it-worked-and-was-put-back.json": {
+      "sha256": "9d31a3faba3ad6bbce391afbb34d57a8f1c3e88771f509be8e0e3382f59cedd4",
+      "bytes": 8369
+    },
+    "linux-current-r0/steps-edit-and-check.json": {
+      "sha256": "c34d8c2185afaa066b26fae3943bef24afea8e44accc6d89984d9bb82db08e5f",
+      "bytes": 8380
+    },
+    "linux-current-r0/the-program-asks-for-the-model.json": {
+      "sha256": "30b64ff40ccb6383ea1122a6a88843ebaeb5396d34c21b2b7efd012dd16a3c82",
+      "bytes": 7593
+    },
+    "linux-current-r0/two-transactions-in-a-row.json": {
+      "sha256": "b70ed5f02a8f35bddc397ac0c86cbbf7e8225250bb95bb9a0b05f7fee1c2cf7d",
+      "bytes": 14856
+    },
+    "linux-current-r1/a-confined-check-that-may-not-run.json": {
+      "sha256": "4c1eacfd6e9584cac885b8ac60a71e698bc2fc30c48e9959a9b5f6baeab55a82",
+      "bytes": 8860
+    },
+    "linux-current-r1/a-failing-check-puts-it-back.json": {
+      "sha256": "93a968b6ad1f8cbaca5271a64ffb9dd9f11542f3b39fe97bb7010f406a1e21d4",
+      "bytes": 7648
+    },
+    "linux-current-r1/a-failure-kept-on-request.json": {
+      "sha256": "818a4f6324e0485ff156bd44f282203e715486632d1d6626839714c4820604d1",
+      "bytes": 7611
+    },
+    "linux-current-r1/a-loop-runs-out-of-calls.json": {
+      "sha256": "03ce5059eb3b28b3b201fe7f80b77ea07c7f2761449522dafd5834c32f8c51e1",
+      "bytes": 8987
+    },
+    "linux-current-r1/a-program-cannot-settle-its-own-boundary.json": {
+      "sha256": "81cbfd721a0fbc2b19944368631586c805f9ba078840d0ceb6d826328880d226",
+      "bytes": 8595
+    },
+    "linux-current-r1/a-program-that-looks-before-it-changes.json": {
+      "sha256": "8c07a4f0b1e7a31ed443cc95f2c4cd5e51fb17e2af2f5f8253be113c3a3f97ed",
+      "bytes": 13150
+    },
+    "linux-current-r1/a-rust-check.json": {
+      "sha256": "80ec7b2308775b2dd1302e2035ddd773469c241f9fb96db42ccee1311b084836",
+      "bytes": 9444
+    },
+    "linux-current-r1/a-step-outside-the-workspace-is-refused.json": {
+      "sha256": "1ae93c416ecfca4d7c261d75a436f420cd2c156e2135844b6b73570640451adb",
+      "bytes": 7474
+    },
+    "linux-current-r1/a-verb-that-is-not-exposed-is-not-reachable.json": {
+      "sha256": "ec7f9b573d523d8b20f108e0ca675d8123a18856a1a43b79d1e82cc47a5ec2e5",
+      "bytes": 6732
+    },
+    "linux-current-r1/a-verdict-about-an-older-tree.json": {
+      "sha256": "ad2cbb90550f607a036555f3d3685c6d03c7d8ae5841a8ba2c601b28f7485a2c",
+      "bytes": 8905
+    },
+    "linux-current-r1/an-assertion-stops-the-program.json": {
+      "sha256": "ad4f7e3ac40cc1f56ee8eadf5f9bf6a9e83872145677e3e29439585f0ee00315",
+      "bytes": 7098
+    },
+    "linux-current-r1/context-decides-a-rename.json": {
+      "sha256": "cc393d87e0925a075aa54a2c2bf34afde998de2da6cae3dc6c31ed653c2cf9aa",
+      "bytes": 15933
+    },
+    "linux-current-r1/it-worked-and-was-put-back.json": {
+      "sha256": "c9e8c6f1c2e653a6c94a88ae342b541292aba31cb3cd5a4f6f7b6c147e878067",
+      "bytes": 8369
+    },
+    "linux-current-r1/steps-edit-and-check.json": {
+      "sha256": "fee273051b77a41d0aad4d5a761e39255121de0880f8293cee2b19d65f79ee61",
+      "bytes": 8380
+    },
+    "linux-current-r1/the-program-asks-for-the-model.json": {
+      "sha256": "050288c83903bcb740c89241c4a102c5d0050b2401e109d257156f2917cdba4c",
+      "bytes": 7593
+    },
+    "linux-current-r1/two-transactions-in-a-row.json": {
+      "sha256": "65bb0c744429e29d64926a592c482c20c1419a60bc46869b158c685f9c9a268c",
+      "bytes": 14856
+    },
+    "linux-current-r2/a-confined-check-that-may-not-run.json": {
+      "sha256": "5130654328baadc7edcb009644a35d502989cd040e5275e0196047fbfc2be085",
+      "bytes": 8860
+    },
+    "linux-current-r2/a-failing-check-puts-it-back.json": {
+      "sha256": "0c0521facb848688beec1963127b56729660c87283e5f04feb8f9f27f83298fa",
+      "bytes": 7648
+    },
+    "linux-current-r2/a-failure-kept-on-request.json": {
+      "sha256": "e5a3c9f358ae195ef9811ddc067a5d6814dc395a3dbca4786cdd0c1d2372c75c",
+      "bytes": 7611
+    },
+    "linux-current-r2/a-loop-runs-out-of-calls.json": {
+      "sha256": "aaca52090560ffb210aca179621c1c0d187b6839089fe028a724ac1a9151f6df",
+      "bytes": 8983
+    },
+    "linux-current-r2/a-program-cannot-settle-its-own-boundary.json": {
+      "sha256": "be749b33f42e28e6f60e33857aeeaf70d90c5e0dc01e5c3d90bd432a9f12b14a",
+      "bytes": 8595
+    },
+    "linux-current-r2/a-program-that-looks-before-it-changes.json": {
+      "sha256": "50940667233f6cfa3f9bb6d6438be605b5009dcfb2e2f3e53135f8e041976258",
+      "bytes": 13152
+    },
+    "linux-current-r2/a-rust-check.json": {
+      "sha256": "7966f5506f9c77b5d70142dbf5477d1d951ba47db9a3adc25854aaeeb0b1b7a6",
+      "bytes": 9444
+    },
+    "linux-current-r2/a-step-outside-the-workspace-is-refused.json": {
+      "sha256": "0ec5030d4f8a7f5a64199f9b35e3def04c40ac530c2dca284faa1bad31956d9e",
+      "bytes": 7474
+    },
+    "linux-current-r2/a-verb-that-is-not-exposed-is-not-reachable.json": {
+      "sha256": "8e9a1ba6d4cee07c8ad45bd99fcc705230f871a2eaac7739ecdca4cf7308faca",
+      "bytes": 6732
+    },
+    "linux-current-r2/a-verdict-about-an-older-tree.json": {
+      "sha256": "06730a6ad95779658d8fc67e9e4397ed49b3e07c927c7bf935855adaa64e0d28",
+      "bytes": 8905
+    },
+    "linux-current-r2/an-assertion-stops-the-program.json": {
+      "sha256": "f9a67520a7f1d1e6c3298cdb5fe58438956b56ac0ec162d20960c36d707a8034",
+      "bytes": 7098
+    },
+    "linux-current-r2/context-decides-a-rename.json": {
+      "sha256": "fa235ba924252d47212f42efb83b070121e75bf630a57a6d4f4dad72e45419b7",
+      "bytes": 15934
+    },
+    "linux-current-r2/it-worked-and-was-put-back.json": {
+      "sha256": "4c3ec951fc79ca38e4ef73c672e00bd7eb3d2fce37ac51533e5856db5b7a0dca",
+      "bytes": 8369
+    },
+    "linux-current-r2/steps-edit-and-check.json": {
+      "sha256": "64ed02fccc20d5581b9c06feea9e20e37d83312596552418993b1ce91f85f548",
+      "bytes": 8378
+    },
+    "linux-current-r2/the-program-asks-for-the-model.json": {
+      "sha256": "cf6fff7f0bdc9c8669c4699dee7824a5d68da5618cf639b1d9297da89887ab0e",
+      "bytes": 7593
+    },
+    "linux-current-r2/two-transactions-in-a-row.json": {
+      "sha256": "9ce31f716bc8e0c9c7b4b7d3a8c94845fa215f1e45400c7808d23a57f1fabbe3",
+      "bytes": 14857
+    },
+    "linux-current-r3/a-confined-check-that-may-not-run.json": {
+      "sha256": "fb3a6ad663f6a2f657d0e08b439e9288f323a9670973ce7318ab39c2a387ef76",
+      "bytes": 8860
+    },
+    "linux-current-r3/a-failing-check-puts-it-back.json": {
+      "sha256": "ba046d0417b6d4eaf08516be8f2a5092ba4bf887fd825e67a79a50e6904b69f0",
+      "bytes": 7648
+    },
+    "linux-current-r3/a-failure-kept-on-request.json": {
+      "sha256": "1cc9b24ca9014790fa7c8b3fd1861d5a45d4af3757a1a2ca59bb1b075e3cb8a1",
+      "bytes": 7611
+    },
+    "linux-current-r3/a-loop-runs-out-of-calls.json": {
+      "sha256": "29c9cfc482e9924aa85e133c861672ef52543ec167489e92ceb18515ce4ed035",
+      "bytes": 8983
+    },
+    "linux-current-r3/a-program-cannot-settle-its-own-boundary.json": {
+      "sha256": "81648a282e851ad4bd64d5c19e1edcb3f26300e3257bab8f0f0f4f35320b9683",
+      "bytes": 8595
+    },
+    "linux-current-r3/a-program-that-looks-before-it-changes.json": {
+      "sha256": "00ba52050dd4b77fc4c608e3edbcd706cb92f6c5e32d3c33cb2bf2fdf86080db",
+      "bytes": 13152
+    },
+    "linux-current-r3/a-rust-check.json": {
+      "sha256": "27114c393c3b2673da225a04f80086ad4bf2049bc2644689ceedde0380817898",
+      "bytes": 9444
+    },
+    "linux-current-r3/a-step-outside-the-workspace-is-refused.json": {
+      "sha256": "102b5643108360cceec40829d24cccc59b57c365fadef19c6d6ffe427086e566",
+      "bytes": 7474
+    },
+    "linux-current-r3/a-verb-that-is-not-exposed-is-not-reachable.json": {
+      "sha256": "cf2bd30f63725c323d2a5ca495b0ee8971a5ff30a2316027963882fc441d68f6",
+      "bytes": 6732
+    },
+    "linux-current-r3/a-verdict-about-an-older-tree.json": {
+      "sha256": "207556d7050d0980a52d83629038620b3df6ac249a2a522bcbb8c99877c71575",
+      "bytes": 8907
+    },
+    "linux-current-r3/an-assertion-stops-the-program.json": {
+      "sha256": "45ae5f7d859e48d28b16eb1159db8b610cd3552155fa677f5d65175152e8751f",
+      "bytes": 7098
+    },
+    "linux-current-r3/context-decides-a-rename.json": {
+      "sha256": "abda83876c5007cae37e36bfbe5cf067ff065bbc80b09615c59333a9a67d48d9",
+      "bytes": 15931
+    },
+    "linux-current-r3/it-worked-and-was-put-back.json": {
+      "sha256": "566e7089de1a5660428613f4242cd376f4484fc559dbe89511668b5bb73b120c",
+      "bytes": 8369
+    },
+    "linux-current-r3/steps-edit-and-check.json": {
+      "sha256": "7aaa3b6b3f84142ea06fdc71b9081a8521fd4a75da8358d7f1b3b31028cd3918",
+      "bytes": 8378
+    },
+    "linux-current-r3/the-program-asks-for-the-model.json": {
+      "sha256": "57dbbf70fe67e0c2b0a7e1afa02aaaca214eaa3b1628ef79ef392cc0f59c6552",
+      "bytes": 7593
+    },
+    "linux-current-r3/two-transactions-in-a-row.json": {
+      "sha256": "9b75851733ba5cb4ddb0154556791a5acbe7bba8e2d7b3558cc1a0a8f5279dfa",
+      "bytes": 14856
+    },
+    "linux-current-r4/a-confined-check-that-may-not-run.json": {
+      "sha256": "a98b7533d1a05d33d7636b19df62a10ba124b7731db97b75c155142dd711cced",
+      "bytes": 8860
+    },
+    "linux-current-r4/a-failing-check-puts-it-back.json": {
+      "sha256": "28fdf824906b95777bb596c6a684799a07467fcc911e9b0e261952e541526f94",
+      "bytes": 7648
+    },
+    "linux-current-r4/a-failure-kept-on-request.json": {
+      "sha256": "8f008ef2f1faa7ad02317518c7b4b76fd63d6358776ac4899589a3a98906e542",
+      "bytes": 7611
+    },
+    "linux-current-r4/a-loop-runs-out-of-calls.json": {
+      "sha256": "78c70e112152e4f14d684b51683376d30acb0e0a5210abf76fffb4ccd3489973",
+      "bytes": 8986
+    },
+    "linux-current-r4/a-program-cannot-settle-its-own-boundary.json": {
+      "sha256": "48d76ac3a0822b4d6d1cadd3c27806adc3f851084246bc3f44e1eb998ba74817",
+      "bytes": 8597
+    },
+    "linux-current-r4/a-program-that-looks-before-it-changes.json": {
+      "sha256": "a06f568a8c12424e74c1c0da175a5082eff892038b5fde6a94ea91ebb99e3848",
+      "bytes": 13154
+    },
+    "linux-current-r4/a-rust-check.json": {
+      "sha256": "242f06cb324d90ef0942d01af2c9b32d2c678fb1b8a46fe4e1dcd2ed5b880ef9",
+      "bytes": 9444
+    },
+    "linux-current-r4/a-step-outside-the-workspace-is-refused.json": {
+      "sha256": "8a45bd09402ffc43e12f4fc76730d850ebebbb663a989c9b5349562b2643578e",
+      "bytes": 7474
+    },
+    "linux-current-r4/a-verb-that-is-not-exposed-is-not-reachable.json": {
+      "sha256": "65cee757c1d9f25d126bab8cece2b0cd759203495f7fe219fc47d0e2b721401d",
+      "bytes": 6732
+    },
+    "linux-current-r4/a-verdict-about-an-older-tree.json": {
+      "sha256": "7411d6564eec33e08fae2ace5953a26a5dfd7a806b497c20e26b3e66c0026b3d",
+      "bytes": 8907
+    },
+    "linux-current-r4/an-assertion-stops-the-program.json": {
+      "sha256": "2e0d3484a05f8fb56d72f6d9ff7c1781be19ac72682dd5f4b3fec11028be59fc",
+      "bytes": 7098
+    },
+    "linux-current-r4/context-decides-a-rename.json": {
+      "sha256": "219bda11aed3328d7b5823d8ee292652f25367efd6b7c99d1935de3b4fa95482",
+      "bytes": 15933
+    },
+    "linux-current-r4/it-worked-and-was-put-back.json": {
+      "sha256": "f7f4a90662614fdfe36723ee5e825f9ff3cd3d40b525e432057f7a055582979c",
+      "bytes": 8369
+    },
+    "linux-current-r4/steps-edit-and-check.json": {
+      "sha256": "26a19e1d8e42a7f2ff5cff71a6b3c168cf174d9359f9837bbaef42f27f92e7f4",
+      "bytes": 8380
+    },
+    "linux-current-r4/the-program-asks-for-the-model.json": {
+      "sha256": "67ca7cf7c3696a956590f2de23272a582791d498ec7f20baecadee2b8e9bcdb2",
+      "bytes": 7593
+    },
+    "linux-current-r4/two-transactions-in-a-row.json": {
+      "sha256": "9c4d8adad9df6f93715526e97e76651dd2150803e273973072dab3efc9e779e4",
+      "bytes": 14856
+    },
+    "linux-current-r5/a-confined-check-that-may-not-run.json": {
+      "sha256": "9957dff3049610a787c17c8dc4550d7e6aa5d0caa25926204968e412b28d053a",
+      "bytes": 8860
+    },
+    "linux-current-r5/a-failing-check-puts-it-back.json": {
+      "sha256": "1d393a91d8e70f97393857e6bc209c4771f56f888409ceb8cddbdb0b6159dbe7",
+      "bytes": 7648
+    },
+    "linux-current-r5/a-failure-kept-on-request.json": {
+      "sha256": "00ee4c6a4eb761cbcd707f05cce4e9adffc3d72ab022610f2e978bd140f4ed4d",
+      "bytes": 7611
+    },
+    "linux-current-r5/a-loop-runs-out-of-calls.json": {
+      "sha256": "08b5c3364bddd77eeef4e242138885b5050cba174a5e72697547ab3243bc0d05",
+      "bytes": 8983
+    },
+    "linux-current-r5/a-program-cannot-settle-its-own-boundary.json": {
+      "sha256": "9eb4f480f5cbba34ff52967176132b2c2b7f86f884e705d83ede43ffabc84344",
+      "bytes": 8595
+    },
+    "linux-current-r5/a-program-that-looks-before-it-changes.json": {
+      "sha256": "3eafce60ef007a2a5bedc5c9c3884877783d5fb170f3a4644a9510dd2890e363",
+      "bytes": 13152
+    },
+    "linux-current-r5/a-rust-check.json": {
+      "sha256": "332bfde357311e5370fd1269e9109ef85fa4aa148cf43fe08a7790d2225f66e8",
+      "bytes": 9444
+    },
+    "linux-current-r5/a-step-outside-the-workspace-is-refused.json": {
+      "sha256": "a88188321b895e020c309f7cfbddd98e46c124032e7a5db408a619466f76fd0e",
+      "bytes": 7474
+    },
+    "linux-current-r5/a-verb-that-is-not-exposed-is-not-reachable.json": {
+      "sha256": "5204880958f7abd218278d0b04b14b3c11c4828ab2b596c84dfcf144dc7da371",
+      "bytes": 6732
+    },
+    "linux-current-r5/a-verdict-about-an-older-tree.json": {
+      "sha256": "7348430e7a1f78d6cf8ee0c464e48690ab26cd2725b11b16040db9ab042a8a0a",
+      "bytes": 8905
+    },
+    "linux-current-r5/an-assertion-stops-the-program.json": {
+      "sha256": "bc53edb020e4e5e4995eb35bbe09d19ea2c031dec1e057a29ca2b0c4f69a4075",
+      "bytes": 7098
+    },
+    "linux-current-r5/context-decides-a-rename.json": {
+      "sha256": "934bcdfe874833f197ee89ff3fd5e2afb45e1f07eb3e1bdd645c2437d17ec74a",
+      "bytes": 15932
+    },
+    "linux-current-r5/it-worked-and-was-put-back.json": {
+      "sha256": "af4950dc9f08c15427b6576b0bc26b93d6c1b173f3308c2e41c4147ac9e49dfe",
+      "bytes": 8369
+    },
+    "linux-current-r5/steps-edit-and-check.json": {
+      "sha256": "a6b6d0663a0cb6435854e60f7f6cb4df73045c0bdf365a954fb5d521f71a750f",
+      "bytes": 8378
+    },
+    "linux-current-r5/the-program-asks-for-the-model.json": {
+      "sha256": "7b9ddd0ea506b06c8896d18f98650097793fa6899ce8d5cdc3243824719204c7",
+      "bytes": 7593
+    },
+    "linux-current-r5/two-transactions-in-a-row.json": {
+      "sha256": "bebd0058c79d04991c89bcf29ee70ec6fca65e068b7efb8d344d4da0c02b2a5c",
+      "bytes": 14852
+    },
+    "linux-managed-r0/a-confined-check-that-may-not-run.json": {
+      "sha256": "7e5fedeb7890bb1f6b01d3fd178ee97ac5ab1ebe656de6e1aab61f18fbe3157a",
+      "bytes": 9468
+    },
+    "linux-managed-r0/a-failing-check-puts-it-back.json": {
+      "sha256": "b728d133085a041e674efdbc544468c391149788d018747ac9f33d910574b440",
+      "bytes": 8260
+    },
+    "linux-managed-r0/a-failure-kept-on-request.json": {
+      "sha256": "da5d31b2874505a8072eed21a5f4e0b8223e2586acf2c65f7c9ed9510b218890",
+      "bytes": 8244
+    },
+    "linux-managed-r0/a-loop-runs-out-of-calls.json": {
+      "sha256": "c33a2f4954d1f24d86ef5f85a5de2b171451ca0ee216a3d11369dd266aaca67c",
+      "bytes": 9249
+    },
+    "linux-managed-r0/a-program-cannot-settle-its-own-boundary.json": {
+      "sha256": "d32686f6f8f906c3b5eb7ceead22da463372fad56ffcd6e7aec46e94a83ee181",
+      "bytes": 9227
+    },
+    "linux-managed-r0/a-program-that-looks-before-it-changes.json": {
+      "sha256": "b505ede12540108f0b6d10e50ea1c4268028e486f97a24d93ad14a98b880be4f",
+      "bytes": 13770
+    },
+    "linux-managed-r0/a-rust-check.json": {
+      "sha256": "e9d48e6d151eeb4709fd67ef9180c278302645816d88e81c373c4ad365065cf3",
+      "bytes": 10060
+    },
+    "linux-managed-r0/a-step-outside-the-workspace-is-refused.json": {
+      "sha256": "792b71b628f5bac0de2a2e1d253b4f00cea2e2e7fdb69b890a2e26b98bc24c14",
+      "bytes": 7745
+    },
+    "linux-managed-r0/a-verb-that-is-not-exposed-is-not-reachable.json": {
+      "sha256": "42b39e9851797a8a391475e00b4d3ecfd32896c0f6beae2beed8ca79958faa02",
+      "bytes": 7006
+    },
+    "linux-managed-r0/a-verdict-about-an-older-tree.json": {
+      "sha256": "00969e9d542a3db9a0913a89b9929c40d2e47f140c79ad33304593ad2072a469",
+      "bytes": 9879
+    },
+    "linux-managed-r0/an-assertion-stops-the-program.json": {
+      "sha256": "1ef74ddc29d41e715c8d027f2a2b0b107d6a1ccbc410f1554827792b3078bc7f",
+      "bytes": 7371
+    },
+    "linux-managed-r0/context-decides-a-rename.json": {
+      "sha256": "c72f7d073ab40f46fbbb0f13f5881501cd81d14ba045b80ed96ac9c517ae5a49",
+      "bytes": 17229
+    },
+    "linux-managed-r0/it-worked-and-was-put-back.json": {
+      "sha256": "df899021d2068fdfe21d1a0d8c3ffecc0d320f8ca17add436d03c9fc1beaab4e",
+      "bytes": 8981
+    },
+    "linux-managed-r0/steps-edit-and-check.json": {
+      "sha256": "e025e6b22d59ac7835c99e0dc59fd5b721cb9e6e82ea81f64b16f49babc7b43d",
+      "bytes": 9350
+    },
+    "linux-managed-r0/the-program-asks-for-the-model.json": {
+      "sha256": "9c9730d67fb005aa962c6b281c4fd0f25c76767b6d506ffd37c271e34bb505c6",
+      "bytes": 7863
+    },
+    "linux-managed-r0/two-transactions-in-a-row.json": {
+      "sha256": "257de7a125f4b0d2176dd8eb562367c77e59a74c9a0a4e425d0cf09bef9ab1ff",
+      "bytes": 16458
+    },
+    "linux-managed-r1/a-confined-check-that-may-not-run.json": {
+      "sha256": "98e799054be646fe9e60eeb265c31e1c757e6d8419720bb96fe80394f57148fe",
+      "bytes": 9467
+    },
+    "linux-managed-r1/a-failing-check-puts-it-back.json": {
+      "sha256": "8f73439347ecefe71d276161ab42444d1d1ea35e1ee80df4d9202b33b374c0f1",
+      "bytes": 8261
+    },
+    "linux-managed-r1/a-failure-kept-on-request.json": {
+      "sha256": "32da1226554682c32055bb1be0a350e99b33b73873f8436c46bba1a1fbfdb21a",
+      "bytes": 8246
+    },
+    "linux-managed-r1/a-loop-runs-out-of-calls.json": {
+      "sha256": "6f7dc2fe93f84a21f6ca9c0b507e2d004b0f3048b944b5dd35648a4e2c6dc8a7",
+      "bytes": 9249
+    },
+    "linux-managed-r1/a-program-cannot-settle-its-own-boundary.json": {
+      "sha256": "d62273a84d48a6fd18e3cce8b6526b868e7500af63330309daef8de12df72f00",
+      "bytes": 9227
+    },
+    "linux-managed-r1/a-program-that-looks-before-it-changes.json": {
+      "sha256": "35256cf03ad0ac7dc7c748348e6897f67fab719a3bb60b9a7d7aefc707a74a95",
+      "bytes": 13771
+    },
+    "linux-managed-r1/a-rust-check.json": {
+      "sha256": "fb7bf5378407653e7e6791aa7739391e17ab63e9ddaa1429812dbc47661dbafc",
+      "bytes": 10060
+    },
+    "linux-managed-r1/a-step-outside-the-workspace-is-refused.json": {
+      "sha256": "85aef378c589ab5d3f8ec7385db058a6b165dac1d3ed797555ea7872de9501f9",
+      "bytes": 7745
+    },
+    "linux-managed-r1/a-verb-that-is-not-exposed-is-not-reachable.json": {
+      "sha256": "c0fbc631d6dc3b251d0d0aa98739493c7cb90cb627f4bb837d6071c918312b4f",
+      "bytes": 7006
+    },
+    "linux-managed-r1/a-verdict-about-an-older-tree.json": {
+      "sha256": "8ec22a300901deb28a12b523a4f42c2c48aa28a41a2f84c118152cdd6ef50797",
+      "bytes": 9878
+    },
+    "linux-managed-r1/an-assertion-stops-the-program.json": {
+      "sha256": "8c5736fa2a3965459ff9fd24042e92688e07079f627abf26a061fb4389e9420f",
+      "bytes": 7371
+    },
+    "linux-managed-r1/context-decides-a-rename.json": {
+      "sha256": "6c836a45fd4822c1c0b23d210e01e7c6861c5a90fb6bd6f6635b30280b9f204e",
+      "bytes": 17231
+    },
+    "linux-managed-r1/it-worked-and-was-put-back.json": {
+      "sha256": "8314f8f1370b9f69ab9248519fb71c6d096245f33374ca5687ee1808afcd347d",
+      "bytes": 8983
+    },
+    "linux-managed-r1/steps-edit-and-check.json": {
+      "sha256": "a7f6f5438ec92d465a952f7cd1763ff91765cdcb0019fdf793ac3f9394a726fb",
+      "bytes": 9354
+    },
+    "linux-managed-r1/the-program-asks-for-the-model.json": {
+      "sha256": "43d4facdfb0a336202ff1e65778a03b63c00cef43510ab17c8f43a2589fbb12e",
+      "bytes": 7863
+    },
+    "linux-managed-r1/two-transactions-in-a-row.json": {
+      "sha256": "744929cee5af3735c03f7567f6eb249c30c8086e11f9ac2412e1bfbcf9c93409",
+      "bytes": 16456
+    },
+    "linux-managed-r2/a-confined-check-that-may-not-run.json": {
+      "sha256": "beacb932c2110972c57c65ede968426fd015c34e842a82f1ec421aff2e84ce7b",
+      "bytes": 9467
+    },
+    "linux-managed-r2/a-failing-check-puts-it-back.json": {
+      "sha256": "5c4dd4102cee280f433fa8dd451d82dffa690fbddbb90188e00c89dd41c9543a",
+      "bytes": 8260
+    },
+    "linux-managed-r2/a-failure-kept-on-request.json": {
+      "sha256": "8b58ed802da8c32fca1bd60faa24ba38474669aa4a4d6dcdb100d2b4cb4cff87",
+      "bytes": 8244
+    },
+    "linux-managed-r2/a-loop-runs-out-of-calls.json": {
+      "sha256": "93c372e1ff9e592ec27ae8567348939a8786597a97851883338da6c20d77c82e",
+      "bytes": 9248
+    },
+    "linux-managed-r2/a-program-cannot-settle-its-own-boundary.json": {
+      "sha256": "b2b52337fe1fd25cfb78c637ad616e0efa59153bf26a5dfa5dc240bda739a8bc",
+      "bytes": 9230
+    },
+    "linux-managed-r2/a-program-that-looks-before-it-changes.json": {
+      "sha256": "a85b5939ea6a18646b6119b954eba707e6bfad125c55e7fb2c2db45e24677ac6",
+      "bytes": 13776
+    },
+    "linux-managed-r2/a-rust-check.json": {
+      "sha256": "a96a82c660aef168e5b8b9872fe02cfaa91a07aa8e4971f342ddf68e5b3c8d56",
+      "bytes": 10060
+    },
+    "linux-managed-r2/a-step-outside-the-workspace-is-refused.json": {
+      "sha256": "b287988426c2e0933996a9f83b0b7a2e7ea8f12f4ee49ba46062ecdccb57f73e",
+      "bytes": 7745
+    },
+    "linux-managed-r2/a-verb-that-is-not-exposed-is-not-reachable.json": {
+      "sha256": "02a721a4f246f3a5f0c51c7bfb9158bb7ecbb102ec7906f5d653df85d5780bbc",
+      "bytes": 7006
+    },
+    "linux-managed-r2/a-verdict-about-an-older-tree.json": {
+      "sha256": "d7dd6044373a2e554e4e8990d0eac25dcfdc9583e89137adcd822dc5483c7072",
+      "bytes": 9878
+    },
+    "linux-managed-r2/an-assertion-stops-the-program.json": {
+      "sha256": "1eb7744c7f85913c0747e8dcdbb79ae734872aafe0b87887ed9f2667386bc20b",
+      "bytes": 7371
+    },
+    "linux-managed-r2/context-decides-a-rename.json": {
+      "sha256": "d3e216304940fb01b4f2d94db5feb44470ebf4d7bd464a3f263c3cee8e361e18",
+      "bytes": 17231
+    },
+    "linux-managed-r2/it-worked-and-was-put-back.json": {
+      "sha256": "aa9ca942f3b9401f16b1de0e29dd340a4a96276f41a2d380401fa960816f7873",
+      "bytes": 8981
+    },
+    "linux-managed-r2/steps-edit-and-check.json": {
+      "sha256": "f6db3ab9154517a0205ac8e08c17b6c1353831eaf0d836387771bc617875363a",
+      "bytes": 9350
+    },
+    "linux-managed-r2/the-program-asks-for-the-model.json": {
+      "sha256": "9928fde74d5959c6c3faae8a79c641e41c3c03b2c07e090b6c31d5719b9da911",
+      "bytes": 7863
+    },
+    "linux-managed-r2/two-transactions-in-a-row.json": {
+      "sha256": "731ce6fb2bcdaff70294a6bef918f4a9413fae4759d9de902e5b510014ee5fd5",
+      "bytes": 16456
+    },
+    "linux-managed-r3/a-confined-check-that-may-not-run.json": {
+      "sha256": "58365c3af78c8cab6a71acd0cf1975e1ae91d8d235b1096a0b3e1306dda5d265",
+      "bytes": 9467
+    },
+    "linux-managed-r3/a-failing-check-puts-it-back.json": {
+      "sha256": "c8001a416fd50d951cd1ce9d824b0619c97e6b483338a0f14559a75b55269e5a",
+      "bytes": 8262
+    },
+    "linux-managed-r3/a-failure-kept-on-request.json": {
+      "sha256": "d17ef1735fbc84319d1004cb06fd2c68f45978354db6793d836e0dffc24cef2a",
+      "bytes": 8244
+    },
+    "linux-managed-r3/a-loop-runs-out-of-calls.json": {
+      "sha256": "9d204c43d00b7b85c6768622bb4efc7ee49b32bc13d7cc035aaf4d44fdeb5c34",
+      "bytes": 9248
+    },
+    "linux-managed-r3/a-program-cannot-settle-its-own-boundary.json": {
+      "sha256": "038f96f03e1f7598438f1cec7b2eb1310ad625cbc63a6e45a9bc3f910f356cce",
+      "bytes": 9232
+    },
+    "linux-managed-r3/a-program-that-looks-before-it-changes.json": {
+      "sha256": "2373de9ba324d30ab5ce0beaed873f2b3e2bcf86bd5096bb7ee6de3846ec7b12",
+      "bytes": 13774
+    },
+    "linux-managed-r3/a-rust-check.json": {
+      "sha256": "daca98fc13edbe60275b8c340b2cf4d07f8164e153061336f5d69832e7be3a8d",
+      "bytes": 10062
+    },
+    "linux-managed-r3/a-step-outside-the-workspace-is-refused.json": {
+      "sha256": "82611892eb4b7c3fc942707e352e1ebbc3160803d322f5d9857177ebc810dfdf",
+      "bytes": 7745
+    },
+    "linux-managed-r3/a-verb-that-is-not-exposed-is-not-reachable.json": {
+      "sha256": "bbdfc6247ae2cf34f10da73a7be5e4a5a1a894109743836de0d85c8a8317aac8",
+      "bytes": 7006
+    },
+    "linux-managed-r3/a-verdict-about-an-older-tree.json": {
+      "sha256": "edef22420a4033c91c70fb7317c4448cdf240b907ee84b2e780a3d380b092c0e",
+      "bytes": 9878
+    },
+    "linux-managed-r3/an-assertion-stops-the-program.json": {
+      "sha256": "a1221c77ba758d98d7f20f04e1d4d615cfc9740d6dcdc28196ed79f92310cdfb",
+      "bytes": 7369
+    },
+    "linux-managed-r3/context-decides-a-rename.json": {
+      "sha256": "3ac20dcffe2a89cc572d170ba357455207a85468e723d5bb2bbc88e83dc24a2c",
+      "bytes": 17233
+    },
+    "linux-managed-r3/it-worked-and-was-put-back.json": {
+      "sha256": "8aa0a11a4e222b601c600328fb97231a2890eb4b8ed3fa32c760022226b8675c",
+      "bytes": 8981
+    },
+    "linux-managed-r3/steps-edit-and-check.json": {
+      "sha256": "ec26cfdbabf6204c0692fe67897efee530660f1cab9c4327892ccb5f8f25da9a",
+      "bytes": 9350
+    },
+    "linux-managed-r3/the-program-asks-for-the-model.json": {
+      "sha256": "0362479e0b3e7823be9519f8bd34ef7136d2653e7bc82e32002f41823e35c654",
+      "bytes": 7863
+    },
+    "linux-managed-r3/two-transactions-in-a-row.json": {
+      "sha256": "e538fc4ebd13381d48dcd6a25a66e6cd9681131715aeb97a3c9036c17b09ce72",
+      "bytes": 16453
+    },
+    "linux-managed-r4/a-confined-check-that-may-not-run.json": {
+      "sha256": "f860258fbf2f12e51e361ae5c1aae5dd01d6575cc5d35d43c2cc2d92c1276559",
+      "bytes": 9469
+    },
+    "linux-managed-r4/a-failing-check-puts-it-back.json": {
+      "sha256": "86980a59aa5eee8c60168c9533f6d1e1b127e1f04b0704b72974d4121d8f636b",
+      "bytes": 8261
+    },
+    "linux-managed-r4/a-failure-kept-on-request.json": {
+      "sha256": "80ee9c70fbc6e671358426966d98e7a22ccd9ac938bc8a7f2f518565a5558ae1",
+      "bytes": 8248
+    },
+    "linux-managed-r4/a-loop-runs-out-of-calls.json": {
+      "sha256": "bc3f45e52aa0618635b2082b739b2991fa5813e78ddfc8eaf39a62885a7e017e",
+      "bytes": 9248
+    },
+    "linux-managed-r4/a-program-cannot-settle-its-own-boundary.json": {
+      "sha256": "9cef444a4b606b54aba5db9385198dfcafe8af399344c133d8c408adf3f4f337",
+      "bytes": 9229
+    },
+    "linux-managed-r4/a-program-that-looks-before-it-changes.json": {
+      "sha256": "527ea28e9c53220d2638272de2144e3a017b9d337dc577600d9fcd943a02f8e9",
+      "bytes": 13770
+    },
+    "linux-managed-r4/a-rust-check.json": {
+      "sha256": "bd919b9da86e5937baeb8ef82ed58b2737b1dbd0c835cc7784ea9be0ca8ad858",
+      "bytes": 10060
+    },
+    "linux-managed-r4/a-step-outside-the-workspace-is-refused.json": {
+      "sha256": "d3fe7e8553172bf1f3b559ad7678310ee9869a63e0aa46fd1ec9fd100058949c",
+      "bytes": 7745
+    },
+    "linux-managed-r4/a-verb-that-is-not-exposed-is-not-reachable.json": {
+      "sha256": "fae56dfcfba77e8b0a812fcb415edfc2cea0671ac46a52a190a717545f7f48ed",
+      "bytes": 7006
+    },
+    "linux-managed-r4/a-verdict-about-an-older-tree.json": {
+      "sha256": "737dab502a900b8fd5bcda78e8e6c721c653ca75292e6f9900eb4587f5c448a1",
+      "bytes": 9877
+    },
+    "linux-managed-r4/an-assertion-stops-the-program.json": {
+      "sha256": "e42ad7e13efd255e90bbb4bd427f29a68fa2c7b0daecbe750b880005d7629378",
+      "bytes": 7371
+    },
+    "linux-managed-r4/context-decides-a-rename.json": {
+      "sha256": "3283ea00621ea305a5df20f023c21ea78920fd17ccf148a219f0a25fd4671537",
+      "bytes": 17226
+    },
+    "linux-managed-r4/it-worked-and-was-put-back.json": {
+      "sha256": "80d11dcfe0da9f1f78150b04904aeb1f538af9a586049aa3e0903bfce4bbbc23",
+      "bytes": 8981
+    },
+    "linux-managed-r4/steps-edit-and-check.json": {
+      "sha256": "9336eb66b437b9a10e6771c3e4874c6ff433275f87e3a0fc884fb4147b855b89",
+      "bytes": 9351
+    },
+    "linux-managed-r4/the-program-asks-for-the-model.json": {
+      "sha256": "d5c4f42cdf9cb18bc25cf49208463ae70c121880a40161094acfeeabb04a0dbf",
+      "bytes": 7863
+    },
+    "linux-managed-r4/two-transactions-in-a-row.json": {
+      "sha256": "946ac85e1e6d0bda1b970ecd02aaa5f3f5e374d891562ad14cba860d1ea27bc9",
+      "bytes": 16458
+    },
+    "linux-managed-r5/a-confined-check-that-may-not-run.json": {
+      "sha256": "cd2c8a1732b4b2775d30e512c7b4672f9458add5b91ec44188e3e15dcb59b829",
+      "bytes": 9469
+    },
+    "linux-managed-r5/a-failing-check-puts-it-back.json": {
+      "sha256": "11e5aab098a056f9104b36b2c026c65992a7a3da781e64868f1162b99d341c54",
+      "bytes": 8260
+    },
+    "linux-managed-r5/a-failure-kept-on-request.json": {
+      "sha256": "c016ff99da9055ed4d869039a7064811ee1fd9709c552afcd0c7e1f1df538fe0",
+      "bytes": 8244
+    },
+    "linux-managed-r5/a-loop-runs-out-of-calls.json": {
+      "sha256": "0d2e585db1699957785cec74fed1f880f49f958944a401c8c402716cc703d4e6",
+      "bytes": 9248
+    },
+    "linux-managed-r5/a-program-cannot-settle-its-own-boundary.json": {
+      "sha256": "67eeb81f0e0d9c387eef5583d357f10350b8314b0eb2d1e3b10faa2bfe225780",
+      "bytes": 9229
+    },
+    "linux-managed-r5/a-program-that-looks-before-it-changes.json": {
+      "sha256": "f81c081327e01a3a924d07858c0c8c5256f58a8b9c5d35dc008b415d1f2f0cc9",
+      "bytes": 13775
+    },
+    "linux-managed-r5/a-rust-check.json": {
+      "sha256": "b1aab58f89ef9e76aab6086b8925b6f459f5dc9750fe3f3a15e71abc3c787ae0",
+      "bytes": 10060
+    },
+    "linux-managed-r5/a-step-outside-the-workspace-is-refused.json": {
+      "sha256": "d5d7c853ce6d806a16dd627da389bf91e7f43b98d907a49ca550bfc50d72ee99",
+      "bytes": 7745
+    },
+    "linux-managed-r5/a-verb-that-is-not-exposed-is-not-reachable.json": {
+      "sha256": "6ed8ba16441c5d135dfbb91367b158083489daf6dc33ce012b44cb9f20a29b43",
+      "bytes": 7006
+    },
+    "linux-managed-r5/a-verdict-about-an-older-tree.json": {
+      "sha256": "55d34c526826bdc2cea8cbf077b3ca644c93115a1e73e2429230f87621564c54",
+      "bytes": 9878
+    },
+    "linux-managed-r5/an-assertion-stops-the-program.json": {
+      "sha256": "08d1c23e610b62e23ca5051c907b20d65e6f84b97ed44a27500bdd149745f8f2",
+      "bytes": 7371
+    },
+    "linux-managed-r5/context-decides-a-rename.json": {
+      "sha256": "f8969585fd0f6c3a56fc08896e94e63733d868d1db2b226d47e9020a2210ee21",
+      "bytes": 17230
+    },
+    "linux-managed-r5/it-worked-and-was-put-back.json": {
+      "sha256": "ea21c78c6a3ca2a3205db14e007526c61e529ae7b1a202d7b04a8c0a43875721",
+      "bytes": 8981
+    },
+    "linux-managed-r5/steps-edit-and-check.json": {
+      "sha256": "22c0e8474df3332cfc29041748f2044ebd317bbd9ea5125093a17f0647c8b07f",
+      "bytes": 9350
+    },
+    "linux-managed-r5/the-program-asks-for-the-model.json": {
+      "sha256": "46fd7dd37f357c3e3b2abe0ca05a873291b0ce04ee790edb534af6ff43d65a2f",
+      "bytes": 7863
+    },
+    "linux-managed-r5/two-transactions-in-a-row.json": {
+      "sha256": "79047059728bdff76bde4739f11ed7c0b9375d27be8a587d6f41f6c089b7111f",
+      "bytes": 16457
+    },
+    "thalyx-kernel-managed-r0/a-confined-check-that-may-not-run.json": {
+      "sha256": "83cde84de33ae2d2d36cbcc6f6c27f2dc973eefedcfba8b5f61ec9182624b871",
+      "bytes": 9713
+    },
+    "thalyx-kernel-managed-r0/a-failing-check-puts-it-back.json": {
+      "sha256": "a48b324f26f8542607fa7f6f8a511da5328d811dcfba80c3e1a8057dc608a75d",
+      "bytes": 8502
+    },
+    "thalyx-kernel-managed-r0/a-failure-kept-on-request.json": {
+      "sha256": "717f7344ec4201dcf23904e1f8c203e107f3332433b387c6eab68775d9fad57c",
+      "bytes": 8490
+    },
+    "thalyx-kernel-managed-r0/a-loop-runs-out-of-calls.json": {
+      "sha256": "6db8bd12d7ed934f144261402c4ca6961b330e593d2ebc0e9304aaa73255c1f8",
+      "bytes": 9493
+    },
+    "thalyx-kernel-managed-r0/a-program-cannot-settle-its-own-boundary.json": {
+      "sha256": "50ad26eec094159b202c941a27d91773d59157d210b1b16f120f68b333b4f476",
+      "bytes": 9477
+    },
+    "thalyx-kernel-managed-r0/a-program-that-looks-before-it-changes.json": {
+      "sha256": "81d7f6caf09331e57547aff50a4bf7e231be570417bd41e76c2f8ae61a9c6cd0",
+      "bytes": 14027
+    },
+    "thalyx-kernel-managed-r0/a-rust-check.json": {
+      "sha256": "815d5eff88ac7b52e80dca21a6860fa0fb087f2bf4175dadeea4cfb3b1b23e9f",
+      "bytes": 10299
+    },
+    "thalyx-kernel-managed-r0/a-step-outside-the-workspace-is-refused.json": {
+      "sha256": "95e236d0d31df7dd0f83154b6847a51ee1657565a3c8025cbe5c21ecf3c766c3",
+      "bytes": 7985
+    },
+    "thalyx-kernel-managed-r0/a-verb-that-is-not-exposed-is-not-reachable.json": {
+      "sha256": "c7fd14de762390f7b86ac575e7094c42f7dfc745baa5b063519242a0b9682cac",
+      "bytes": 7245
+    },
+    "thalyx-kernel-managed-r0/a-verdict-about-an-older-tree.json": {
+      "sha256": "c9c3430118b5f95632bd4d033e951a902aa307092dd32539fc125ca5b0e56f5f",
+      "bytes": 10121
+    },
+    "thalyx-kernel-managed-r0/an-assertion-stops-the-program.json": {
+      "sha256": "8a706aa85b8f6b5970da3aa987abae6dcb5c0d0fa2b0fe8a019f0f54b666029b",
+      "bytes": 7609
+    },
+    "thalyx-kernel-managed-r0/context-decides-a-rename.json": {
+      "sha256": "87e008ee6634097997fa03dde52b1ccbdd11cd2b83f7d1769b96736e0526c37e",
+      "bytes": 17494
+    },
+    "thalyx-kernel-managed-r0/it-worked-and-was-put-back.json": {
+      "sha256": "ed491b65c634ef6b430ec6b4d54ee64bc43bf2b4f4580dec892f8a610eda2279",
+      "bytes": 9226
+    },
+    "thalyx-kernel-managed-r0/steps-edit-and-check.json": {
+      "sha256": "9efdbeadc0927fbc142a9d1ee5a9795b4749b404169eebfed95675f4c364d25a",
+      "bytes": 9600
+    },
+    "thalyx-kernel-managed-r0/the-program-asks-for-the-model.json": {
+      "sha256": "c07c6478f55bc8b863d188bbd84a8b0571c465a34449a7756033f486c4cb0a1f",
+      "bytes": 8097
+    },
+    "thalyx-kernel-managed-r0/two-transactions-in-a-row.json": {
+      "sha256": "7f7127d8105b89c2debf2370101034a6fd3d7a72f208225b0d0c3a9a1e206068",
+      "bytes": 16722
+    },
+    "thalyx-kernel-managed-r1/a-confined-check-that-may-not-run.json": {
+      "sha256": "388540c47f67040a3eaf7c0c30ce85370bb89f862cdb6fdb97d27ac442591746",
+      "bytes": 9711
+    },
+    "thalyx-kernel-managed-r1/a-failing-check-puts-it-back.json": {
+      "sha256": "7bad16c9afa5d48e11d89e5e9067d357768e2a5060c6ab6061cdb5800022f587",
+      "bytes": 8505
+    },
+    "thalyx-kernel-managed-r1/a-failure-kept-on-request.json": {
+      "sha256": "ce3fb40a5f0466e229c3249e52c9c7e6c26784092b4b79976ead065407dcf0f2",
+      "bytes": 8490
+    },
+    "thalyx-kernel-managed-r1/a-loop-runs-out-of-calls.json": {
+      "sha256": "b00ec2285a1f392780296e1833bedf89e92a52d86eb2d340c0e4e54b1b5e6c51",
+      "bytes": 9494
+    },
+    "thalyx-kernel-managed-r1/a-program-cannot-settle-its-own-boundary.json": {
+      "sha256": "0a16c40b96e189c1b5129060ba6181680601b95c8c9de6ea2e03707e40f43bae",
+      "bytes": 9474
+    },
+    "thalyx-kernel-managed-r1/a-program-that-looks-before-it-changes.json": {
+      "sha256": "e16e10d6ee2be00ada581f93e0c2c68f7bf0a3656abc4a7148dc244692f56890",
+      "bytes": 14026
+    },
+    "thalyx-kernel-managed-r1/a-rust-check.json": {
+      "sha256": "9c49b11d35729da65118126c7c92a1c3a1bca40dd5f09f8bde1e4c67af744c89",
+      "bytes": 10297
+    },
+    "thalyx-kernel-managed-r1/a-step-outside-the-workspace-is-refused.json": {
+      "sha256": "a4929a5acca1663ada6fe5bf3005c144fa3b4f2f991805a43c4af976bfd61bfc",
+      "bytes": 7987
+    },
+    "thalyx-kernel-managed-r1/a-verb-that-is-not-exposed-is-not-reachable.json": {
+      "sha256": "0ba27507b77dda7688fc2e0dd87618bebb123f4cc165f2b985016a1eb00288ad",
+      "bytes": 7247
+    },
+    "thalyx-kernel-managed-r1/a-verdict-about-an-older-tree.json": {
+      "sha256": "02a142a26fc4a563de1dde1e5096bfa53676b2fecbec176e1d6fa0d97717ec55",
+      "bytes": 10122
+    },
+    "thalyx-kernel-managed-r1/an-assertion-stops-the-program.json": {
+      "sha256": "dbbfb37f0c49e4b103b5d96281cbb5c43328c0085499631e572d157531c2bec8",
+      "bytes": 7611
+    },
+    "thalyx-kernel-managed-r1/context-decides-a-rename.json": {
+      "sha256": "b3f7ccb55fc7f675da31d8965fe8b3df34b1b1f829e1e3e1cb87576eb7f2d374",
+      "bytes": 17495
+    },
+    "thalyx-kernel-managed-r1/it-worked-and-was-put-back.json": {
+      "sha256": "3b826349570de7a50764637ed874ff055603e13eb10e8c0fdafa03eb913621ff",
+      "bytes": 9224
+    },
+    "thalyx-kernel-managed-r1/steps-edit-and-check.json": {
+      "sha256": "1cf673ac5f9392049b382b53352e4bf3a53f7f0df90ced1bc8d5a2d856b7075c",
+      "bytes": 9601
+    },
+    "thalyx-kernel-managed-r1/the-program-asks-for-the-model.json": {
+      "sha256": "1cefe263baf8919238956eee0bc8656896d8a4c96a1f2f9a309a412d5beb172f",
+      "bytes": 8097
+    },
+    "thalyx-kernel-managed-r1/two-transactions-in-a-row.json": {
+      "sha256": "34c4b9275f40d05d3eba24b7d54dd6bafba85aa8d15e9c53178167dba42ff3e4",
+      "bytes": 16725
+    },
+    "thalyx-kernel-managed-r2/a-confined-check-that-may-not-run.json": {
+      "sha256": "c239a130b66bbbea9775d2c5e60ad160e9843bb9d54fd46929411b34e74a0f85",
+      "bytes": 9711
+    },
+    "thalyx-kernel-managed-r2/a-failing-check-puts-it-back.json": {
+      "sha256": "11a98f048fae2f8621f0825aa16f9d7c0663c52d9be7871d396cb56c1396d74b",
+      "bytes": 8502
+    },
+    "thalyx-kernel-managed-r2/a-failure-kept-on-request.json": {
+      "sha256": "66fafac07f7f52ab130bada2f4347cf66c40247e6c3a6452b5dc8f2e3bdf8e55",
+      "bytes": 8491
+    },
+    "thalyx-kernel-managed-r2/a-loop-runs-out-of-calls.json": {
+      "sha256": "b0c6e071aa00937fb34181cebe9bbe1400a6be9a62662044d374ff3cddced6d7",
+      "bytes": 9494
+    },
+    "thalyx-kernel-managed-r2/a-program-cannot-settle-its-own-boundary.json": {
+      "sha256": "8e9482d9ed1f42ec70fd9de9a366c700a911fdd825ba76eb07eb3e324861066e",
+      "bytes": 9476
+    },
+    "thalyx-kernel-managed-r2/a-program-that-looks-before-it-changes.json": {
+      "sha256": "cdfcced499b2d6160b37efe93d8a0b06df5da642105765fc6dc43ee5e156810c",
+      "bytes": 14027
+    },
+    "thalyx-kernel-managed-r2/a-rust-check.json": {
+      "sha256": "a9eb9dcd9c413655a811238a0e7eed393308db2f64964a558838d5dbc15620b6",
+      "bytes": 10299
+    },
+    "thalyx-kernel-managed-r2/a-step-outside-the-workspace-is-refused.json": {
+      "sha256": "b0f9dda288510fa7498f7b72ad7c37a95cbec617c612df91a70115c5067083db",
+      "bytes": 7985
+    },
+    "thalyx-kernel-managed-r2/a-verb-that-is-not-exposed-is-not-reachable.json": {
+      "sha256": "41d475d42e91640a39bf0a9101a3aecad0ae5f4801705c53cf31d08d957c52ec",
+      "bytes": 7245
+    },
+    "thalyx-kernel-managed-r2/a-verdict-about-an-older-tree.json": {
+      "sha256": "17f7e1d87aa08931e18c750bba6336e26c5a186a27a759a9a10ff2bd2e973e59",
+      "bytes": 10122
+    },
+    "thalyx-kernel-managed-r2/an-assertion-stops-the-program.json": {
+      "sha256": "8b282c9ddc44c066576b96b62d0330f7daafef0195e6ee631a6b104694662e10",
+      "bytes": 7611
+    },
+    "thalyx-kernel-managed-r2/context-decides-a-rename.json": {
+      "sha256": "860758d92678bc371e8086c9c34d8f26fa50db9c52abc6f2fcc6a06e96315f81",
+      "bytes": 17490
+    },
+    "thalyx-kernel-managed-r2/it-worked-and-was-put-back.json": {
+      "sha256": "caf70fb54dfb340110dc0c305d3738b0852f8bdda7eb28d3394494fc45f38ab2",
+      "bytes": 9224
+    },
+    "thalyx-kernel-managed-r2/steps-edit-and-check.json": {
+      "sha256": "460d5cb60bc26e6cec5d146ebdfc6b13f8e3e8bee7f7cafeb791de89064cb715",
+      "bytes": 9603
+    },
+    "thalyx-kernel-managed-r2/the-program-asks-for-the-model.json": {
+      "sha256": "9deabacf602f0a25b54e0a49835cbe865d94d2c332be95c8c308e91ee2b56f6b",
+      "bytes": 8097
+    },
+    "thalyx-kernel-managed-r2/two-transactions-in-a-row.json": {
+      "sha256": "0fa226da5f7a70cfca28b99ae3839b28dec700ca76effadb62f95d35407fa9b9",
+      "bytes": 16722
+    },
+    "thalyx-kernel-managed-r3/a-confined-check-that-may-not-run.json": {
+      "sha256": "df0854f3d2d1d6d355f16f383b9900ed194e72308c5402a2afc1d7bf11f6c768",
+      "bytes": 9712
+    },
+    "thalyx-kernel-managed-r3/a-failing-check-puts-it-back.json": {
+      "sha256": "475441c361edea122d926930409cdd188ab64f43db3bf6d9895d3105c61c4c0c",
+      "bytes": 8504
+    },
+    "thalyx-kernel-managed-r3/a-failure-kept-on-request.json": {
+      "sha256": "dca428300749a22ba6086b385639a1fd7173579eb244c2df3f6b2f2476850ddc",
+      "bytes": 8490
+    },
+    "thalyx-kernel-managed-r3/a-loop-runs-out-of-calls.json": {
+      "sha256": "707e2feed0997eb2dd288b5a16e0530e7c21196f49896bfee47fdfcd331b4822",
+      "bytes": 9494
+    },
+    "thalyx-kernel-managed-r3/a-program-cannot-settle-its-own-boundary.json": {
+      "sha256": "b372d2410b86e3f871b5d923c15e2f6f10af0f2f16d3dcb12061026834256620",
+      "bytes": 9474
+    },
+    "thalyx-kernel-managed-r3/a-program-that-looks-before-it-changes.json": {
+      "sha256": "d699a89fa61cc69bd483695e1435382c95c0ad4b3a0f0f7938b30c81733a4d46",
+      "bytes": 14027
+    },
+    "thalyx-kernel-managed-r3/a-rust-check.json": {
+      "sha256": "29ab555e2640f0227a10f29ba9291f07cd865fa424d9277edc9ca99dc7077537",
+      "bytes": 10296
+    },
+    "thalyx-kernel-managed-r3/a-step-outside-the-workspace-is-refused.json": {
+      "sha256": "f16e88f649608dc4024be3686c39dfb7a344ffcd25a4e392863ee7183886ae8a",
+      "bytes": 7985
+    },
+    "thalyx-kernel-managed-r3/a-verb-that-is-not-exposed-is-not-reachable.json": {
+      "sha256": "c6f583a5b3d532378c8606674f135ee6f3cda09a30b681b9c1a7179d0339c78a",
+      "bytes": 7247
+    },
+    "thalyx-kernel-managed-r3/a-verdict-about-an-older-tree.json": {
+      "sha256": "ceeba24d7750306b1afd3642453449c4ba116907416ab2fa3ec881720fe5193a",
+      "bytes": 10122
+    },
+    "thalyx-kernel-managed-r3/an-assertion-stops-the-program.json": {
+      "sha256": "297c0315ad598df8e606351663fd3f212eb69cd91758ce9e6d92feeb0e839751",
+      "bytes": 7609
+    },
+    "thalyx-kernel-managed-r3/context-decides-a-rename.json": {
+      "sha256": "0c9b39e3f0bc578a54bfaaf5feca1c2d4d3987831957052946cc17d876974861",
+      "bytes": 17487
+    },
+    "thalyx-kernel-managed-r3/it-worked-and-was-put-back.json": {
+      "sha256": "c4e02c76dae0d43a0599c72d64ae6b841a30b2a5e0304cd24a21b1c251057786",
+      "bytes": 9225
+    },
+    "thalyx-kernel-managed-r3/steps-edit-and-check.json": {
+      "sha256": "bb1df85ad1eae70e620b8aa06e8e735c7673f62ab80728c6fc64a1362e33ac63",
+      "bytes": 9599
+    },
+    "thalyx-kernel-managed-r3/the-program-asks-for-the-model.json": {
+      "sha256": "9a336a07428ed02397a47ea948adae69aac2bcafe0cd267a70d002054c34a59d",
+      "bytes": 8097
+    },
+    "thalyx-kernel-managed-r3/two-transactions-in-a-row.json": {
+      "sha256": "feef7425d585cea87e661e722099768d5eb32bf6f219a7ecf4416d8170b3703a",
+      "bytes": 16719
+    },
+    "thalyx-kernel-managed-r4/a-confined-check-that-may-not-run.json": {
+      "sha256": "c8f2a7854ad025b23686b9c9a04f1145aa951473adfe2d46be0146036858b972",
+      "bytes": 9710
+    },
+    "thalyx-kernel-managed-r4/a-failing-check-puts-it-back.json": {
+      "sha256": "23cf83c27a2de1a9ef6ef326e29442dbb64baba0b80ba3eb384c46966d6fa201",
+      "bytes": 8502
+    },
+    "thalyx-kernel-managed-r4/a-failure-kept-on-request.json": {
+      "sha256": "e1e38a8617a6c734aed72e5ea72974613c1de9a25157b822803d5042a0822b02",
+      "bytes": 8491
+    },
+    "thalyx-kernel-managed-r4/a-loop-runs-out-of-calls.json": {
+      "sha256": "2df64fd28a4add0e7d4d2eb71f1886022efb08d72f5e4795d763ef9f82492f0d",
+      "bytes": 9496
+    },
+    "thalyx-kernel-managed-r4/a-program-cannot-settle-its-own-boundary.json": {
+      "sha256": "d2cd1bd86a02f0c02bc34f1db37bd8c4d13a97ee6d4e5d990365945a90501545",
+      "bytes": 9476
+    },
+    "thalyx-kernel-managed-r4/a-program-that-looks-before-it-changes.json": {
+      "sha256": "b12857a80eb83ae372c7a81e25bc804e6e20fd1f5764c34cdf4141763934bad1",
+      "bytes": 14025
+    },
+    "thalyx-kernel-managed-r4/a-rust-check.json": {
+      "sha256": "9a136cd45872380f8877e82d17e32408325c0ee15b2c12841ac2791aaa154b59",
+      "bytes": 10297
+    },
+    "thalyx-kernel-managed-r4/a-step-outside-the-workspace-is-refused.json": {
+      "sha256": "c416210784c5356ea67122d6775b338c2abff76a5cae8a01368322ccc675a6d6",
+      "bytes": 7987
+    },
+    "thalyx-kernel-managed-r4/a-verb-that-is-not-exposed-is-not-reachable.json": {
+      "sha256": "684502c9d68d0e9f7d842e1812c6e42b2526d8d56a2cd0ee13821f2f16dbae8c",
+      "bytes": 7247
+    },
+    "thalyx-kernel-managed-r4/a-verdict-about-an-older-tree.json": {
+      "sha256": "ceba19af4250c300016e42bf754ef615d64f8ed406c81230031ff5c9623c8b99",
+      "bytes": 10123
+    },
+    "thalyx-kernel-managed-r4/an-assertion-stops-the-program.json": {
+      "sha256": "aecdecc92fcbfe80d37255058b01fc40e3268a6148ccf0d93eeaef0a0cf7fc2c",
+      "bytes": 7611
+    },
+    "thalyx-kernel-managed-r4/context-decides-a-rename.json": {
+      "sha256": "7d78edfdd5d0f0511617960faa1b647d0797399246dbefa5540ce384ff5aba0e",
+      "bytes": 17489
+    },
+    "thalyx-kernel-managed-r4/it-worked-and-was-put-back.json": {
+      "sha256": "ed9b48ef0aafce6aeb13b2ae09eb03affb897fe317dd4271e8ac16ecdf3901fc",
+      "bytes": 9223
+    },
+    "thalyx-kernel-managed-r4/steps-edit-and-check.json": {
+      "sha256": "1ba9c1f741fdec721a505549345ddeb7d82d7509063fc8528c609be7137dc7b2",
+      "bytes": 9599
+    },
+    "thalyx-kernel-managed-r4/the-program-asks-for-the-model.json": {
+      "sha256": "4a620cee10a9a06cf08fac4021cd004cafd5a120189371bfeebae043a4cbb570",
+      "bytes": 8097
+    },
+    "thalyx-kernel-managed-r4/two-transactions-in-a-row.json": {
+      "sha256": "25cacff611ea0a3ef8f32131ff1286b63185cf0234cb02d6f35637af0ce73830",
+      "bytes": 16719
+    },
+    "thalyx-kernel-managed-r5/a-confined-check-that-may-not-run.json": {
+      "sha256": "cc34a419ed6975066bab6de2916c5042918326764cc17734483790a56fc15386",
+      "bytes": 9711
+    },
+    "thalyx-kernel-managed-r5/a-failing-check-puts-it-back.json": {
+      "sha256": "4f10454de2869878f7ddcde61b913c69e30faa1e69a88ba2a2daeea0f6f5aedd",
+      "bytes": 8502
+    },
+    "thalyx-kernel-managed-r5/a-failure-kept-on-request.json": {
+      "sha256": "6b578a726f7af0b2a7c4db2c5e746d2bc184ec2a2244892e549e765bce886d21",
+      "bytes": 8492
+    },
+    "thalyx-kernel-managed-r5/a-loop-runs-out-of-calls.json": {
+      "sha256": "7adff979ec349e848d93766049f2dcb72775f74b4f9b97b2d8efbfc490c3ed69",
+      "bytes": 9494
+    },
+    "thalyx-kernel-managed-r5/a-program-cannot-settle-its-own-boundary.json": {
+      "sha256": "fb717f1e42bfbaea700209f4ee26a123e64d6f7527b749fae21e2e017793e6f0",
+      "bytes": 9474
+    },
+    "thalyx-kernel-managed-r5/a-program-that-looks-before-it-changes.json": {
+      "sha256": "e709d96259244b29eea9d90eed055a425f37ef7e435727300631600eabb2a2a5",
+      "bytes": 14027
+    },
+    "thalyx-kernel-managed-r5/a-rust-check.json": {
+      "sha256": "53dd0f6f9e5363c3a238e051e273a458612c8197584bd7a0603282e2abfe61e5",
+      "bytes": 10298
+    },
+    "thalyx-kernel-managed-r5/a-step-outside-the-workspace-is-refused.json": {
+      "sha256": "5adab9c9260bc2aad925d730d538ed80b1459e34c43da1d69fde1d0993b93a33",
+      "bytes": 7987
+    },
+    "thalyx-kernel-managed-r5/a-verb-that-is-not-exposed-is-not-reachable.json": {
+      "sha256": "162e48bd6fd9142014c5bf48e31b8380dad3d5faca79325b67c6c5f42498fc6d",
+      "bytes": 7245
+    },
+    "thalyx-kernel-managed-r5/a-verdict-about-an-older-tree.json": {
+      "sha256": "9be706e0ca8c72cb4055ea1cae4b6775bd9f290abac7acc7b72348fb17683449",
+      "bytes": 10123
+    },
+    "thalyx-kernel-managed-r5/an-assertion-stops-the-program.json": {
+      "sha256": "a29f41e11cbf58f7c6f2122cb2ddf8904bf0529ad0b575caa39ce49d80cc76ea",
+      "bytes": 7611
+    },
+    "thalyx-kernel-managed-r5/context-decides-a-rename.json": {
+      "sha256": "2be4c7ce8dc87a806175624f47b38fb4a3656dccd44be913409496f959bae016",
+      "bytes": 17495
+    },
+    "thalyx-kernel-managed-r5/it-worked-and-was-put-back.json": {
+      "sha256": "a7e93ef0ecfa36b7be40e69c9ac680d2a54a7fa451a8b96cb2e2dd1eea70b873",
+      "bytes": 9226
+    },
+    "thalyx-kernel-managed-r5/steps-edit-and-check.json": {
+      "sha256": "58a1eb9b67c544c2c80d547cd1a1ff82fd372d989149607ba30ee176d9fa6656",
+      "bytes": 9602
+    },
+    "thalyx-kernel-managed-r5/the-program-asks-for-the-model.json": {
+      "sha256": "9e7cda55fef4c31752608e64c4cf51cd697bcc584eb43986e96adf436818eb15",
+      "bytes": 8097
+    },
+    "thalyx-kernel-managed-r5/two-transactions-in-a-row.json": {
+      "sha256": "9132c1376cb8db85ecb3541dba53b7b8aafc2284bd294f6f2642c1c208db4df8",
+      "bytes": 16722
+    }
+  }
+}

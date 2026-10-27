@@ -22,7 +22,8 @@ La revisión de Thalyx es la de la rama `feat/exp13-k1-final` sobre `76386f5`; l
 de este kernel es `feat/exp13-k1-final` sobre `fde5bee`. Las puertas de abajo se
 observaron con este kernel en `c0fe9e1` y Thalyx en `c8b9c27`, y se repitieron con
 el kernel en `c5d2ece` sobre las dos imágenes de K1 y en `60ef827` sobre la de
-medida; la campaña fija sus propias revisiones cuando corra.
+medida. La campaña corrió con este kernel en `50b3449`, la imagen de medida
+`fb45ad1c…` de `60ef827`, y Thalyx en `9d3ccce`.
 
 ## Qué es K1, y qué corre dónde
 
@@ -280,11 +281,89 @@ rediseño ayudó y una ventaja específica del kernel no quedó demostrada.
 
 ### Resultados
 
-**La campaña: NO MEDIDA.** Corrieron tres pilotos de una ronda. Los dos primeros
-dijeron que la configuración del brazo K1 no se podía congelar; el tercero corre
-sobre la imagen de medida, y la orden de la campaña —seis rondas, KVM, los tres
-brazos, reporte en `build/exp13/campaign-1/`— está escrita en
-`build/exp13/comandos.sh` y no se ha ejecutado.
+**La campaña — 2026-10-27, seis rondas, los tres brazos, imagen de medida.**
+KVM, kernel en `50b3449`, imagen `build/thalyx-k1-measure.img`
+(`fb45ad1ccb128755c99107063842992905185fd984b91da30077281d09d72b2c`, la misma de
+las puertas de arriba), Thalyx en `9d3ccce`; los tres brazos con el mismo binario
+`target/debug/thalyx`, corridas entre las 16:12 y las 16:22. La orden es la del
+paso `k` de `build/exp13/comandos.sh`. Los 288 archivos crudos (16 casos × 6 rondas
+× 3 brazos) viven en `build/exp13/campaign-1/`, que no se versiona; el análisis
+—`exp13-summary.md` y `exp13-results.json`, tal como los escribió
+`dev/exp13/analyze.py`— está copiado en [`exp13/campaign-1/`](exp13/campaign-1/), y
+`digests.json` a su lado fija el SHA-256 y el tamaño de la imagen, de los dos
+archivos del análisis y de cada uno de los 288 crudos, como
+[`k6/baseline/`](k6/baseline/) lo hace para K6.
+
+Todas las cifras son milisegundos de latencia extremo a extremo de la transacción
+(`whole_ns`, reloj del host): mediana de las diferencias pareadas por ronda, con
+IC 95 % bootstrap de 10 000 remuestreos **sobre rondas pareadas** —no sobre casos,
+como en los pilotos—. Negativo quiere decir que el primer brazo fue más rápido.
+
+| Efecto (agregado, 16 casos × 6 rondas = 96 pares) | Mediana (ms) | IC 95 % (ms) |
+|---|---|---|
+| K1 − L0, la migración entera | **−8,2** | [−12,2, −6,1] |
+| L1 − L0, el rediseño administrado | **−36,9** | [−38,1, −35,2] |
+| K1 − L1, la contribución del kernel | **+27,7** | [+24,6, +31,8] |
+
+Por caso, con seis pares cada uno. Las tres primeras columnas son la mediana de
+latencia de cada brazo; las otras, la mediana de la diferencia pareada con su IC
+cuando el veredicto lo necesita. Con seis rondas el IC de un caso es grueso: sirve
+para el signo, no para la magnitud.
+
+| Caso | L0 | L1 | K1 | K1 − L0 [IC 95 %] | L1 − L0 | K1 − L1 [IC 95 %] |
+|---|---|---|---|---|---|---|
+| `a-confined-check-that-may-not-run` | 39,7 | 3,9 | 27,1 | −14,0 [−18,4, −8,9] | −35,7 | +23,1 [+20,9, +29,8] |
+| `a-failing-check-puts-it-back` | 33,4 | 3,8 | 26,4 | −7,2 [−17,6, −5,1] | −29,4 | +22,6 [+20,1, +24,7] |
+| `a-failure-kept-on-request` | 26,2 | 4,1 | 46,3 | +17,2 [+7,2, +22,2] | −22,0 | +42,1 [+32,9, +44,2] |
+| `a-loop-runs-out-of-calls` | 38,5 | 5,9 | 31,5 | −8,2 [−11,1, −2,5] | −32,5 | +25,4 [+20,1, +32,1] |
+| `a-program-cannot-settle-its-own-boundary` | 33,2 | 6,1 | 44,0 | +7,7 [+3,6, +14,8] | −27,1 | +38,0 [+31,5, +41,7] |
+| `a-program-that-looks-before-it-changes` | 48,3 | 10,0 | 60,1 | +11,8 [−5,7, +16,6] | −38,5 | +49,6 [+35,8, +55,3] |
+| `a-rust-check` | 91,7 | 26,1 | 48,9 | −42,9 [−51,6, −37,8] | −65,5 | +22,8 [+18,3, +27,0] |
+| `a-step-outside-the-workspace-is-refused` | 41,0 | 3,5 | 22,8 | −16,8 [−22,2, −6,2] | −37,3 | +19,3 [+16,9, +31,4] |
+| `a-verb-that-is-not-exposed-is-not-reachable` | 33,4 | 3,0 | 23,6 | −9,2 [−13,6, −3,8] | −30,4 | +20,6 [+16,7, +28,5] |
+| `a-verdict-about-an-older-tree` | 42,1 | 6,8 | 26,2 | −14,9 [−19,9, −11,4] | −35,4 | +19,2 [+17,1, +26,1] |
+| `an-assertion-stops-the-program` | 44,1 | 5,3 | 30,5 | −12,0 [−22,0, −7,5] | −38,7 | +25,2 [+18,0, +31,9] |
+| `context-decides-a-rename` | 45,7 | 8,7 | 44,4 | −1,2 [−4,9, +12,4] | −37,0 | +35,9 [+32,9, +49,2] |
+| `it-worked-and-was-put-back` | 43,2 | 4,0 | 27,5 | −14,1 [−22,2, −9,8] | −39,1 | +23,6 [+17,8, +28,9] |
+| `steps-edit-and-check` | 34,4 | 4,4 | 40,7 | +5,0 [+2,2, +13,0] | −29,9 | +35,9 [+31,0, +42,5] |
+| `the-program-asks-for-the-model` | 156,5 | 18,1 | 40,3 | −115,5 [−122,7, −105,4] | −138,1 | +22,0 [+16,7, +27,7] |
+| `two-transactions-in-a-row` | 74,9 | 9,0 | 68,7 | −6,2 [−10,7, +6,0] | −65,9 | +59,7 [+56,7, +69,4] |
+
+`K1 − L1` es positivo en los 16 casos, con el IC entero sobre cero en todos.
+`L1 − L0` es negativo en los 16. `K1 − L0` es negativo en el agregado, pero no en
+todos los casos: en tres el IC queda entero sobre cero —`a-failure-kept-on-request`
+(+17,2), `a-program-cannot-settle-its-own-boundary` (+7,7) y `steps-edit-and-check`
+(+5,0)—, y en otros tres cruza el cero.
+
+**`K1 − L1` por fase**, extraído de `exp13-results.json` (`phase_ns`, en ns ahí).
+Mediana de la diferencia pareada e IC 95 % sobre rondas; los pares de cada fase son
+los casos que la recorren. Las medianas de las fases no se suman a la del total:
+la mediana de una suma no es la suma de las medianas, así que los ~4,7 ms entre
++23,0 y +27,7 no se atribuyen a ninguna fase.
+
+| Fase | Pares | Mediana (ms) | IC 95 % (ms) |
+|---|---|---|---|
+| `open` | 96 | **+22,954** | [+21,851, +24,288] |
+| `settle` | 96 | +0,193 | [+0,139, +0,270] |
+| `end` | 96 | +0,022 | [+0,020, +0,024] |
+| `request` | 96 | +0,007 | [+0,001, +0,016] |
+| `validate` | 66 | +0,004 | [+0,002, +0,006] |
+| `launch` | 12 | +0,004 | [−0,010, +0,010] |
+| `observe` | 96 | +0,003 | [+0,002, +0,003] |
+| `program` | 48 | −0,076 | [−0,138, −0,047] |
+| `candidate` | 96 | −0,128 | [−0,149, −0,116] |
+
+Casi toda la diferencia de K1 sobre L1 está en `open`. No se optimizó nada: la
+campaña es lo que el protocolo congelado midió.
+
+**Transporte: no medido.** La tabla de llamadas de transporte del resumen sale
+vacía —`K1-L1 | None | [None, None]`, cero pares para los tres efectos—. No es un
+cero: ninguna observación de la campaña trae la cuenta que esa tabla lee, y no se
+afirma nada sobre cuántas llamadas mueve cada brazo.
+
+**Los pilotos.** Antes de la campaña corrieron tres pilotos de una ronda. Los dos
+primeros dijeron que la configuración del brazo K1 no se podía congelar; el tercero
+es el que la congeló.
 
 **El piloto — 2026-10-27, una ronda, los tres brazos.** Mismas revisiones e imagen
 que las puertas; artefactos crudos en `build/exp13/pilot-r1/` y el análisis en
@@ -409,7 +488,7 @@ intervalos sobre rondas pareadas.
 
 ### El veredicto causal
 
-**Pendiente de la corrida física.** La forma del veredicto está fijada de
+La forma del veredicto estaba fijada de
 antemano para que los datos no elijan la pregunta: una afirmación de que
 «Thalyx-Kernel mejora a Thalyx» exige corrección semántica y garantías
 sostenidas (las puertas de arriba), ninguna ejecución oculta acreditada a K1 (el
@@ -419,7 +498,49 @@ sostenida. `K1 − L1` es la única cifra que puede sostener «el kernel especí
 mejora»; `K1 − L0` sin `K1 − L1` sostiene «la migración ayudó», que es una
 afirmación distinta y más débil.
 
+**El veredicto, con ese marco y la campaña de arriba:**
+
+- **La migración ayudó, y ayudó por el rediseño administrado.** `K1 − L0` =
+  −8,2 ms [−12,2, −6,1]: K1 es más rápido que la línea base en el agregado.
+  `L1 − L0` = −36,9 ms [−38,1, −35,2]: el rediseño, todavía en Linux, explica más
+  que esa mejora entera. Lo que la migración ganó lo ganó el modelo administrado,
+  no el kernel. En tres casos de dieciséis K1 queda más lento que L0 con el IC
+  sobre cero; «ayudó» es una afirmación del agregado.
+- **Una ventaja específica del kernel en latencia no se demostró.** `K1 − L1` =
+  +27,7 ms [+24,6, +31,8], positivo en los dieciséis casos: en esta configuración
+  el brazo del kernel es más lento que el mismo modelo en Linux, y casi todo está
+  en `open` (+23,0 ms). Con los límites de abajo —QEMU, transporte por consola
+  virtual, registros seriales— esa cifra no se atribuye al kernel en sí; lo que sí
+  sostiene es que «el kernel específico mejora la latencia» no tiene datos a favor.
+- **La única diferencia declarada a favor del kernel es la garantía de escritor
+  exclusivo** ([arriba](#la-garantía-más-fuerte-que-k1-declara-sobre-l1)):
+  `prevented_kernel_owns_the_medium` contra `detected_by_digest_not_prevented`.
+  Es una garantía declarada y sostenida por las puertas, no una cifra de esta
+  campaña.
+- Lo demás del marco: corrección semántica y garantías, sostenidas por las cuatro
+  puertas sobre la misma imagen; ninguna ejecución oculta acreditada a K1, porque
+  lanzamiento, validación y reloj son del host y están declarados.
+
 ## Límites reales que quedan
+
+Los de la campaña, que acotan el veredicto de arriba:
+
+- **QEMU/KVM, con lanzamiento, validación y reloj en el host.** El Thalyx real
+  corre en el host y conduce el kernel arrancado en QEMU por una consola
+  virtio; el lanzamiento y la validación de la revisión son host-side, y
+  `whole_ns` es del reloj del host, de modo que cada transacción de K1 incluye ir
+  y volver por la consola virtual. No hay una cifra de K1 medida desde dentro del
+  guest.
+- **~5 registros seriales por transacción.** La imagen de medida todavía escribe
+  unos cinco registros de resumen por transacción con publicación (diez u once si
+  publica dos veces), a unos 2,1 ms cada uno: del orden de 10 ms. La cuenta es del
+  tercer piloto, sobre la misma imagen; en la campaña no se contó, y cuánto de
+  `K1 − L1` es todavía el puerto serie no está medido.
+- **Una máquina.** Una sola máquina anfitriona, una corrida de seis rondas; ni
+  otra máquina ni otra campaña la repiten.
+- **La tabla de transporte, vacía (`None`), es no medida**, no cero.
+
+Los heredados:
 
 - Todo es QEMU: TCG para las puertas canónicas, KVM para la campaña. La máquina
   física está inventariada y no arrancada; los límites de K3/K4/K5 —sin
