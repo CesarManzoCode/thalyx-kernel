@@ -16,6 +16,21 @@ ROOT = Path(__file__).resolve().parents[1]
 VALID_STATUSES = {"accepted", "designed", "observed", "planned"}
 
 
+def copied_artifact(path):
+    """A report copied verbatim into the vault is evidence, not a note.
+
+    Giving it front matter would change the bytes its digest pins, so it is
+    recognised by that digest instead: the `digests.json` beside it must record
+    this name with this content. A copy edited by hand stops matching and is
+    checked as a note again, rather than passing as evidence it no longer is.
+    """
+    digests = path.parent / "digests.json"
+    if not digests.exists():
+        return False
+    recorded = json.loads(digests.read_text()).get("analysis", {}).get(path.name, {})
+    return recorded.get("sha256") == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def main():
     errors = []
     identifiers = {}
@@ -28,7 +43,7 @@ def main():
         if path.relative_to(ROOT).parts[0] in (".git", "build"):
             continue
         content = path.read_text(encoding="utf-8")
-        if "vault" == path.relative_to(ROOT).parts[0]:
+        if "vault" == path.relative_to(ROOT).parts[0] and not copied_artifact(path):
             note_count += 1
             match = re.match(r"\A---\n(.*?)\n---\n", content, re.S)
             if not match:
