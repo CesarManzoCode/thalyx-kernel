@@ -126,10 +126,14 @@ pub fn build(
     };
 
     // The one facet of the state service the link writes through: one service,
-    // one writer.
-    let Some((store_facet, _)) =
-        crate::bind_facet(store_endpoint, right::INSPECT | right::ENDPOINT_CALL)
-    else {
+    // one writer. Bound with `DERIVE` because the link derives each work's
+    // grant from it under that work's scope -- which is what makes fencing the
+    // work reach the grant -- and an install cannot add a right the handle it
+    // copies does not carry.
+    let Some((store_facet, _)) = crate::bind_facet(
+        store_endpoint,
+        right::INSPECT | right::DERIVE | right::ENDPOINT_CALL,
+    ) else {
         k2::note(note::BUILD_STEP_FAILED, 409);
         return None;
     };
