@@ -21,8 +21,8 @@ semántica:
 La revisión de Thalyx es la de la rama `feat/exp13-k1-final` sobre `76386f5`; la
 de este kernel es `feat/exp13-k1-final` sobre `fde5bee`. Las puertas de abajo se
 observaron con este kernel en `c0fe9e1` y Thalyx en `c8b9c27`, y se repitieron con
-el kernel en `c5d2ece` sobre las dos imágenes de K1; la campaña fija sus propias
-revisiones cuando corra.
+el kernel en `c5d2ece` sobre las dos imágenes de K1 y en `60ef827` sobre la de
+medida; la campaña fija sus propias revisiones cuando corra.
 
 ## Qué es K1, y qué corre dónde
 
@@ -233,6 +233,30 @@ La suite tardó 240 s con trazas y 185 s sin ellas. Logs en
 en `k2boot.rs` para K1–K5; K6 no se volvió a correr. Log en
 `build/exp13/run-gates-tcg.log`.
 
+### La imagen de medida — 2026-10-27, kernel en `60ef827`
+
+Una tercera imagen, sólo para medir: `build/thalyx-k1-measure.img`
+(`fb45ad1ccb128755c99107063842992905185fd984b91da30077281d09d72b2c`), la de sin
+trazas más `--k4-io-notes off`, que construye `k4disk` y `k4store` con la feature
+`quiet-io`. Esa feature calla las notas que K4 escribe por operación de bloque y
+por registro añadido —`RING_ACCEPTED`, `DISK_READ`, `DISK_WRITE`, `DISK_FLUSH`,
+`RECORD_WRITTEN`—; fallos, latches y errores se siguen anotando. `build_image.py`
+sólo la acepta en la etapa `thalyx`. Contra la de sin trazas difieren `k4disk` y
+`k4store`, nada más; el desensamblado pierde justo las llamadas al sistema de
+esas notas (cinco en `k4disk`, una en `k4store`).
+
+**K4 no cambia.** Sin la feature, `k4disk.elf` y `k4store.elf` son byte a byte los
+de `c5d2ece` fuera de la información de depuración (comparados con
+`llvm-objcopy --strip-debug` contra un árbol de `c5d2ece`). La primera versión del
+cambio no lo era: `.text` igual, pero `.rodata` cambiaba en las líneas de las
+ubicaciones de pánico, porque el ayudante movía líneas; ahora los ayudantes van al
+final de su archivo. Sobre el código final, en TCG: **K4 31/31 con
+autocomprobación 48/48, K5 47/47 con 88/88** (`build/exp13/run-gates-tcg-k4k5.log`).
+
+**Las cuatro puertas de K1 sobre la imagen de medida: PROVEN**, bajo KVM, con
+`THALYX_REQUIRE_K1=1`: equivalencia 16 de 16 sin diferencias declaradas, obsoleta,
+cerco y recuperación; la suite en 132 s (`build/exp13/gates-k1-measure.log`).
+
 **Qué no establece.** Las puertas de EXP-13 corrieron bajo KVM, no TCG, conducidas
 desde el host. El lanzamiento y la validación siguen siendo del host, como declara
 el perfil.
@@ -256,8 +280,11 @@ rediseño ayudó y una ventaja específica del kernel no quedó demostrada.
 
 ### Resultados
 
-**La campaña: NO MEDIDA.** Corrieron dos pilotos de una ronda, y los dos dicen que
-la configuración del brazo K1 todavía no se puede congelar.
+**La campaña: NO MEDIDA.** Corrieron tres pilotos de una ronda. Los dos primeros
+dijeron que la configuración del brazo K1 no se podía congelar; el tercero corre
+sobre la imagen de medida, y la orden de la campaña —seis rondas, KVM, los tres
+brazos, reporte en `build/exp13/campaign-1/`— está escrita en
+`build/exp13/comandos.sh` y no se ha ejecutado.
 
 **El piloto — 2026-10-27, una ronda, los tres brazos.** Mismas revisiones e imagen
 que las puertas; artefactos crudos en `build/exp13/pilot-r1/` y el análisis en
@@ -334,11 +361,45 @@ caen dentro de la ventana de una transacción no está medido: el `whole_ns` es 
 reloj del host y estas cifras son de la corrida entera del guest, arranque
 incluido.
 
-Lo que el segundo piloto deja abierto antes de congelar el protocolo: si las notas
-por operación de K4 salen del camino medido de K1 (contarlas en lugar de
-escribirlas, sin quitarle a la puerta K4 lo que lee) o si la campaña corre con
-ellas y lo declara. Mientras eso no se decida, `K1 − L1` sigue midiendo el plano de
-diagnóstico además del kernel.
+Lo que el segundo piloto dejó abierto —si las notas por operación de K4 salen del
+camino medido de K1— se resolvió con la imagen de medida de arriba, sin quitarle a
+la puerta K4 lo que lee.
+
+**El tercer piloto — 2026-10-27, una ronda, los tres brazos, imagen de medida.**
+Kernel en `60ef827`, Thalyx en `9d3ccce`, `build/thalyx-k1-measure.img`. Crudos en
+`build/exp13/pilot-r1-measure/`, análisis en `build/exp13/pilot-r1-measure-analysis/`,
+logs serie del guest en `build/exp13/pilot-r1-measure-serial/`. Sigue sin ser un
+veredicto: una ronda, intervalo sobre casos.
+
+| Efecto (mediana, ms) | Con trazas | Sin trazas | Medida | IC 95 % medida (sobre casos) |
+|---|---|---|---|---|
+| L1 − L0 | −36,5 | −36,3 | −36,0 | [−37,7, −29,5] |
+| K1 − L1 | +2 604 | +1 012 | **+29,7** | [+19,2, +34,5] |
+| K1 − L0 | +2 527 | +971 | −6,3 | [−17,9, +1,5] |
+
+`K1 − L1` por fase en la imagen de medida: `open` **+22,0** [+17,9, +25,5],
+`settle` +0,2 [+0,08, +11,7], `candidate` −0,1, `program` −0,1; las otras cinco, a
+menos de 0,03 ms. Lo que en los dos pilotos anteriores era `open` y `settle` era,
+casi entero, el puerto serie.
+
+**Registros seriales por transacción.** Ventana: de la nota `WORK_OPENED` del link
+a la siguiente nota del puerto de control, que es la primera petición del host
+después de la transacción; el host lee antes la traza de plataforma, así que la
+ventana es una cota superior. Contados con `build/exp13/count_tx_records.py`:
+
+| Imagen | Ventanas completas | Mínimo | Mediana | Máximo |
+|---|---|---|---|---|
+| Sin trazas | 10 de 17 | 168 | 219 | 472 |
+| Medida | 17 de 17 | 5 | **5** | 11 |
+
+Los cinco de una transacción con publicación son uno por capa: `WORK_OPENED` del
+link, `PUBLISHED`, `EFFECT_ADMITTED` y `ROOT_HEAD` de `k4store`, y `AUDIT_EFFECT`
+del supervisor; diez u once cuando la transacción publica dos veces. El
+`diag.summary` de las ocho corridas que lo alcanzaron dice 285 a 301 registros por
+corrida entera, `write_ns` de 0,60 a 0,65 s —unos 2,1 ms por registro—, casi todos
+del arranque. A ese costo, cinco registros son unos 10 ms de una transacción: el
+orden de un tercio de los +29,7 ms que quedan. Eso es una cuenta, no una medida
+de la ventana; cuánto de `K1 − L1` es todavía el puerto serie no está medido.
 
 El protocolo se congela tras un piloto: una configuración común para los tres
 brazos —mismo corpus, mismo host, mismas condiciones de VM— y no se afina un brazo
