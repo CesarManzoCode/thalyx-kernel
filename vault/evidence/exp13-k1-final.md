@@ -20,8 +20,9 @@ semántica:
 
 La revisión de Thalyx es la de la rama `feat/exp13-k1-final` sobre `76386f5`; la
 de este kernel es `feat/exp13-k1-final` sobre `fde5bee`. Las puertas de abajo se
-observaron con este kernel en `c0fe9e1` y Thalyx en `c8b9c27`; la campaña fija
-sus propias revisiones cuando corra.
+observaron con este kernel en `c0fe9e1` y Thalyx en `c8b9c27`, y se repitieron con
+el kernel en `c5d2ece` sobre las dos imágenes de K1; la campaña fija sus propias
+revisiones cuando corra.
 
 ## Qué es K1, y qué corre dónde
 
@@ -200,11 +201,41 @@ escribía `view/src/lib.rs` sin crear `view/src`, y la limpieza de rutas sólo
 reconocía el espacio de trabajo privado de L1 (`state/managed/…`), no el de K1
 (`state/kernel-managed/…`).
 
-**Qué no establece.** Las puertas corrieron bajo KVM, no TCG; son las de EXP-13,
-conducidas desde el host, no las puertas K1–K5 del kernel, que esta tanda no
-volvió a correr (el cambio en `k2boot.rs` es idéntico por construcción con un solo
-dispositivo, que es lo que esas fases arrancan, pero no se ejecutó). El
-lanzamiento y la validación siguen siendo del host, como declara el perfil.
+### Las dos imágenes de K1 — 2026-10-27, kernel en `c5d2ece`
+
+Las puertas de arriba corrieron con trazas, y una medida con trazas mide las
+trazas (abajo, el piloto). Desde `c5d2ece` hay dos imágenes de la etapa `thalyx`,
+del mismo árbol y con el mismo link, que difieren sólo en la bandera del módulo
+supervisor:
+
+| Imagen | Para qué | Orden | sha256 |
+|---|---|---|---|
+| `build/thalyx-k1-trace.img` | evidencia de las puertas: trazas y resúmenes | `build_image.py --phase k5 --stage thalyx --name thalyx-k1-trace` | `dae2d7894cd14928846fe1c99e9212e69d1b6d5b79180e037fe115dd84edb3a2` |
+| `build/thalyx-k1-notrace.img` | medida de la campaña: sólo resúmenes, `TRACE_OFF` como K6 | `build_image.py --phase k5 --stage thalyx --trace off --name thalyx-k1-notrace` | `00a150d096eb3dc116387b9cab9020eccc0fe357fb98d9aa9f4777aa1d30f093` |
+
+`--name` existe para que ninguna de las dos sea `build/thalyx-k5.img`, que
+`run_gates.py` reconstruye con otras etapas. En el mismo cambio el link dejó de
+anotar cada trama que entra y sale (`FRAME_IN`/`FRAME_OUT`): una nota es un
+registro de resumen, que `TRACE_OFF` no retiene, y dos por petición dejaban el
+puerto serie en el camino que la campaña cronometra. `FRAMES` sigue contándolas,
+una vez, al final.
+
+**Las cuatro puertas, sobre las dos imágenes: PROVEN**, bajo KVM, con
+`THALYX_REQUIRE_K1=1`, serializadas, con Thalyx en `9d3ccce` (código en
+`c8b9c27`). En las dos: equivalencia 16 de 16 sin diferencias declaradas, obsoleta,
+cerco y recuperación; la suite, 7 aprobadas, 0 fallidas, 2 ignoradas por diseño.
+La suite tardó 240 s con trazas y 185 s sin ellas. Logs en
+`build/exp13/gates-k1-trace.log` y `build/exp13/gates-k1-notrace.log`.
+
+**Las puertas K1–K5 del kernel, TCG, sobre `c5d2ece`: PASS** (`run_gates.py
+--platform tcg`): K1 13/13, K2 21/21 con autocomprobación 28/28, K3 28/28 con
+57/57, K4 31/31 con 48/48, K5 47/47 con 88/88. Eso cierra el pendiente del cambio
+en `k2boot.rs` para K1–K5; K6 no se volvió a correr. Log en
+`build/exp13/run-gates-tcg.log`.
+
+**Qué no establece.** Las puertas de EXP-13 corrieron bajo KVM, no TCG, conducidas
+desde el host. El lanzamiento y la validación siguen siendo del host, como declara
+el perfil.
 
 ## La campaña causal
 
@@ -225,8 +256,8 @@ rediseño ayudó y una ventaja específica del kernel no quedó demostrada.
 
 ### Resultados
 
-**La campaña: NO MEDIDA.** Sólo corrió el piloto, y el piloto dice que la
-configuración del brazo K1 todavía no se puede congelar.
+**La campaña: NO MEDIDA.** Corrieron dos pilotos de una ronda, y los dos dicen que
+la configuración del brazo K1 todavía no se puede congelar.
 
 **El piloto — 2026-10-27, una ronda, los tres brazos.** Mismas revisiones e imagen
 que las puertas; artefactos crudos en `build/exp13/pilot-r1/` y el análisis en
@@ -264,11 +295,50 @@ Eso **no** es un veredicto sobre el kernel, y la razón está medida:
   entra y sale (`FRAME_IN`/`FRAME_OUT`), y esas notas son registros de resumen, que
   `TRACE_OFF` no calla.
 
-Lo que el piloto deja decidido para congelar el protocolo, **sin ejecutar
-todavía**: construir la imagen de medida del brazo K1 con `TRACE_OFF`, como K6;
-quitar del camino de cada petición las notas por trama del link, o contarlas sin
-escribirlas; volver a correr las cuatro puertas sobre esa imagen, porque las de
-arriba corrieron con trazas; y repetir el piloto antes de la campaña.
+Lo que ese piloto dejó decidido —imagen de medida con `TRACE_OFF`, sin notas por
+trama en el link, las cuatro puertas sobre ella y un piloto nuevo— está hecho;
+abajo.
+
+**El segundo piloto — 2026-10-27, una ronda, los tres brazos, imagen sin trazas.**
+Kernel en `c5d2ece`, Thalyx en `9d3ccce`, `build/thalyx-k1-notrace.img`. Crudos en
+`build/exp13/pilot-r1-notrace/`, análisis en `build/exp13/pilot-r1-notrace-analysis/`,
+órdenes exactas en `build/exp13/comandos.sh`. Sigue sin ser un veredicto: una
+ronda, intervalo sobre casos.
+
+| Efecto (mediana, ms) | Con trazas | Sin trazas |
+|---|---|---|
+| L1 − L0 | −36,5 | −36,3 |
+| K1 − L1 | +2 604 | +1 012 |
+| K1 − L0 | +2 527 | +971 |
+
+`K1 − L1` por fase (mediana de la diferencia, ms; las otras cinco fases suman
+menos de 1 ms en cada corrida):
+
+| Fase | Con trazas | Sin trazas | IC 95 % sin trazas (sobre casos) |
+|---|---|---|---|
+| `open` | +2 140,3 | +897,3 | [+892,5, +908,8] |
+| `settle` | +312,6 | +116,3 | [+107,6, +510,1] |
+| `candidate` | +73,3 | −0,1 | [−0,1, +0,1] |
+| `end` | +6,2 | +0,1 | [+0,05, +0,07] |
+
+Lo que queda sigue siendo, en buena parte, el puerto serie. Dos corridas del
+guest cuyo `diag.summary` se alcanzó a copiar (el arnés borra los logs del guest
+al terminar; se copiaron en un bucle a `build/exp13/pilot-r1-notrace-serial/`):
+`trace=off`, 609 y 565 registros, `write_ns` de 1,51 s y 1,39 s, unos 2,5 ms por
+registro, con 1 159 y 1 030 trazas retenidas. De los 609, 388 son notas de
+programa, y 319 de ellas son las notas por operación de K4 que `TRACE_OFF` no
+calla porque son resúmenes: `RING_ACCEPTED` (138), `DISK_READ` (83), `DISK_WRITE`
+(44) y `DISK_FLUSH` (11) de `k4disk`, `RECORD_WRITTEN` (43) de `k4store`. Las puertas
+K4 se deciden desde esas notas, así que esta tanda no las tocó. Cuántas de ellas
+caen dentro de la ventana de una transacción no está medido: el `whole_ns` es del
+reloj del host y estas cifras son de la corrida entera del guest, arranque
+incluido.
+
+Lo que el segundo piloto deja abierto antes de congelar el protocolo: si las notas
+por operación de K4 salen del camino medido de K1 (contarlas en lugar de
+escribirlas, sin quitarle a la puerta K4 lo que lee) o si la campaña corre con
+ellas y lo declara. Mientras eso no se decida, `K1 − L1` sigue midiendo el plano de
+diagnóstico además del kernel.
 
 El protocolo se congela tras un piloto: una configuración común para los tres
 brazos —mismo corpus, mismo host, mismas condiciones de VM— y no se afina un brazo
