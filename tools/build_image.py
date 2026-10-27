@@ -374,6 +374,9 @@ def main() -> int:
                         help="K5 only: the seed the plan carries")
     parser.add_argument("--trace", default="on", choices=["on", "off"],
                         help="K5 only: off marks the supervisor TRACE_OFF, as the K6 package is")
+    parser.add_argument("--k4-io-notes", default="on", choices=["on", "off"],
+                        help="thalyx stage only: off builds k4disk and k4store with quiet-io, "
+                             "which drops their per-operation notes; K4's gate reads them")
     parser.add_argument("--name", default=None,
                         help="name of the stage directory and image under build/ "
                              "(default thalyx-<phase>), so one phase can have two images")
@@ -389,6 +392,9 @@ def main() -> int:
     phase = arguments.phase
     if arguments.trace == "off" and phase != "k5":
         print("--trace off is for the k5 phase; the k6 package always has it", file=sys.stderr)
+        return 1
+    if arguments.k4_io_notes == "off" and not (phase == "k5" and arguments.stage == "thalyx"):
+        print("--k4-io-notes off is for the k5 thalyx stage only", file=sys.stderr)
         return 1
     name = arguments.name or f"thalyx-{phase}"
     stage = BUILD / name
@@ -413,12 +419,15 @@ def main() -> int:
 
     cargo_build("thalyx-boot-uefi", LOADER_TARGET, arguments.profile)
     cargo_build("thalyx-kernel", KERNEL_TARGET, arguments.profile)
-    store_features = []
+    program_features: dict[str, list[str]] = {}
     if phase == "k5" and arguments.stage == "thalyx":
-        store_features = ["large-index"]
+        program_features["k4store"] = ["large-index"]
+        if arguments.k4_io_notes == "off":
+            program_features["k4store"].append("quiet-io")
+            program_features["k4disk"] = ["quiet-io"]
     for program in programs:
-        features = store_features if program == "k4store" else None
-        cargo_build(f"thalyx-user-{program}", KERNEL_TARGET, arguments.profile, features)
+        cargo_build(f"thalyx-user-{program}", KERNEL_TARGET, arguments.profile,
+                    program_features.get(program))
 
     loader = artifact(LOADER_TARGET, arguments.profile, "bootx64.efi")
     kernel = artifact(KERNEL_TARGET, arguments.profile, "kernel")
@@ -547,6 +556,8 @@ def main() -> int:
         manifest["stage"] = arguments.stage
         manifest["seed"] = arguments.seed
         manifest["trace"] = arguments.trace
+        manifest["k4_io_notes"] = arguments.k4_io_notes
+        manifest["features"] = program_features
         native_manifest = BUILD / "native" / "native-manifest.json"
         if native_manifest.exists():
             manifest["native"] = json.loads(native_manifest.read_text())

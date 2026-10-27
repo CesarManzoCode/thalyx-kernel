@@ -17,6 +17,9 @@ path = "src/main.rs"
 large-index = []
 # Every bound principal may publish, not only the two K4's package names.
 every-principal-publishes = []
+# Silences the note written per record appended, as k4disk's `quiet-io` does
+# for its per-operation notes. See `state.rs`.
+quiet-io = []
 
 [dependencies]
 thalyx-abi.workspace = true

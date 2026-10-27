@@ -505,7 +505,7 @@ impl Store {
         if !self.disk.write(block, WRITE_SLOT, mode) {
             return None;
         }
-        k2::note(
+        record_note(
             note::RECORD_WRITTEN,
             self.next_sequence | (u64::from(kind) << 32),
         );
@@ -1990,4 +1990,15 @@ pub fn root_head(digest: &[u8; 32]) -> u64 {
         value = (value << 8) | u64::from(*byte);
     }
     value
+}
+
+/// The note written per record appended. `quiet-io` silences it, as it does
+/// k4disk's per-operation notes, for a package that times the service; the K4
+/// gate reads it, so every K4 and K5 package keeps it. Placed last so that
+/// adding it moved no line above it.
+#[inline(always)]
+fn record_note(kind: u64, value: u64) {
+    if cfg!(not(feature = "quiet-io")) {
+        k2::note(kind, value);
+    }
 }

@@ -273,7 +273,7 @@ impl Queue {
             return None;
         }
         self.used_index = self.used_index.wrapping_add(1);
-        k2::note(report::RING_ACCEPTED, u64::from(entry.id));
+        io_note(report::RING_ACCEPTED, u64::from(entry.id));
         Some(entry.len)
     }
 
@@ -442,7 +442,7 @@ fn serve(queue: &mut Queue, irq: u64, faults: &mut Faults, request: &DiskRequest
             } else if !transfer(queue, irq, BLK_IN, request.block, data, bytes) {
                 reply.status = disk_status::IO_ERROR;
             } else {
-                k2::note(
+                io_note(
                     note::DISK_READ,
                     request.block | (u64::from(request.count) << 48),
                 );
@@ -469,7 +469,7 @@ fn serve(queue: &mut Queue, irq: u64, faults: &mut Faults, request: &DiskRequest
                 reply.status = disk_status::IO_ERROR;
             } else {
                 faults.flushes += 1;
-                k2::note(note::DISK_FLUSH, faults.flushes);
+                io_note(note::DISK_FLUSH, faults.flushes);
             }
         }
         disk_op::LATCH => {
@@ -562,7 +562,7 @@ fn write_with_faults(
     }
     faults.writes_issued += 1;
     faults.sectors_written += issue / SECTOR_BYTES;
-    k2::note(
+    io_note(
         note::DISK_WRITE,
         request.block | (u64::from(request.count) << 48),
     );
@@ -601,7 +601,7 @@ fn release_held(queue: &mut Queue, irq: u64, faults: &mut Faults) -> bool {
     }
     faults.writes_issued += 1;
     faults.sectors_written += SECTORS_PER_BLOCK;
-    k2::note(note::DISK_WRITE, block | (u64::from(count) << 48));
+    io_note(note::DISK_WRITE, block | (u64::from(count) << 48));
     true
 }
 
@@ -714,3 +714,21 @@ fn run() -> ! {
 }
 
 rt::entry!(run);
+
+/// A note written once per block operation.
+///
+/// The K4 gate is decided from these, so every package that K4 or K5 runs
+/// keeps them. Each is a summary record, which `TRACE_OFF` does not withhold,
+/// and under KVM one costs milliseconds of synchronous serial I/O, more than
+/// the operation it describes: a package built to time the service, not to
+/// prove it, builds this driver with `quiet-io`. Faults, latches and errors
+/// are noted either way.
+//
+// Placed last so that adding it moved no line above it: a build without
+// `quiet-io` is the same image as before it existed, panic locations included.
+#[inline(always)]
+fn io_note(kind: u64, value: u64) {
+    if cfg!(not(feature = "quiet-io")) {
+        k2::note(kind, value);
+    }
+}

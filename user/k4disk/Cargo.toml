@@ -11,6 +11,11 @@ publish.workspace = true
 name = "k4disk"
 path = "src/main.rs"
 
+[features]
+# Silences the notes this driver writes per block operation, for a package
+# that measures the service rather than diagnoses it. See `io_note`.
+quiet-io = []
+
 [dependencies]
 thalyx-abi.workspace = true
 thalyx-user-rt.workspace = true
