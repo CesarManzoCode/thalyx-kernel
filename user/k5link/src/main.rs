@@ -44,7 +44,7 @@ use thalyx_user_k5pkg::link::{
     CONTROL_PORT, FRAME_MAX, LINK_MAGIC, LinkConfig, MAX_PORTS, link_addr, link_slot, note,
 };
 use thalyx_user_rt::k2::{self, report};
-use thalyx_user_rt::{self as rt, entry};
+use thalyx_user_rt::{self as rt, entry_on_stack};
 
 use managed::Managed;
 use virtio::Console;
@@ -405,4 +405,10 @@ fn run() -> ! {
     rt::exit(0)
 }
 
-entry!(run);
+// `run` holds the managed adapter, the console and the work table in its frame,
+// about 156 KiB, and the deepest static chain under it -- a publication through
+// `commit_root` and `store_blob_with` down to `endpoint_call` -- is about
+// 203 KiB, measured from the disassembly, against the eight pages the kernel
+// maps. The first activation met the guard page in `run`'s own stack probe.
+// Bring a stack, as the K5 work domain does, at the same size.
+entry_on_stack!(run, 256 * 1024);
