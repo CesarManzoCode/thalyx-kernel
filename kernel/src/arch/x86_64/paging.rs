@@ -245,6 +245,115 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// Maps `count` consecutive frames from `first` at consecutive pages from
+    /// `vaddr`, with the same rights.
+    ///
+    /// The same entries [`AddressSpace::map`] would write, page by page, in
+    /// the same order: what changes is that the hierarchy is walked once per
+    /// page table instead of once per page. The pages of one table share
+    /// their three upper entries, so walking them again for every page reads
+    /// and widens the same three entries again. On failure the error comes
+    /// with the number of pages already installed, which the caller withdraws
+    /// as it would after the page-by-page loop.
+    pub fn map_run(
+        &mut self,
+        vaddr: u64,
+        first: Frame,
+        count: u64,
+        rights: Rights,
+        alloc: &mut FrameAllocator,
+        owner: Owner,
+    ) -> Result<(), (u64, MapError)> {
+        rights.validate().map_err(|error| (0, MapError::Rights(error)))?;
+        if vaddr % PAGE_SIZE != 0 {
+            return Err((0, MapError::BadAddress));
+        }
+        let flags = leaf_flags(rights);
+        let mut done = 0u64;
+        while done < count {
+            let va = vaddr + done * PAGE_SIZE;
+            // Every page of one table shares the bits above the table's
+            // index, so canonical form is decided once per table.
+            if !canonical(va) {
+                return Err((done, MapError::BadAddress));
+            }
+            let pdpt = self
+                .child(self.root, index(va, 3), rights.user, alloc, owner)
+                .map_err(|error| (done, error))?;
+            let pd = self
+                .child(pdpt, index(va, 2), rights.user, alloc, owner)
+                .map_err(|error| (done, error))?;
+            let pt = self
+                .child(pd, index(va, 1), rights.user, alloc, owner)
+                .map_err(|error| (done, error))?;
+            let entries = table(pt);
+            let mut slot = index(va, 0);
+            while slot < ENTRIES && done < count {
+                if entries[slot] & PRESENT != 0 {
+                    return Err((done, MapError::AlreadyMapped));
+                }
+                entries[slot] = (first.addr() + done * PAGE_SIZE) | flags;
+                done += 1;
+                slot += 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Removes the 4 KiB mappings of `count` consecutive pages from `vaddr`,
+    /// calling `removed` with the address of each one that was present, and
+    /// returns how many were.
+    ///
+    /// [`AddressSpace::unmap`] over the range, walking the hierarchy once per
+    /// page table. A table that is absent holds nothing to remove, and the
+    /// walk moves to the next one. The caller is responsible for invalidating
+    /// the translations, which is what `removed` is for.
+    pub fn unmap_run(&mut self, vaddr: u64, count: u64, mut removed: impl FnMut(u64)) -> u64 {
+        if vaddr % PAGE_SIZE != 0 {
+            return 0;
+        }
+        let mut done = 0u64;
+        let mut cleared = 0u64;
+        while done < count {
+            let va = vaddr + done * PAGE_SIZE;
+            let slot = index(va, 0);
+            let in_table = ((ENTRIES - slot) as u64).min(count - done);
+            let leaf = if canonical(va) {
+                self.leaf_table(va)
+            } else {
+                None
+            };
+            if let Some(frame) = leaf {
+                let entries = table(frame);
+                for offset in 0..in_table as usize {
+                    if entries[slot + offset] & PRESENT != 0 {
+                        entries[slot + offset] = 0;
+                        cleared += 1;
+                        removed(va + offset as u64 * PAGE_SIZE);
+                    }
+                }
+            }
+            done += in_table;
+        }
+        cleared
+    }
+
+    /// The page table that holds `vaddr`'s leaf entry, if every level above
+    /// it is present and none is a large page.
+    fn leaf_table(&self, vaddr: u64) -> Option<Frame> {
+        let mut frame = self.root;
+        let mut level = 3;
+        while level > 0 {
+            let entry = table(frame)[index(vaddr, level)];
+            if entry & PRESENT == 0 || entry & HUGE != 0 {
+                return None;
+            }
+            frame = Frame::containing(entry & ADDRESS_MASK);
+            level -= 1;
+        }
+        Some(frame)
+    }
+
     /// Maps a 2 MiB-aligned range with 2 MiB entries.
     ///
     /// Only used for the kernel's own direct map, where the kernel already owns

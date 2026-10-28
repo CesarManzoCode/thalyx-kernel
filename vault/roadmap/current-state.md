@@ -361,6 +361,18 @@ Implementado ([ADR-014](../decisions/ADR-014-exact-scope-reservations-and-lineag
 
 Diseñado, no medido. Queda una ventana residual: si un ancestro rechaza, los niveles inferiores quedan cargados unos nanosegundos mientras se deshacen. La lectura previa al intercambio puede costar más bajo contención que el `fetch_add`, y su balance con la separación de líneas lo mide el cierre. `k7.k6_audit_drain_0` no tiene un mecanismo dirigido en este cambio. Las puertas K1–K6 y las pruebas de EXP-13 no se corrieron dentro de este mini sprint; las verifica el cierre de K7.
 
+### Memoria (k7-05)
+
+Observado en el baseline: las razones nativo / `linux-nomitig` de K6 son 1,05 y 1,08 para mapear 1 página, 0,257 y 0,264 para mapear 64, y 0,476 y 0,490 para sellar 16. Observado en el código (`2ce6cda`): el sello esperaba la invalidación interrumpiendo a todos los procesadores en línea, aunque estuvieran parados y nunca hubieran cargado el espacio del escritor. `DOMAIN_UNMAP` ya esperaba solo a los que tenían el espacio cargado. `DOMAIN_MAP` y la retirada recorrían la jerarquía de tablas una vez por página. La retirada leía `CR3` en cada llamada. Cada objeto creado recorría las 1024 ranuras de la cuarentena aunque estuviera vacía.
+
+Implementado ([ADR-015](../decisions/ADR-015-targeted-seal-wait-and-table-walks.md)), sin cambiar ninguna interfaz, estado ni orden de comprobación:
+
+- **Espera dirigida del sello.** `tlb::shootdown_withdrawn` espera a los procesadores que las retiradas del objeto registraron (`unmapped_cpus`), y solo a los que no pasaron todavía la generación de la última retirada (`unmapped_at`). Interrumpe solo a esos. Es el mismo argumento que ya usaba `DOMAIN_UNMAP`. `mem.sealed` sigue contando el acuse sobre todos los procesadores en línea. Busca bajar `k7.k6_mem_seal_16`.
+- **Una recorrida por tabla.** `AddressSpace::map_run` y `unmap_run` escriben y borran las mismas entradas que el bucle por página, recorriendo PML4, PDPT y PD una vez por tabla. Las usan `DOMAIN_MAP` y `withdraw_map_deferring`, que sigue invalidando con `invlpg` cada página presente del espacio cargado. Busca bajar `k7.k6_mem_map_64` y, en parte, `k7.k6_mem_seal_16`.
+- **Raíz cargada y cuarentena vacía.** La retirada compara con la raíz que `switch_space` registró (`tlb::loaded_root`) en lugar de leer `CR3`, y `drain_quarantine` vuelve en cuanto la cuarentena está vacía. Busca bajar `k7.k6_mem_map_1`, que necesita salir de la paridad.
+
+Diseñado, no medido. No se sabe cuánto pesa cada parte. Si el costo de mapear una página lo dominan la creación del objeto o la entrada al kernel, este cambio puede no alcanzar su umbral. El registro del sello nombra ahora la generación de la última retirada del objeto, no una propia. Las puertas K1–K6 y las pruebas de EXP-13 no se corrieron dentro de este mini sprint; las verifica el cierre de K7.
+
 ## Reanudar aquí
 
 **Último hito terminado y pusheado:** **K6 completo en su alcance** —protocolos emparejados, campaña de referencia, EXP-12, ocho cuellos medidos y corregidos, parámetros V0 revisados, inventario físico, puerta K6— en la rama `feat/k6-comparison-hardening-reference`. K5 quedó completo en `feat/k5-thalyx-port-tools`.

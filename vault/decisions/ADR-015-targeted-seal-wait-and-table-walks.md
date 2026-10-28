@@ -1,0 +1,38 @@
+---
+id: ADR-015
+kind: decision
+status: accepted
+---
+# El sello espera solo a los procesadores que sus retiradas registraron, y mapear o retirar un rango recorre la jerarquía una vez por tabla
+
+**Problema.** En el baseline de K7 las tres medidas de memoria de K6 son razones nativo / `linux-nomitig` (`vault/private/baseline-k7.json`): `mem.map` con 1 página da 1,05 y 1,08 en las réplicas A y B, con 64 páginas 0,257 y 0,264, y `mem.seal` con 16 páginas 0,476 y 0,490. El protocolo nativo de cada muestra está en `tests/k6/plat_native.c`. `mem.map` hace `SCOPE_CREATE_MEMORY`, `DOMAIN_MAP`, una escritura por página, `DOMAIN_UNMAP` y `CAP_CLOSE`. `mem.seal` crea, mapea con escritura, escribe, sella, mapea de solo lectura, lee, retira y cierra.
+
+**Evidencia.** Observado en el código, en el árbol de `2ce6cda`:
+
+- `memops::seal` esperaba con `tlb::shootdown()`: publicaba una generación e interrumpía a **todos** los procesadores en línea, aunque estuvieran parados en `hlt` y nunca hubieran cargado el espacio del escritor. `DOMAIN_UNMAP` ya esperaba solo a los procesadores con el espacio cargado (`tlb::shootdown_space`), con el argumento de que escribir `CR3` retira todas las entradas del espacio que se deja. El sello, que hace la misma retirada, no lo usaba.
+- Cada retirada (`withdraw_map_deferring`) ya registra en el objeto la generación que publicó (`unmapped_at`) y los procesadores que podían tener una traducción (`unmapped_cpus`), leídos después de publicar. Ese registro ya decide si los marcos del objeto vuelven directo al pool. El sello no lo consultaba.
+- `DOMAIN_MAP` llamaba a `AddressSpace::map` una vez por página. Cada llamada recorría PML4, PDPT y PD, y volvía a escribir los bits `USER | WRITABLE` de las tres entradas intermedias. La retirada llamaba a `AddressSpace::unmap` por página con la misma recorrida. Las 64 páginas de `mem.map` caben en una sola tabla.
+- `withdraw_map_deferring` leía `CR3` en cada retirada para saber si el espacio era el cargado. `tlb::switch_space` ya guarda la raíz que escribió el procesador, y su comentario registra que leer `CR3` era un tercio del trabajo arquitectónico de un cambio de contexto en esta plataforma.
+- `FrameAllocator::drain_quarantine` recorre las 1024 ranuras de la cuarentena, y `alloc_contiguous` lo llama antes de cada objeto de memoria. En el caso ordinario la cuarentena está vacía, porque un `DOMAIN_UNMAP` acusado devuelve los marcos directo al pool.
+
+**Elección.**
+
+*Espera dirigida del sello.* `tlb::shootdown_withdrawn(cpus, generation)` espera a que los procesadores de `cpus` que siguen en línea hayan pasado `generation`. Solo interrumpe a los que todavía no la pasaron. `seal` le pasa `unmapped_cpus` y `unmapped_at` del objeto, leídos bajo el cerrojo después de retirar los escritores. El conjunto cubre todas las retiradas de mapas del objeto, no solo las de este sello: las de un `DOMAIN_UNMAP`, una revocación o el desmontaje de un dominio pasan por la misma función y acumulan sus procesadores en el mismo campo. Se exige la generación más nueva a todos, aunque alguno solo haya estado en una retirada anterior. El argumento para no esperar a un procesador fuera del conjunto es el de `shootdown_space`: cada retirada publicó su generación antes de leer el conjunto vivo, así que el procesador ya había dejado el espacio (escribió `CR3`) o entró después y refrescó al entrar. Con generación cero nunca se retiró nada, y no hay nada que esperar. El registro `mem.sealed` sigue diciendo `acknowledged_cpus` y `expected_cpus` sobre todos los procesadores en línea, como `mem.unmapped`: los que acusaron más los que no podían tener la traducción.
+
+*Una recorrida por tabla.* `AddressSpace::map_run` y `AddressSpace::unmap_run` escriben y borran las mismas entradas que el bucle por página, en el mismo orden. Recorren la jerarquía una vez por tabla de páginas. `DOMAIN_MAP` usa `map_run`; si falla, retira lo instalado con `unmap_run`, como antes. `withdraw_map_deferring` usa `unmap_run` e invalida con `invlpg` cada entrada presente cuando el espacio es el cargado, igual que antes.
+
+*La raíz cargada sin leer `CR3`.* `tlb::loaded_root` devuelve la raíz que `switch_space` registró. Solo lee `CR3` si el procesador todavía no cambió de espacio.
+
+*Cuarentena vacía.* `drain_quarantine` vuelve en cuanto el contador de la cuarentena es cero.
+
+**Autocomprobación.** No hay un registro nuevo. La puerta K3 ya lee el sello en `seal`: exige que lo acusen todos los procesadores en línea, que el escritor haya corrido en todos y que el sello retire al menos un escritor. Ese escenario tiene al escritor corriendo en otro procesador, así que la espera dirigida tiene que interrumpirlo y esperarlo. En `shootdown` la puerta lee los registros `mem.unmapped` y el resumen de invalidaciones, que no cambian de forma. En `probe` exige que la traducción retirada deje de funcionar, y esa retirada pasa ahora por `unmap_run`. La puerta K2 (`memory`) sigue exigiendo el orden retirada → sello. `mem.sealed` sigue nombrando `invalidation_generation`, `writer_cpu_mask` y `writer_cpus_ever`, de modo que un sello que no esperó a nadie se ve en el registro.
+
+**Diseñado, no medido.** Se busca bajar `k7.k6_mem_seal_16`, sobre todo por la espera, porque un sello en un dominio cuyo único procesador es el que sella ya no despierta a los procesadores parados. También se busca bajar `k7.k6_mem_map_64` por las recorridas y `k7.k6_mem_map_1` por la cuarentena y la lectura de `CR3`. Para una sola página, la recorrida por tabla no cambia nada. Es una hipótesis cuánto pesa cada parte. El mapa de 1 página está cerca de la paridad y su umbral pide salir de ella. Si el costo lo domina la creación del objeto (reservas de ámbito, puesta a cero) o la entrada al kernel, este cambio puede no alcanzar. Las cifras de K7 las mide el cierre.
+
+**Alternativas descartadas.** *No contar como acusados a los procesadores ociosos que conservan el espacio («TLB perezosa», como Linux):* en este kernel el hilo ocioso ya carga el espacio del kernel, así que un procesador ocioso no tiene el espacio de nadie. Además, contar como acusado a un procesador que conserva la traducción cambiaría lo que afirma el acuse. *Vaciar toda la TLB local por encima de un umbral de páginas en lugar de `invlpg` por página:* cuesta una escritura de `CR3` por retirada, y en esta plataforma el costo de los registros de control bajo KVM es justo lo que se está evitando. Ninguna medida dice dónde estaría el umbral. *Crear objetos sin poner sus páginas a cero:* el contrato cobra y entrega páginas a cero al crear el objeto, y eso cambiaría lo que el protocolo compara.
+
+**Consecuencias.** El sello ya no publica una generación propia: el registro nombra la generación de la última retirada del objeto. Si el objeto nunca se mapeó, nombra cero. Ninguna interfaz, estado ni orden de comprobación cambia. El sello sigue sin publicarse hasta que ningún procesador en línea pueda escribir por una traducción retirada, y una espera que se agota sigue dejando el objeto en `Sealing` con `DRAIN_INCOMPLETE`.
+
+**Revisión.** Si alguna ruta llegara a retirar un mapa de un objeto sin pasar por `withdraw_map_deferring`, el registro del objeto dejaría de cubrirla y el sello tendría que volver a esperar a todos. Si el cierre de K7 muestra que `mem.seal` no baja, hay que medir cuántos procesadores interrumpe el sello en la imagen de medida.
+
+**Referencias.** [Memoria](../architecture/memory.md), [Concurrencia](../architecture/concurrency.md), [ADR-010](ADR-010-k6-parameters-and-wake-policy.md), [la campaña de rendimiento](../evidence/k6-performance-campaign.md), [estado actual](../roadmap/current-state.md).

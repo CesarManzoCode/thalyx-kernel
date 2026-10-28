@@ -222,6 +222,22 @@ pub unsafe fn switch_space(cr3: u64, domain: usize) {
     }
 }
 
+/// The root the calling processor runs with.
+///
+/// The one it wrote last, kept by [`switch_space`]; `CR3` itself only before
+/// this processor has switched anywhere, when the record is still empty.
+#[must_use]
+pub fn loaded_root() -> u64 {
+    let me = crate::percpu::index();
+    if me >= MAX_CPUS {
+        return cpu::read_cr3();
+    }
+    match PROCESSORS[me].loaded.load(Ordering::Relaxed) {
+        0 => cpu::read_cr3(),
+        loaded => loaded,
+    }
+}
+
 /// Records that `cpu` participates in invalidation from now on.
 ///
 /// A processor is added only after it has flushed once, so it can never be
@@ -504,6 +520,66 @@ pub fn shootdown_space(domain: usize) -> Ack {
     ack.expected = online.count_ones();
     ack.live = live.count_ones();
     ack.interrupted = others.count_ones();
+    ack
+}
+
+/// Waits until no processor can still hold a translation that withdrawals up
+/// to `generation` removed, `cpus` being the processors that could have been
+/// holding one when each was withdrawn.
+///
+/// The question a seal asks about its object, answered with the set the
+/// withdrawals themselves recorded rather than with every online processor.
+/// Each withdrawal published its generation and then read the live set of the
+/// space it withdrew from, the order [`shootdown_space`] relies on, so a
+/// processor outside `cpus` either had left the space -- its `CR3` write
+/// retired every entry of it -- or entered after the publication and flushed
+/// on its way in. A processor inside `cpus` that has already flushed at
+/// `generation` holds nothing either, and is not interrupted to say so.
+/// `generation` zero means nothing was ever withdrawn, and nothing is waited
+/// for.
+///
+/// The claim is still about every online processor, and `acknowledged` counts
+/// all of them that hold none of the translations, however that was obtained.
+/// The caller must hold no lock.
+#[must_use]
+pub fn shootdown_withdrawn(cpus: u64, generation: u64) -> Ack {
+    let online = ONLINE.load(Ordering::SeqCst);
+    let expected = online.count_ones();
+    let candidates = cpus & online;
+    let settled = Ack {
+        generation,
+        acknowledged: expected,
+        expected,
+        live: candidates.count_ones(),
+        interrupted: 0,
+        spins: 0,
+        timed_out: false,
+    };
+    if generation == 0 || candidates == 0 {
+        return settled;
+    }
+    let me = crate::percpu::index();
+    if candidates & (1u64 << me) != 0 {
+        refresh_local();
+    }
+    let mut pending = 0u64;
+    for cpu in 0..MAX_CPUS {
+        let bit = 1u64 << cpu;
+        if cpu != me
+            && candidates & bit != 0
+            && PROCESSORS[cpu].seen.load(Ordering::Acquire) < generation
+        {
+            pending |= bit;
+        }
+    }
+    if pending == 0 {
+        return settled;
+    }
+    let mut ack = wait_for_mask(generation, pending);
+    ack.acknowledged += expected - pending.count_ones();
+    ack.expected = expected;
+    ack.live = candidates.count_ones();
+    ack.interrupted = pending.count_ones();
     ack
 }
 

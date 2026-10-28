@@ -306,6 +306,13 @@ impl FrameAllocator {
     /// invalidation module rather than supplied by the caller, so there is no
     /// argument to get wrong.
     pub fn drain_quarantine(&mut self) -> usize {
+        // Every contiguous allocation drains first, and the ordinary
+        // quarantine is empty: an object whose withdrawal was acknowledged
+        // went straight back to the pool. Walking the 1024 slots to find
+        // nothing was paid by every memory object created.
+        if self.quarantined == 0 {
+            return 0;
+        }
         let safe = crate::tlb::safe_generation();
         let mut released = 0usize;
         for index in 0..QUARANTINE_SLOTS {

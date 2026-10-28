@@ -184,14 +184,13 @@ pub fn map(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u6
 
     let base = machine.memories[object].base;
     let charged_before = machine.allocator().charged(Owner::Domain(target as u16)) as u64;
-    let mut installed = 0u32;
-    let mut failure = None;
-    for page in 0..u64::from(request.page_count) {
-        let frame = crate::mm::Frame::containing(
-            base.addr() + (u64::from(request.offset_pages) + page) * PAGE_SIZE,
-        );
-        let vaddr = request.vaddr + page * PAGE_SIZE;
-        let owner = Owner::Domain(target as u16);
+    // One walk of the hierarchy per page table rather than per page: the
+    // entries written are the ones the page-by-page loop wrote.
+    let first = crate::mm::Frame::containing(
+        base.addr() + u64::from(request.offset_pages) * PAGE_SIZE,
+    );
+    let installed = u64::from(request.page_count);
+    let failure = {
         let space = machine.domains[target]
             .space
             .as_mut()
@@ -200,21 +199,21 @@ pub fn map(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u6
             .memory
             .as_mut()
             .expect("frame allocator established");
-        match space.map(vaddr, frame, rights, allocator, owner) {
-            Ok(()) => installed += 1,
-            Err(error) => {
-                failure = Some(error);
-                break;
-            }
-        }
-    }
+        space
+            .map_run(
+                request.vaddr,
+                first,
+                installed,
+                rights,
+                allocator,
+                Owner::Domain(target as u16),
+            )
+            .err()
+    };
 
-    if let Some(error) = failure {
-        for page in 0..u64::from(installed) {
-            let vaddr = request.vaddr + page * PAGE_SIZE;
-            if let Some(space) = machine.domains[target].space.as_mut() {
-                space.unmap(vaddr);
-            }
+    if let Some((installed, error)) = failure {
+        if let Some(space) = machine.domains[target].space.as_mut() {
+            space.unmap_run(request.vaddr, installed, |_| {});
         }
         scope::release(owner_scope, Resource::Metadata, 1);
         scope::release(owner_scope, Resource::MemoryPages, MAP_TABLE_RESERVE);
@@ -280,7 +279,7 @@ pub fn map(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u6
         machine.memories[object].map_count
     );
     let _ = staging;
-    Ok(u64::from(installed))
+    Ok(installed)
 }
 
 /// Withdraws a mapping and its translations.

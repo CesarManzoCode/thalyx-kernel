@@ -337,26 +337,26 @@ pub fn withdraw_map_deferring(machine: &mut Machine, map_index: usize) -> (u32, 
         return (0, None);
     }
     let domain = record.domain as usize;
-    let active = cpu::read_cr3();
+    // The root this processor wrote last, which is the one it runs with: a
+    // read of `CR3` answered the same question at the cost of a control
+    // register access on every withdrawal.
+    let active = crate::tlb::loaded_root();
     let mut removed = 0;
     let current = machine.domains[domain]
         .space
         .as_ref()
         .is_some_and(|space| space.cr3() == active);
-    for page in 0..u64::from(record.pages) {
-        let vaddr = record.vaddr + page * PAGE_SIZE;
-        let Some(space) = machine.domains[domain].space.as_mut() else {
-            break;
-        };
-        if space.unmap(vaddr).is_some() {
-            removed += 1;
+    if let Some(space) = machine.domains[domain].space.as_mut() {
+        // One walk per page table; every entry that was present is
+        // invalidated here as it goes, as the page-by-page loop did.
+        removed = space.unmap_run(record.vaddr, u64::from(record.pages), |vaddr| {
             if current {
                 // SAFETY: the translation was just removed from the address
                 // space the CPU is running in, and invalidating it is exactly
                 // what makes the removal take effect.
                 unsafe { cpu::invlpg(vaddr) };
             }
-        }
+        }) as u32;
     }
     // The record names its object by table slot, and a slot is reused. The
     // generation is what says whether it still names the object the mapping was
@@ -527,9 +527,13 @@ fn describe(machine: &Machine, index: usize) -> MemoryInfo {
 /// promise rather than a bit. Removing the page-table entries stops the
 /// processor running this call; it does nothing about a processor that already
 /// has the translation cached, and that processor can write through it. So the
-/// seal is published after every online processor has acknowledged an
-/// invalidation newer than the withdrawal — not after a message was sent, and
-/// not after a snapshot of the processors that looked interested at the time.
+/// seal is published after every online processor holds no translation the
+/// withdrawals removed — not after a message was sent. The ones that could
+/// hold one are named by the withdrawals themselves, each of which read the
+/// live set of its space after publishing its generation; those acknowledge
+/// an invalidation at least that new, and every other processor had left
+/// the space, with the `CR3` write that retires all of it, or entered after
+/// the publication and flushed on the way in.
 ///
 /// This is why the operation owns its own locking: the acknowledgement cannot
 /// be waited for with the machine lock held, because the processors being
@@ -540,7 +544,7 @@ fn describe(machine: &Machine, index: usize) -> MemoryInfo {
 /// and the caller is told the drain is incomplete. Retrying is allowed and
 /// finishes the transition; declaring the bytes immutable is not.
 pub fn seal(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64> {
-    let (index, id, generation, withdrawn, pages, live, mask) = {
+    let (index, id, generation, withdrawn, pages, live, mask, withdrawn_at, withdrawn_cpus) = {
         let mut machine = MACHINE.write();
         let mut writers = [false; crate::state::MAX_DOMAINS];
         let cap = resolve(
@@ -621,11 +625,31 @@ pub fn seal(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
             }
             mask |= crate::tlb::space_mask(domain);
         }
-        (index, id, generation, withdrawn, pages, live, mask)
+        // Every withdrawal of a mapping of this object -- the ones just made
+        // and any earlier one, by an unmap, a revocation or a teardown --
+        // recorded its generation and the processors that could still hold
+        // its translations. That is the set the seal has to hear from.
+        let object = &machine.memories[index];
+        (
+            index,
+            id,
+            generation,
+            withdrawn,
+            pages,
+            live,
+            mask,
+            object.unmapped_at,
+            object.unmapped_cpus,
+        )
     };
 
-    // No lock is held here, which is the point.
-    let ack = crate::tlb::shootdown();
+    // No lock is held here, which is the point. The wait is for the
+    // processors the withdrawals recorded and not for every online one: a
+    // processor that never had a writable translation of these pages loaded,
+    // or has flushed since, holds nothing a writer could use, and an
+    // interrupt asking it to flush was a wake of a halted processor and a
+    // round trip for nothing.
+    let ack = crate::tlb::shootdown_withdrawn(withdrawn_cpus, withdrawn_at);
 
     let mut machine = MACHINE.write();
     if machine.memories[index].generation != generation
