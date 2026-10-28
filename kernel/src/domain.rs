@@ -359,25 +359,22 @@ fn build(
     for segment in &parsed.segments[..parsed.segment_count] {
         let rights = Rights::user(segment.read, segment.write, segment.execute);
         for page in 0..segment.pages() {
-            let frame = machine
-                .allocator()
-                .alloc(owner)
-                .map_err(|_| CreateError::OutOfMemory)?;
             let offset = (page * PAGE_SIZE) as usize;
             let remaining = segment.file_len.saturating_sub(offset);
             let copy_len = remaining.min(PAGE_SIZE as usize);
-            if copy_len > 0 {
-                let source =
-                    &image[segment.file_offset + offset..segment.file_offset + offset + copy_len];
-                // SAFETY: `frame` was just allocated, is zeroed, is mapped
-                // through the direct map and is not reachable from anywhere
-                // else. `source` is inside the module image, whose bounds the
-                // ELF reader already checked. The ranges cannot overlap: the
-                // frame is free memory and the image is loader memory.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(source.as_ptr(), frame.hhdm_ptr(), copy_len);
-                }
-            }
+            // The page's file bytes, or none past the end of the file: the
+            // ELF reader already checked these bounds against the image. The
+            // allocator copies them into the frame and zeroes only the rest,
+            // rather than zeroing the whole frame for the copy to overwrite.
+            let source = if copy_len > 0 {
+                &image[segment.file_offset + offset..segment.file_offset + offset + copy_len]
+            } else {
+                &[][..]
+            };
+            let frame = machine
+                .allocator()
+                .alloc_filled(owner, source)
+                .map_err(|_| CreateError::OutOfMemory)?;
             let space = machine.domains[index]
                 .space
                 .as_mut()

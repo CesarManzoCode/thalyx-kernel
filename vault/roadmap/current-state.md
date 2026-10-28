@@ -386,6 +386,25 @@ Implementado ([ADR-016](../decisions/ADR-016-quiet-idle-and-one-sweep-retirement
 
 Diseñado, no medido. Que las lecturas de los procesadores ociosos pesen en `scale` es una hipótesis. `scale.compute` con cuatro hilos y `scale.ipc` con cuatro pares no tienen procesadores ociosos, y no hay en este cambio un mecanismo dirigido a ellos. La distancia de `scale.compute` con Linux probablemente viene del tick de 2 kHz, que no se tocó. Un despertar que llega a un procesador ocioso después de un tick sin trabajo lo encuentra ahora parado y lo interrumpe; `kicks` en `sched.cpu_summary` dice cuánto. Las puertas K1–K6 y las pruebas de EXP-13 no se corrieron dentro de este mini sprint; las verifica el cierre de K7.
 
+### El motor residente (k7-07)
+
+Observado en el baseline: las razones nativo / `linux-nomitig` de K6 son 2,40 y 2,66 para `engine.load`, entre 1,097 y 1,105 para `engine.infer` con los prompts 0, 1 y 4, y 2,47 y 2,73 para `engine.cancel`. Observado en el código (`023028d`): el modelo de la fixture tiene dos capas y 64 de ancho, así que lo que rodea al cálculo pesa más que el cálculo. `memcpy` y `memset` de la libc nativa avanzaban ocho bytes por paso a cualquier tamaño, y `memmove` hacia atrás y `memcmp` byte a byte. Cada petición vacía unos 256 KiB de contexto con `memset`. `free` coalescía cada bloque para que `malloc` lo volviera a partir. `calloc` volvía a poner a cero memoria que el kernel acababa de entregar a cero. El motor calculaba el FNV del modelo entero aunque estuviera callado y no escribiera la nota. `domain::build` ponía a cero cada página de la imagen antes de copiarle encima los bytes del archivo.
+
+Implementado ([ADR-017](../decisions/ADR-017-resident-engine-libc-and-image-pages.md)), sin cambiar lo que el motor calcula, ninguna interfaz ni el contrato de memoria:
+
+- **Copias y rellenos.** `memcpy` y `memset` (`user/native/src/string.c`) usan `rep movsb` y `rep stosb` desde 256 bytes y dieciséis bytes por paso por debajo. `memmove` con el destino dentro del origen copia desde el final de ocho en ocho, y `memcmp` compara ocho bytes por paso mientras son iguales. Busca bajar `k7.k6_engine_infer_0`, `_1` y `_4`, `k7.k6_engine_cancel_0` y `k7.k6_engine_load_0`.
+- **Bloques pequeños conservados y `calloc` sobre memoria nueva.** `free` (`user/native/src/heap.c`) guarda hasta 64 bloques por tamaño, hasta 544 bytes, y `malloc` los devuelve enteros. Antes de crecer o de rechazar, los conservados vuelven a los bins. `bin_of` usa `clz`. `calloc` solo pone a cero los enlaces del bloque libre cuando el bloque sale de la parte todavía no repartida de la arena más nueva. Busca bajar `k7.k6_engine_infer_*` y `k7.k6_engine_cancel_0`, por el muestreo con gramática, y `k7.k6_engine_load_0`.
+- **El digest solo cuando se escribe.** `th_main` (`user/nengine/engine.cpp`) calcula el FNV del modelo solo si el motor no está callado. K5 recibe la misma nota y K6 no la recibía. Busca bajar `k7.k6_engine_load_0`.
+- **Páginas de imagen sin cero previo.** `FrameAllocator::alloc_filled` (`kernel/src/mm/frame.rs`) copia los bytes dados en el marco y pone a cero el resto. `domain::build` la usa para cada página de un segmento. Cada byte del marco se escribe antes de que sea alcanzable. Busca bajar `k7.k6_engine_load_0`, porque la imagen del motor mapea unas 1 200 páginas.
+
+Diseñado, no medido. No se sabe cuánto pesa cada parte. Este cambio no toca tres cosas:
+
+- Cada lectura del reloj sigue siendo una entrada al kernel.
+- La memoria del motor se pone a cero al crearla y no al tocarla.
+- El hilo del motor ligado a la petición cancelada sigue sujeto al presupuesto del ámbito que pregunta.
+
+Es una hipótesis que esas tres cosas sean lo que quede de `engine.load` y `engine.cancel`. La puerta K6 compara la respuesta del motor byte a byte en cada muestra, y es la que vería un cambio de resultado. Las puertas K1–K6 y las pruebas de EXP-13 no se corrieron dentro de este mini sprint; las verifica el cierre de K7.
+
 ## Reanudar aquí
 
 **Último hito terminado y pusheado:** **K6 completo en su alcance** —protocolos emparejados, campaña de referencia, EXP-12, ocho cuellos medidos y corregidos, parámetros V0 revisados, inventario físico, puerta K6— en la rama `feat/k6-comparison-hardening-reference`. K5 quedó completo en `feat/k5-thalyx-port-tools`.

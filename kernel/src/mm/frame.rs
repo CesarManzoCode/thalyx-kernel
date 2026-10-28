@@ -369,6 +369,19 @@ impl FrameAllocator {
     /// cannot reach another owner carrying residual bytes even if the releasing
     /// path was interrupted.
     pub fn alloc(&mut self, owner: Owner) -> Result<Frame, AllocError> {
+        self.alloc_filled(owner, &[])
+    }
+
+    /// Allocates one frame whose first bytes are `bytes` and whose rest is
+    /// zero, and charges it to `owner`.
+    ///
+    /// The same frame [`FrameAllocator::alloc`] would hand out with `bytes`
+    /// copied over it afterwards, without writing the copied part twice: an
+    /// image page is a whole page of copy, and zeroing it first was half of
+    /// what loading it cost. Every byte of the frame is still written before
+    /// the frame is reachable, so nothing a previous owner left survives.
+    pub fn alloc_filled(&mut self, owner: Owner, bytes: &[u8]) -> Result<Frame, AllocError> {
+        let copied = bytes.len().min(PAGE_SIZE as usize);
         if self.free == 0 {
             self.drain_quarantine();
         }
@@ -387,8 +400,14 @@ impl FrameAllocator {
                 let frame = Frame::containing((index as u64) * PAGE_SIZE);
                 // SAFETY: the frame was free, so no other owner holds a
                 // reference to it, and the direct map covers it because the
-                // bitmap only ever tracked frames below the map limit.
-                unsafe { core::ptr::write_bytes(frame.hhdm_ptr(), 0, PAGE_SIZE as usize) };
+                // bitmap only ever tracked frames below the map limit. `bytes`
+                // is the caller's memory, not a free frame, so the two ranges
+                // cannot overlap, and the two writes cover the page exactly.
+                unsafe {
+                    let page = frame.hhdm_ptr();
+                    core::ptr::copy_nonoverlapping(bytes.as_ptr(), page, copied);
+                    core::ptr::write_bytes(page.add(copied), 0, PAGE_SIZE as usize - copied);
+                }
                 return Ok(frame);
             }
             index += 1;

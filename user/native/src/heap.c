@@ -22,6 +22,19 @@
  * An aligned block is carved out of an ordinary one: the front part up to the
  * aligned address becomes a free block of its own, so what `free` receives is
  * always a pointer this allocator produced with a header in front of it.
+ *
+ * Small blocks that are freed are kept, up to a few dozen per size, on a list
+ * of their own and handed out again whole: a C++ program frees and allocates
+ * the same few sizes over and over, and coalescing a block only to split the
+ * same size off again is most of what such a pair costs. A kept block stays
+ * marked in use, so its neighbours do not coalesce with it, and the lists are
+ * given back to the bins before the heap grows or refuses: what a program can
+ * allocate is what it could without them.
+ *
+ * A new arena is zero -- the kernel hands out zeroed frames -- and the part of
+ * the newest one nothing has been carved from yet stays zero except for the
+ * free block's own header and links at its start. `calloc` does not clear
+ * that part again.
  */
 
 #include "thalyx/nrt.h"
@@ -56,6 +69,23 @@ static int heap_ready;
 static int heap_last_error;
 static int heap_lock;
 
+/* Bytes known to be zero: the newest arena from just past the links of the
+ * free block at its uncarved end, up to its fence. */
+static uint64_t fresh_lo;
+static uint64_t fresh_hi;
+/* Whether the last block `allocate` handed out came from that part. */
+static int carved_fresh;
+
+/* The kept small blocks, one list per block size from `MIN_BLOCK` up in
+ * `ALIGN` steps, threaded through the first word of each payload. */
+#define KEEP_CLASSES 32u
+#define KEEP_DEPTH   64u
+#define KEEP_MAX     (MIN_BLOCK + (KEEP_CLASSES - 1u) * ALIGN)
+
+static Block *kept[KEEP_CLASSES];
+static unsigned kept_count[KEEP_CLASSES];
+static uint64_t kept_total;
+
 static void enter(void)
 {
     unsigned spins = 0;
@@ -69,12 +99,13 @@ static void leave(void) { __atomic_store_n(&heap_lock, 0, __ATOMIC_RELEASE); }
 static uint64_t block_size(const Block *b) { return b->size_flags & ~(uint64_t)(ALIGN - 1); }
 static int block_inuse(const Block *b) { return (b->size_flags & FLAG_INUSE) != 0; }
 
+/* Bin 0 holds sizes below 32, bin `i` sizes in [2^(i+4), 2^(i+5)), and the
+ * last bin everything above. */
 static unsigned bin_of(uint64_t size)
 {
-    unsigned index = 0;
-    uint64_t bound = 32;
-    while (index + 1 < BINS && size >= bound) { bound <<= 1; index++; }
-    return index;
+    if (size < 32) { return 0; }
+    unsigned index = (unsigned)(63 - __builtin_clzll(size)) - 4u;
+    return index < BINS ? index : BINS - 1u;
 }
 
 static void bin_insert(Free *block)
@@ -146,6 +177,8 @@ static int grow(uint64_t want_bytes)
     publish_free(first, usable);
     Block *fence = (Block *)((uint8_t *)first + usable);
     fence->size_flags = FLAG_INUSE;       /* zero length, in use: walking stops */
+    fresh_lo = at + sizeof(Free);
+    fresh_hi = (uint64_t)(uintptr_t)fence;
     return 1;
 }
 
@@ -173,6 +206,12 @@ static void *carve(Free *block, uint64_t want)
         publish_free(rest, have - want);
         have = want;
     }
+    /* The payload past this block's links is zero if it lies in the fresh
+     * part; whatever was split off after it starts with a header and links of
+     * its own, and the fresh part starts past those. */
+    uint64_t at = (uint64_t)(uintptr_t)block;
+    carved_fresh = at + sizeof(Free) >= fresh_lo && at + have <= fresh_hi;
+    if (at + have + sizeof(Free) > fresh_lo) { fresh_lo = at + have + sizeof(Free); }
     block->header.size_flags = have | FLAG_INUSE;
     Block *after = (Block *)((uint8_t *)block + have);
     after->prev_size = have;
@@ -190,15 +229,49 @@ static void *find_fit(uint64_t want)
     return NULL;
 }
 
+static void release(void *p);
+
+/* Gives every kept block back to the bins, coalescing as `free` would have. */
+static void unkeep_all(void)
+{
+    for (unsigned index = 0; index < KEEP_CLASSES; index++) {
+        while (kept[index]) {
+            Block *block = kept[index];
+            __builtin_memcpy(&kept[index], (uint8_t *)block + HEADER, sizeof(Block *));
+            kept_count[index]--;
+            kept_total--;
+            heap_in_use += block_size(block);   /* `release` takes it off again */
+            release((uint8_t *)block + HEADER);
+        }
+    }
+}
+
 static void *allocate(size_t n)
 {
     if (!heap_ready) { th_heap_init(); }
     if (n == 0) { n = 1; }
     if (n > (size_t)1 << 40) { return NULL; }
+    carved_fresh = 0;
     uint64_t want = (n + HEADER + ALIGN - 1) & ~(uint64_t)(ALIGN - 1);
     if (want < MIN_BLOCK) { want = MIN_BLOCK; }
+    if (want <= KEEP_MAX) {
+        unsigned index = (unsigned)((want - MIN_BLOCK) / ALIGN);
+        Block *block = kept[index];
+        if (block) {
+            __builtin_memcpy(&kept[index], (uint8_t *)block + HEADER, sizeof(Block *));
+            kept_count[index]--;
+            kept_total--;
+            heap_in_use += want;
+            return (uint8_t *)block + HEADER;
+        }
+    }
     void *found = find_fit(want);
     if (found) { return found; }
+    if (kept_total) {
+        unkeep_all();
+        found = find_fit(want);
+        if (found) { return found; }
+    }
     if (!grow(want)) { return NULL; }
     return find_fit(want);
 }
@@ -245,6 +318,20 @@ void free(void *p)
 {
     if (p == NULL) { return; }
     enter();
+    Block *block = (Block *)((uint8_t *)p - HEADER);
+    uint64_t size = block_size(block);
+    if (size >= MIN_BLOCK && size <= KEEP_MAX) {
+        unsigned index = (unsigned)((size - MIN_BLOCK) / ALIGN);
+        if (kept_count[index] < KEEP_DEPTH) {
+            __builtin_memcpy(p, &kept[index], sizeof(Block *));
+            kept[index] = block;
+            kept_count[index]++;
+            kept_total++;
+            heap_in_use -= size;
+            leave();
+            return;
+        }
+    }
     release(p);
     leave();
 }
@@ -253,8 +340,14 @@ void *calloc(size_t count, size_t size)
 {
     uint64_t total = (uint64_t)count * (uint64_t)size;
     if (size != 0 && total / size != count) { errno = ENOMEM; return NULL; }
-    void *out = malloc((size_t)total);
-    if (out) { memset(out, 0, (size_t)total); }
+    enter();
+    void *out = allocate((size_t)total);
+    int fresh = carved_fresh;
+    leave();
+    if (out == NULL) { errno = ENOMEM; return NULL; }
+    /* Fresh memory is zero past the free block's links, which are the first
+     * sixteen bytes of the payload. */
+    memset(out, 0, fresh && total > 16 ? 16 : (size_t)total);
     return out;
 }
 

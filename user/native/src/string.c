@@ -17,39 +17,82 @@
 #include <ctype.h>
 #include <errno.h>
 
-void *memcpy(void *dst, const void *src, size_t n)
+/* Copies and fills of a few hundred bytes or more go through the string
+ * instructions: with fast strings, which every processor this target runs on
+ * has, `rep movsb` and `rep stosb` move a cache line per step where the loops
+ * below move one register. Shorter ones stay in sixteen-byte steps, because
+ * starting a string instruction costs about what such a loop takes to finish.
+ * The direction flag is clear on entry to any function, as the ABI requires.
+ *
+ * The loops are kept from being recognised as a copy or a fill and turned
+ * back into a call to the function they are in. */
+#define STRING_OPS_FROM 256u
+#define NO_PATTERNS __attribute__((optimize("no-tree-loop-distribute-patterns")))
+
+NO_PATTERNS void *memcpy(void *dst, const void *src, size_t n)
 {
     unsigned char *d = dst;
     const unsigned char *s = src;
-    while (n >= 8) { __builtin_memcpy(d, s, 8); d += 8; s += 8; n -= 8; }
+    if (n >= STRING_OPS_FROM) {
+        __asm__ volatile("rep movsb" : "+D"(d), "+S"(s), "+c"(n) : : "memory");
+        return dst;
+    }
+    while (n >= 16) { __builtin_memcpy(d, s, 16); d += 16; s += 16; n -= 16; }
+    if (n >= 8) { __builtin_memcpy(d, s, 8); d += 8; s += 8; n -= 8; }
     while (n--) { *d++ = *s++; }
     return dst;
 }
 
-void *memmove(void *dst, const void *src, size_t n)
+/* Forward when that cannot read a byte already overwritten, which is every
+ * case but a destination that starts inside the source. That one goes from
+ * the end, eight bytes at a time: each step reads its eight bytes before it
+ * writes them, and every byte it writes is above every byte left to read. */
+NO_PATTERNS void *memmove(void *dst, const void *src, size_t n)
 {
     unsigned char *d = dst;
     const unsigned char *s = src;
     if (d == s || n == 0) { return dst; }
-    if (d < s) { return memcpy(dst, src, n); }
+    if (d < s || (size_t)(d - s) >= n) { return memcpy(dst, src, n); }
     d += n; s += n;
+    while (n >= 8) {
+        uint64_t word;
+        d -= 8; s -= 8; n -= 8;
+        __builtin_memcpy(&word, s, 8);
+        __builtin_memcpy(d, &word, 8);
+    }
     while (n--) { *--d = *--s; }
     return dst;
 }
 
-void *memset(void *dst, int c, size_t n)
+NO_PATTERNS void *memset(void *dst, int c, size_t n)
 {
     unsigned char *d = dst;
     unsigned char v = (unsigned char)c;
-    uint64_t wide = 0x0101010101010101ull * v;
-    while (n >= 8) { __builtin_memcpy(d, &wide, 8); d += 8; n -= 8; }
+    if (n >= STRING_OPS_FROM) {
+        __asm__ volatile("rep stosb" : "+D"(d), "+c"(n) : "a"(v) : "memory");
+        return dst;
+    }
+    uint64_t wide[2];
+    wide[0] = wide[1] = 0x0101010101010101ull * v;
+    while (n >= 16) { __builtin_memcpy(d, wide, 16); d += 16; n -= 16; }
+    if (n >= 8) { __builtin_memcpy(d, wide, 8); d += 8; n -= 8; }
     while (n--) { *d++ = v; }
     return dst;
 }
 
-int memcmp(const void *a, const void *b, size_t n)
+/* Eight bytes at a time while they are equal; the first difference is then
+ * found byte by byte inside the word that has it, so the sign is the one the
+ * first differing byte gives. */
+NO_PATTERNS int memcmp(const void *a, const void *b, size_t n)
 {
     const unsigned char *x = a, *y = b;
+    while (n >= 8) {
+        uint64_t p, q;
+        __builtin_memcpy(&p, x, 8);
+        __builtin_memcpy(&q, y, 8);
+        if (p != q) { break; }
+        x += 8; y += 8; n -= 8;
+    }
     for (size_t i = 0; i < n; i++) {
         if (x[i] != y[i]) { return (int)x[i] - (int)y[i]; }
     }

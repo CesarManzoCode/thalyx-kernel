@@ -431,10 +431,15 @@ extern "C" int th_main(const th_config *config)
     // What the engine was given, named before anything reads it: the host
     // pinned these bytes, and the digest lets the weights this engine loaded
     // be matched to the host's copy without trusting anyone's say-so.
+    // The digest is computed only when its note is written: it reads every
+    // byte of the model one multiply at a time, inside the load a quiet run
+    // times, for a note that run does not write.
     say(K5_NOTE_ENGINE_MODEL_BYTES, config->bulk_bytes);
-    say(K5_NOTE_ENGINE_MODEL_DIGEST,
-            fnv(reinterpret_cast<const void *>(static_cast<uintptr_t>(TH_BULK_VADDR)),
-                static_cast<size_t>(config->bulk_bytes)));
+    if (!quiet) {
+        say(K5_NOTE_ENGINE_MODEL_DIGEST,
+                fnv(reinterpret_cast<const void *>(static_cast<uintptr_t>(TH_BULK_VADDR)),
+                    static_cast<size_t>(config->bulk_bytes)));
+    }
 
     const uint64_t started = th_now_ns();
     llama_backend_init();
