@@ -310,6 +310,21 @@ Ocho cuellos, cada uno medido antes y después, en [ADR-010](../decisions/ADR-01
 
 `tools/check_k6.py` decide 19 criterios desde los artefactos de la campaña y las cinco regresiones desde los veredictos canónicos, con autocomprobación de 27 daños. PASS sobre la campaña de referencia.
 
+## K7
+
+K7 optimiza lo que se puede verificar con una medida antes/después, contra el baseline de dos réplicas del árbol `1eacb11`. Las cifras de K7 las mide su cierre; esta sección dice qué se cambió y qué busca mover, no cuánto movió.
+
+### El puerto serie y el arranque (k7-01)
+
+Observado en el baseline y en [EXP-13](../evidence/exp13-k1-final.md): el kernel escribe cada registro por COM1 de forma síncrona y por sondeo, unos 15,6 µs por byte y 2,1 ms por registro bajo KVM; casi todo el arranque hasta `LINK_READY` es escritura de registros, y una transacción con publicación deja cinco registros en su ventana en la imagen de medida.
+
+Implementado, [ADR-011](../decisions/ADR-011-serial-bursts-and-measurement-notes.md):
+
+- **Ráfagas de FIFO.** `Uart::init` lee `IIR` y confirma la FIFO del 16550; `Uart::write_burst` lee el estado de línea una vez por cada dieciséis bytes en lugar de una por byte, o una por byte si la FIFO no se confirmó. `diag` reúne cada registro en un búfer de 256 bytes antes de enviarlo, para que los fragmentos de `write!` no empiecen cada uno con su sondeo. Mismos bytes en el cable, mismo formato `THLX1`, el registro sigue en el cable antes de que su escritor vuelva, la ruta de pánico sigue byte a byte. `diag.summary` añade al final `burst=<n>`, que es la autocomprobación del mecanismo: dice si el arranque escribió por ráfagas. Busca bajar `k7.serial_ns_per_byte` y, con él, `k7.boot_guest_ms` y `k7.boot_host_s`.
+- **Notas por transacción solo en la imagen de medida.** La feature `quiet-io` de `k4store` calla también `EFFECT_ADMITTED`, `PUBLISHED` y `ROOT_HEAD` por publicación, y una feature `quiet-io` nueva de `k5super` calla `AUDIT_EFFECT` por recibo; `tools/build_image.py --k4-io-notes off` activa las tres. Las imágenes de las puertas K4 y K5 no la llevan y conservan esas notas; `WORK_OPENED` (`0x510a`) y la nota de control (`0x510e`) no se tocan, y el total `AUDIT_EFFECTS` sigue en el log. Busca bajar `k7.tx_serial_records`.
+
+Diseñado, no medido: la escritura en QEMU sigue costando una llamada al sistema por byte en el anfitrión, así que la reducción por byte esperada es menor que la mitad. Las puertas K1–K6 y las pruebas de EXP-13 no se corrieron dentro de este mini sprint; las verifica el cierre de K7.
+
 ## Reanudar aquí
 
 **Último hito terminado y pusheado:** **K6 completo en su alcance** —protocolos emparejados, campaña de referencia, EXP-12, ocho cuellos medidos y corregidos, parámetros V0 revisados, inventario físico, puerta K6— en la rama `feat/k6-comparison-hardening-reference`. K5 quedó completo en `feat/k5-thalyx-port-tools`.

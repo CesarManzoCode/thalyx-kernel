@@ -11,6 +11,12 @@ publish = false
 name = "k5super"
 path = "src/main.rs"
 
+[features]
+# Silences the note written per effect receipt drained, as k4store's and
+# k4disk's `quiet-io` do for theirs. Only the measurement image
+# (`--k4-io-notes off`) has it. See `audit.rs`.
+quiet-io = []
+
 [dependencies]
 thalyx-abi.workspace = true
 thalyx-user-rt.workspace = true

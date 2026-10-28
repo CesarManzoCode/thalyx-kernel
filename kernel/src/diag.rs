@@ -22,7 +22,10 @@
 //! emulator whose port I/O is a function call that is small; under KVM every
 //! byte is a trip out of the guest, and the first KVM runs spent most of their
 //! time here. A cost that decides how long a run takes is a cost the run should
-//! report, so [`summary`] does.
+//! report, so [`summary`] does. It also states `burst`, the bytes written per
+//! status poll: a record is gathered and sent in transmit-FIFO bursts, one
+//! poll per sixteen bytes on a 16550A instead of one per byte. Still polled,
+//! still synchronous: a record is on the wire before its writer returns.
 //!
 //! Records come in two classes. A **trace** record says that one operation or
 //! one object happened: an admission, a mapping, a derivation, a migration, a
@@ -83,18 +86,61 @@ struct Withheld(AtomicU64);
 static WITHHELD: [Withheld; crate::limits::MAX_CPUS] =
     [const { Withheld(AtomicU64::new(0)) }; crate::limits::MAX_CPUS];
 
-/// A writer that counts what it writes, so the plane's cost is the bytes it
-/// actually sent and not an estimate from the format string.
+/// Bytes of a record gathered before they go to the port: a multiple of the
+/// 16550A FIFO, and longer than the records the kernel writes, so a record is
+/// one sequence of full bursts instead of one poll per formatting fragment.
+const RECORD_BUFFER: usize = 256;
+
+/// A writer that gathers a record and counts what it sends, so the plane's
+/// cost is the bytes it actually sent and not an estimate from the format
+/// string.
+///
+/// `write!` hands the record over in fragments of a few bytes; sent as they
+/// came, each fragment would start with its own status poll. Gathered, the
+/// port sees full FIFO bursts ([`Uart::write_burst`]). The bytes on the wire
+/// are the same, newlines expanded to CRLF as [`Uart::write_str`] does.
 struct Counted {
     uart: Uart,
     bytes: u64,
+    buffer: [u8; RECORD_BUFFER],
+    len: usize,
+}
+
+impl Counted {
+    fn new(uart: Uart) -> Self {
+        Self {
+            uart,
+            bytes: 0,
+            buffer: [0; RECORD_BUFFER],
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, byte: u8) {
+        if self.len == RECORD_BUFFER {
+            self.flush();
+        }
+        self.buffer[self.len] = byte;
+        self.len += 1;
+    }
+
+    /// Sends what is gathered. A record is complete on the wire when this
+    /// returns: the plane stays synchronous.
+    fn flush(&mut self) {
+        self.uart.write_burst(&self.buffer[..self.len]);
+        self.bytes += self.len as u64;
+        self.len = 0;
+    }
 }
 
 impl Write for Counted {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        // `Uart::write_str` expands every newline to two bytes.
-        self.bytes += s.len() as u64 + s.bytes().filter(|&byte| byte == b'\n').count() as u64;
-        self.uart.write_str(s);
+        for byte in s.bytes() {
+            if byte == b'\n' {
+                self.push(b'\r');
+            }
+            self.push(byte);
+        }
         Ok(())
     }
 }
@@ -143,7 +189,7 @@ pub fn emit_event(name: &str, fields: core::fmt::Arguments<'_>) {
     sink.seq += 1;
     let Some(uart) = sink.uart else { return };
     let started = cpu::rdtsc();
-    let mut out = Counted { uart, bytes: 0 };
+    let mut out = Counted::new(uart);
     let _ = write!(out, "{FORMAT} kernel {seq} ");
     match crate::time::monotonic_ns() {
         Some(ns) => {
@@ -156,6 +202,7 @@ pub fn emit_event(name: &str, fields: core::fmt::Arguments<'_>) {
     let _ = write!(out, " {name}");
     let _ = write!(out, " {fields}");
     let _ = out.write_str("\n");
+    out.flush();
     sink.bytes += out.bytes;
     sink.cycles += cpu::rdtsc().wrapping_sub(started);
 }
@@ -190,11 +237,19 @@ pub fn stats() -> (u64, u64, u64) {
     (sink.seq - sink.first, sink.bytes, sink.cycles)
 }
 
+/// Bytes the port takes per status poll: the transmit FIFO depth the UART
+/// confirmed at boot, or one.
+#[must_use]
+pub fn burst() -> u8 {
+    SINK.lock().uart.map_or(1, |uart| uart.burst())
+}
+
 /// States what the plane cost over the run, in the kernel's own counts.
 ///
 /// The record itself is not included in the numbers it reports.
 pub fn summary() {
     let (records, bytes, cycles) = stats();
+    let burst = burst();
     let hz = crate::time::hz();
     let ns = if hz == 0 {
         0
@@ -208,7 +263,8 @@ pub fn summary() {
     crate::event!(
         "diag.summary",
         "records={records} bytes={bytes} write_cycles={cycles} write_ns={ns} tsc_hz={hz} \
-         port=com1 mode=polled_synchronous trace={} trace_withheld={withheld}",
+         port=com1 mode=polled_synchronous trace={} trace_withheld={withheld} \
+         burst={burst}",
         if trace_enabled() { "on" } else { "off" }
     );
 }

@@ -375,8 +375,9 @@ def main() -> int:
     parser.add_argument("--trace", default="on", choices=["on", "off"],
                         help="K5 only: off marks the supervisor TRACE_OFF, as the K6 package is")
     parser.add_argument("--k4-io-notes", default="on", choices=["on", "off"],
-                        help="thalyx stage only: off builds k4disk and k4store with quiet-io, "
-                             "which drops their per-operation notes; K4's gate reads them")
+                        help="thalyx stage only: off builds k4disk, k4store and k5super with "
+                             "quiet-io, which drops their per-operation and per-publication "
+                             "notes; the K4 and K5 gates read them")
     parser.add_argument("--name", default=None,
                         help="name of the stage directory and image under build/ "
                              "(default thalyx-<phase>), so one phase can have two images")
@@ -425,6 +426,7 @@ def main() -> int:
         if arguments.k4_io_notes == "off":
             program_features["k4store"].append("quiet-io")
             program_features["k4disk"] = ["quiet-io"]
+            program_features["k5super"] = ["quiet-io"]
     for program in programs:
         cargo_build(f"thalyx-user-{program}", KERNEL_TARGET, arguments.profile,
                     program_features.get(program))

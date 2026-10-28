@@ -911,7 +911,7 @@ impl Service {
             self.store.refusals += 1;
             return refused(store_status::EFFECT_REFUSED);
         }
-        k2::note(note::EFFECT_ADMITTED, invocation);
+        state::publication_note(note::EFFECT_ADMITTED, invocation);
         // Before the publication: this one says the service began something,
         // which is what the effect admission covers and what a reader needs to
         // see a publication that did not finish.

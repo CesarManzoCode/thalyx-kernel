@@ -15,6 +15,8 @@ status: designed
 
 El plano de diagnóstico distingue, desde K6, registros de **traza** —uno por operación u objeto— y de **resumen** —qué es el kernel, qué encontró al arrancar, qué falló, qué anotó un programa y qué sumó todo al final—. Un paquete que mide pide solo los resúmenes, con una bandera en su módulo supervisor, y el resumen final dice cuántos registros de traza se retuvieron; los paquetes de las puertas K1–K5 reciben las dos clases. Es la forma concreta de «puede perder eventos y debe declararlo»: bajo KVM un registro costaba tanto como mil de las operaciones que describía, y una medida tomada con la traza puesta era una medida de la traza. [ADR-010](../decisions/ADR-010-k6-parameters-and-wake-policy.md).
 
+Desde K7 el plano sigue siendo síncrono y por sondeo, pero no sondea por byte: el kernel confirma la FIFO del 16550 al arrancar, reúne cada registro y lo envía en ráfagas de dieciséis bytes por lectura de estado; sin FIFO confirmada, un byte por lectura como antes. Los bytes en el cable no cambian y `diag.summary` declara `burst=<n>`. La imagen que solo mide (`--k4-io-notes off`) calla además las notas por publicación de `k4store` y la nota por efecto auditado del supervisor; las puertas que las leen corren otras imágenes. [ADR-011](../decisions/ADR-011-serial-bursts-and-measurement-notes.md).
+
 No se denomina «auditado» a una operación solo porque había un ring buffer al que se intentó escribir.
 
 ## Recibos de control

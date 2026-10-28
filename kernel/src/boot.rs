@@ -80,7 +80,7 @@ fn modules() -> &'static [BootModule] {
 /// described in `boot/protocol`: a direct map at [`HHDM_BASE`], the kernel image
 /// mapped at its link addresses, a valid stack, and interrupts masked.
 pub unsafe fn start(bootinfo_phys: u64) -> ! {
-    let uart = Uart::new(COM1);
+    let mut uart = Uart::new(COM1);
     // SAFETY: the loader has already finished with the port and handed it over.
     unsafe { uart.init() };
 

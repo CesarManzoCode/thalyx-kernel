@@ -57,7 +57,7 @@ pub fn drain(log: u64, audit: &mut Audit) {
             audit.drained += 1;
             if record.kind == receipt_kind::EFFECT {
                 audit.effects += 1;
-                k2::note(note::AUDIT_EFFECT, record.object_id);
+                effect_note(record.object_id);
             }
             through = record.sequence;
         }
@@ -88,4 +88,17 @@ pub fn report(audit: &Audit) {
         u64::from(audit.high_water) | (audit.gaps << 32),
     );
     k2::note(note::AUDIT_LOST, u64::from(audit.lost));
+}
+
+/// The note written per effect receipt drained. `quiet-io` silences it for the
+/// package that only measures (`--k4-io-notes off`), where it was one
+/// synchronous serial record inside every transaction and no gate reads the
+/// log; the count still reaches the log in [`report`]'s `AUDIT_EFFECTS`. The
+/// K5 gate reads the per-effect note, so every package it runs keeps it.
+/// Placed last so that adding it moved no line above it.
+#[inline(always)]
+fn effect_note(object_id: u64) {
+    if cfg!(not(feature = "quiet-io")) {
+        k2::note(note::AUDIT_EFFECT, object_id);
+    }
 }

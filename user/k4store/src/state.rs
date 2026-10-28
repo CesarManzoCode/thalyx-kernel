@@ -1741,8 +1741,8 @@ impl Store {
             self.principals[slot].pending_sequence = 0;
         }
         self.pending = Pending::default();
-        k2::note(note::PUBLISHED, new_generation);
-        k2::note(note::ROOT_HEAD, root_head(&candidate_root));
+        publication_note(note::PUBLISHED, new_generation);
+        publication_note(note::ROOT_HEAD, root_head(&candidate_root));
 
         let after = self.fault_at(fault_point::AFTER_COMMIT, 0);
         Ok((new_generation, after))
@@ -1998,6 +1998,20 @@ pub fn root_head(digest: &[u8; 32]) -> u64 {
 /// adding it moved no line above it.
 #[inline(always)]
 fn record_note(kind: u64, value: u64) {
+    if cfg!(not(feature = "quiet-io")) {
+        k2::note(kind, value);
+    }
+}
+
+/// The notes written per publication: the effect admitted, the generation
+/// published and its root head. `quiet-io` silences them too, for the package
+/// that only measures (`--k4-io-notes off`): there each was one synchronous
+/// serial record inside every transaction, and no gate reads that image's
+/// log. The K4 and K5 gates read them, so every package they run keeps them.
+/// Refusals, recovery and the root head adopted at recovery are noted either
+/// way. Placed last so that adding it moved no line above it.
+#[inline(always)]
+pub(crate) fn publication_note(kind: u64, value: u64) {
     if cfg!(not(feature = "quiet-io")) {
         k2::note(kind, value);
     }
