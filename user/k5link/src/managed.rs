@@ -103,9 +103,13 @@ pub struct Entry {
     pub shape: u32,
     pub len: u64,
     pub k4: [u8; 32],
-    /// Where the object's bytes are in the pending arena while it is not yet
-    /// durable. Meaningless once `durable` is set.
+    /// Where the object's bytes are in the arena, while `cached` says they
+    /// are there.
     pub pending_at: u32,
+    /// The arena holds the object's bytes at `pending_at`. Always set while
+    /// the object is not durable; once it is, a copy K4 already holds that
+    /// the arena may drop when it needs the room.
+    pub cached: bool,
 }
 
 impl Entry {
@@ -118,6 +122,7 @@ impl Entry {
         len: 0,
         k4: [0; 32],
         pending_at: 0,
+        cached: false,
     };
 }
 
@@ -277,6 +282,14 @@ struct Buffers {
 /// bytes here until a commit makes them durable, and serves them from here.
 /// Nothing is written to the medium for it: the only writes stay the root
 /// commits, which a fenced work's grant cannot make.
+///
+/// A commit does not empty the arena. What it holds of durable objects stays
+/// as a copy, and an object read back from K4 is copied in, so a `get` of
+/// something already read or put costs no call to K4: objects are named by
+/// content and never change, so the copy is the object. The copies are what
+/// the arena gives up first: when a `put` needs room, `make_room` drops them
+/// all and slides the objects that are not yet durable to the front, so a
+/// `put` is refused only when those alone fill it, as before.
 pub const PENDING_BYTES: usize = 1024 * 1024;
 
 static mut PENDING: [u8; PENDING_BYTES] = [0; PENDING_BYTES];
@@ -285,6 +298,139 @@ static mut PENDING: [u8; PENDING_BYTES] = [0; PENDING_BYTES];
 fn pending() -> &'static mut [u8; PENDING_BYTES] {
     // SAFETY: as `buffers`.
     unsafe { &mut *(&raw mut PENDING) }
+}
+
+const NO_BINDING: Binding = Binding {
+    name: [0; 32],
+    name_len: 0,
+    child_type: 0,
+    flags: 0,
+    length: 0,
+    digest: [0; 32],
+};
+
+/// K4 objects a root commit may name without staging them again.
+pub const KNOWN_MAX: usize = 128;
+
+/// What this link knows to be in the closure of K4's published root.
+///
+/// A root commit re-encodes every tree and blob of the root, and most of them
+/// are byte for byte what the published root already holds: the lines no
+/// request touched, the levels of `O` before the first new object, the chunks
+/// of `X` before the first new entry. K4 names objects by content, so this
+/// link computes each digest itself, and one the published closure already
+/// holds is neither staged again nor bound again: K4's `WRITE` and the trees
+/// above only need the object to be in the store, and what the published
+/// root reaches is, through a compaction too. Only the root just published
+/// is trusted: each successful commit replaces what is known with what it
+/// named, and a publication whose outcome is not a plain `OK` forgets it all,
+/// so the next commit stages and binds everything, as every commit did.
+struct Published {
+    /// Objects the published root reaches, staged or reused by its commit.
+    known: [[u8; 32]; KNOWN_MAX],
+    known_count: usize,
+    /// What the commit in progress stages or reuses; `known` once published.
+    next: [[u8; 32]; KNOWN_MAX],
+    next_count: usize,
+    /// Names the published root binds, with the digest each one binds.
+    root: [Binding; FANOUT],
+    root_count: usize,
+    /// Objects a root commit named without staging them again, and root
+    /// names it left bound instead of binding again.
+    stages_reused: u64,
+    binds_reused: u64,
+}
+
+/// How many stages and binds root commits have reused so far.
+pub fn reuse_counts() -> (u64, u64) {
+    let published = published();
+    (published.stages_reused, published.binds_reused)
+}
+
+impl Published {
+    fn holds(&self, digest: &[u8; 32]) -> bool {
+        self.known[..self.known_count].contains(digest)
+    }
+
+    /// Records an object the commit in progress names. One that does not fit
+    /// is simply not remembered: the next commit stages it again.
+    fn named(&mut self, digest: [u8; 32]) {
+        if self.next_count < KNOWN_MAX && !self.next[..self.next_count].contains(&digest) {
+            self.next[self.next_count] = digest;
+            self.next_count += 1;
+        }
+    }
+
+    fn binds(&self, binding: &Binding) -> bool {
+        self.root[..self.root_count].contains(binding)
+    }
+
+    fn begin(&mut self) {
+        self.next_count = 0;
+    }
+
+    /// The commit in progress was published, naming `root`.
+    fn publish(&mut self, root: &[Binding]) {
+        self.known = self.next;
+        self.known_count = self.next_count;
+        self.next_count = 0;
+        self.root[..root.len()].copy_from_slice(root);
+        self.root_count = root.len();
+    }
+
+    fn forget(&mut self) {
+        self.known_count = 0;
+        self.next_count = 0;
+        self.root_count = 0;
+    }
+
+    /// What a recovery read back: the root's names, and the objects they
+    /// bind, which the published root reaches.
+    fn recovered(&mut self, root: &[Binding]) {
+        self.forget();
+        for binding in root {
+            self.named(binding.digest);
+        }
+        self.publish(root);
+    }
+}
+
+/// Stages an object for a root commit, or, with `reuse`, names it without a
+/// call when the published closure already holds it.
+fn put_staged(
+    store: &mut Store,
+    object_type: u32,
+    bytes: &[u8],
+    reuse: bool,
+) -> Option<[u8; 32]> {
+    if !reuse {
+        return store.put_object(object_type, bytes);
+    }
+    let digest = k4::object_digest(object_type, bytes);
+    if published().holds(&digest) {
+        published().stages_reused += 1;
+    } else if store.put_object(object_type, bytes)? != digest {
+        return None;
+    }
+    published().named(digest);
+    Some(digest)
+}
+
+static mut PUBLISHED: Published = Published {
+    known: [[0; 32]; KNOWN_MAX],
+    known_count: 0,
+    next: [[0; 32]; KNOWN_MAX],
+    next_count: 0,
+    root: [NO_BINDING; FANOUT],
+    root_count: 0,
+    stages_reused: 0,
+    binds_reused: 0,
+};
+
+#[allow(clippy::deref_addrof)]
+fn published() -> &'static mut Published {
+    // SAFETY: as `buffers`.
+    unsafe { &mut *(&raw mut PUBLISHED) }
 }
 
 static mut BUFFERS: Buffers = Buffers {
@@ -312,7 +458,10 @@ pub struct Managed {
     pub k4_facet: u64,
     pub stage_cap: u64,
     pub store_calls: u64,
-    /// Bytes of the pending arena in use; zero again after a root commit.
+    /// `get`s and tree checks of a durable object served from the arena's
+    /// copy instead of read back from K4.
+    pub reads_cached: u64,
+    /// Bytes of the arena in use: objects not yet durable, and copies.
     pub pending_used: usize,
 }
 
@@ -368,6 +517,7 @@ impl Managed {
             k4_facet,
             stage_cap,
             store_calls: 0,
+            reads_cached: 0,
             pending_used: 0,
         }
     }
@@ -397,22 +547,68 @@ impl Managed {
     }
 
     // -- blobs: Thalyx objects as K4 objects -----------------------------------
-    /// Reads an object back into `out`: from the pending arena while it is
-    /// not yet durable, from K4 once a root commit has made it so.
-    fn load_blob(&mut self, principal: u32, entry: &Entry, out: &mut [u8]) -> Option<usize> {
-        if !entry.durable {
+    /// Reads the object at `found` in the index back into `out`: from the
+    /// arena while it holds the bytes -- always, while the object is not yet
+    /// durable -- and otherwise from K4, keeping a copy in the arena.
+    fn load_blob(&mut self, principal: u32, found: usize, out: &mut [u8]) -> Option<usize> {
+        let entry = self.index[found];
+        let len = entry.len as usize;
+        if entry.cached || !entry.durable {
             let at = entry.pending_at as usize;
-            let len = entry.len as usize;
-            if at + len > self.pending_used || len > out.len() {
+            if !entry.cached || at + len > self.pending_used || len > out.len() {
                 return None;
             }
             out[..len].copy_from_slice(&pending()[at..at + len]);
+            if entry.durable {
+                self.reads_cached += 1;
+            }
             return Some(len);
         }
         let mut store = self.store(principal);
         let result = load_blob_with(&mut store, &entry.k4, entry.shape, entry.len, out, 0);
         self.account(&store);
+        if result == Some(len) && self.make_room(len) {
+            let at = self.pending_used;
+            pending()[at..at + len].copy_from_slice(&out[..len]);
+            self.pending_used += len;
+            self.index[found].pending_at = at as u32;
+            self.index[found].cached = true;
+        }
         result
+    }
+
+    /// Whether the arena has `len` bytes free, after dropping every copy of a
+    /// durable object if it did not. The objects not yet durable keep their
+    /// bytes and their order, slid to the front.
+    fn make_room(&mut self, len: usize) -> bool {
+        if self.pending_used + len <= PENDING_BYTES {
+            return true;
+        }
+        let mut order: [usize; MAX_INDEX] = [0; MAX_INDEX];
+        let mut count = 0usize;
+        for (index, entry) in self.index.iter_mut().enumerate() {
+            if !entry.live || !entry.cached {
+                continue;
+            }
+            if entry.durable {
+                entry.cached = false;
+            } else {
+                order[count] = index;
+                count += 1;
+            }
+        }
+        order[..count].sort_unstable_by_key(|index| self.index[*index].pending_at);
+        let mut to = 0usize;
+        for index in &order[..count] {
+            let entry = &mut self.index[*index];
+            let at = entry.pending_at as usize;
+            let bytes = entry.len as usize;
+            pending().copy_within(at..at + bytes, to);
+            entry.pending_at = to as u32;
+            to += bytes;
+        }
+        self.pending_used = to;
+        self.pending_used + len <= PENDING_BYTES
     }
 
     // -- the K4 root ---------------------------------------------------------
@@ -454,7 +650,8 @@ impl Managed {
             let entry = self.index[*index];
             level[slot] = (entry.k4, entry.shape, entry.len);
         }
-        let objects = tree_of_level(store, &mut level, count)?;
+        published().begin();
+        let objects = tree_of_level(store, &mut level, count, true)?;
 
         // X: the index itself, so the mapping survives this run.
         let encoded = {
@@ -476,7 +673,7 @@ impl Managed {
         };
         let index_blob = {
             let object = &buffers().object;
-            store_blob_with(store, &object[..encoded]).ok_or(store_status::EXHAUSTED)?
+            store_blob_with(store, &object[..encoded], true).ok_or(store_status::EXHAUSTED)?
         };
 
         // One tree per line, then the root.
@@ -509,7 +706,8 @@ impl Managed {
             if history_len != 0 {
                 let history = {
                     let object = &buffers().object;
-                    store_blob_with(store, &object[..history_len]).ok_or(store_status::EXHAUSTED)?
+                    store_blob_with(store, &object[..history_len], true)
+                        .ok_or(store_status::EXHAUSTED)?
                 };
                 members[member_count] =
                     Binding::new(b"H", history.1, 0, history_len as u64, history.0)
@@ -531,7 +729,7 @@ impl Managed {
             if evidence_len != 0 {
                 let evidence = {
                     let object = &buffers().object;
-                    store_blob_with(store, &object[..evidence_len])
+                    store_blob_with(store, &object[..evidence_len], true)
                         .ok_or(store_status::EXHAUSTED)?
                 };
                 members[member_count] =
@@ -551,7 +749,7 @@ impl Managed {
             // are not sorted, and `H`, `E`, `R` in the order they were built is
             // not -- which went unseen until a line first kept evidence.
             members[..member_count].sort_unstable_by(|a, b| name_of(a).cmp(name_of(b)));
-            let (line_tree, line_len) = stage_tree(store, &members[..member_count])?;
+            let (line_tree, line_len) = stage_tree(store, &members[..member_count], true)?;
             let mut name = [0u8; 25];
             name[0] = b'L';
             for (index, byte) in line_id(line_index).iter().enumerate() {
@@ -568,10 +766,16 @@ impl Managed {
         root[..root_count].sort_unstable_by(|a, b| name_of(a).cmp(name_of(b)));
 
         // K4: fork the published root, bind, freeze, publish with CAS on the
-        // K4 generation. Everything above was staged and is in the closure.
+        // K4 generation. Everything above was staged, or is in the published
+        // closure, and the fork already binds what the published root binds,
+        // so a name whose binding has not changed is not bound again.
         let generation = self.backing.k4_generation;
         let workspace = store.fork(generation).ok_or(store.last_status)?;
         for binding in &root[..root_count] {
+            if published().binds(binding) {
+                published().binds_reused += 1;
+                continue;
+            }
             if store
                 .bind(workspace, name_of(binding), binding.digest)
                 .is_none()
@@ -608,8 +812,9 @@ impl Managed {
                     }
                 }
                 // Every live object is now reachable from the published root,
-                // so K4 serves all of them and the arena holds nothing needed.
-                self.pending_used = 0;
+                // so K4 serves all of them; what the arena holds of them stays
+                // as copies, which `make_room` drops when a `put` needs room.
+                published().publish(&root[..root_count]);
                 // The other arena is where the next root goes once this one
                 // is nearly full; asking for it early is what keeps a
                 // publication from meeting the reserve.
@@ -621,6 +826,7 @@ impl Managed {
                 Ok(())
             }
             Answer::Reply(reply) => {
+                published().forget();
                 if reply.status == store_status::CONFLICT
                     || reply.status == store_status::SEQUENCE_GAP
                 {
@@ -629,8 +835,14 @@ impl Managed {
                 }
                 Err(reply.status)
             }
-            Answer::Outcome(_) => Err(store_status::UNAVAILABLE),
+            Answer::Outcome(_) => {
+                // Whether K4 published is what nobody can say, so nothing is
+                // known about its published root any more.
+                published().forget();
+                Err(store_status::UNAVAILABLE)
+            }
             Answer::Gone(code) => {
+                published().forget();
                 if code == thalyx_abi::status::SCOPE_CLOSED {
                     Err(u32::MAX)
                 } else {
@@ -703,6 +915,7 @@ impl Managed {
         self.account(&store);
         self.learn_sequences();
         if query.generation == 0 {
+            published().recovered(&[]);
             return true;
         }
         let mut store = Store::new(self.k4_facet, self.stage_cap);
@@ -836,6 +1049,8 @@ impl Managed {
         // The receipt of each line is the one its evidence and history name;
         // the index knows every receipt, and the last one bound is `R`.
         k2::note(note::INDEX_REBUILT, objects);
+        // What the root read back binds is what the next commit's fork binds.
+        published().recovered(&bindings[..count]);
         true
     }
 
@@ -965,7 +1180,7 @@ impl Managed {
                     // Refused before anything is staged, so a full arena costs
                     // the client a retry after a publication and costs K4
                     // nothing.
-                    if self.pending_used + len > PENDING_BYTES {
+                    if !self.make_room(len) {
                         return refuse(
                             &mut writer,
                             b"unwritable",
@@ -975,7 +1190,7 @@ impl Managed {
                     let stored = {
                         let object = &buffers().object;
                         let mut store = self.store(principal);
-                        let stored = store_blob_with(&mut store, &object[..len]);
+                        let stored = store_blob_with(&mut store, &object[..len], false);
                         self.account(&store);
                         stored
                     };
@@ -996,6 +1211,7 @@ impl Managed {
                         len: len as u64,
                         k4,
                         pending_at: pending_at as u32,
+                        cached: true,
                     }) {
                         return refuse(&mut writer, b"unwritable", b"this store's index is full");
                     }
@@ -1022,7 +1238,7 @@ impl Managed {
                 let entry = self.index[found];
                 let loaded = {
                     let out = &mut buffers().object;
-                    self.load_blob(principal, &entry, out)
+                    self.load_blob(principal, found, out)
                 };
                 let Some(len) = loaded else {
                     return refuse(
@@ -1189,7 +1405,7 @@ impl Managed {
         }
         let loaded = {
             let out = &mut buffers().object;
-            self.load_blob(principal, &entry, out)
+            self.load_blob(principal, found, out)
         };
         let Some(len) = loaded else {
             return Err(b"the candidate's tree could not be read back");
@@ -1653,11 +1869,11 @@ fn refuse(writer: &mut Writer<'_>, word: &[u8], message: &[u8]) -> Option<usize>
 fn stage_tree(
     store: &mut Store,
     bindings: &[Binding],
+    reuse: bool,
 ) -> core::result::Result<([u8; 32], u64), u32> {
     let chunk = &mut buffers().chunk;
     let written = k4::encode_tree(chunk, bindings).map_err(|_| store_status::INVALID_REQUEST)?;
-    let digest = store
-        .put_object(object_type::TREE, &chunk[..written])
+    let digest = put_staged(store, object_type::TREE, &chunk[..written], reuse)
         .ok_or(store.last_status.max(1))?;
     Ok((digest, written as u64))
 }
@@ -1668,9 +1884,10 @@ fn tree_of_level(
     store: &mut Store,
     level: &mut [([u8; 32], u32, u64); MAX_INDEX],
     mut count: usize,
+    reuse: bool,
 ) -> core::result::Result<([u8; 32], u32, u64), u32> {
     if count == 0 {
-        let (digest, len) = stage_tree(store, &[])?;
+        let (digest, len) = stage_tree(store, &[], reuse)?;
         return Ok((digest, object_type::TREE, len));
     }
     while count > 1 || level[0].1 != object_type::TREE {
@@ -1684,7 +1901,7 @@ fn tree_of_level(
                 bindings[slot] = Binding::new(&name, member.1, 0, member.2, member.0)
                     .map_err(|_| store_status::INVALID_REQUEST)?;
             }
-            let (digest, len) = stage_tree(store, &bindings[..take])?;
+            let (digest, len) = stage_tree(store, &bindings[..take], reuse)?;
             level[next] = (digest, object_type::TREE, len);
             next += 1;
             at += take;
@@ -1698,10 +1915,9 @@ fn tree_of_level(
 }
 
 /// Stores bytes as one K4 object, or as a tree of chunks.
-fn store_blob_with(store: &mut Store, bytes: &[u8]) -> Option<([u8; 32], u32)> {
+fn store_blob_with(store: &mut Store, bytes: &[u8], reuse: bool) -> Option<([u8; 32], u32)> {
     if bytes.len() <= CHUNK {
-        return store
-            .put_object(object_type::BYTES, bytes)
+        return put_staged(store, object_type::BYTES, bytes, reuse)
             .map(|digest| (digest, object_type::BYTES));
     }
     let mut level: [([u8; 32], u32, u64); MAX_INDEX] = [([0; 32], 0, 0); MAX_INDEX];
@@ -1710,11 +1926,11 @@ fn store_blob_with(store: &mut Store, bytes: &[u8]) -> Option<([u8; 32], u32)> {
         if count >= MAX_INDEX {
             return None;
         }
-        let digest = store.put_object(object_type::BYTES, piece)?;
+        let digest = put_staged(store, object_type::BYTES, piece, reuse)?;
         level[count] = (digest, object_type::BYTES, piece.len() as u64);
         count += 1;
     }
-    tree_of_level(store, &mut level, count)
+    tree_of_level(store, &mut level, count, reuse)
         .ok()
         .map(|(digest, kind, _)| (digest, kind))
 }

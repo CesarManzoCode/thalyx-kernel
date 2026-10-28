@@ -325,6 +325,18 @@ Implementado, [ADR-011](../decisions/ADR-011-serial-bursts-and-measurement-notes
 
 Diseñado, no medido: la escritura en QEMU sigue costando una llamada al sistema por byte en el anfitrión, así que la reducción por byte esperada es menor que la mitad. Las puertas K1–K6 y las pruebas de EXP-13 no se corrieron dentro de este mini sprint; las verifica el cierre de K7.
 
+### La fase `open` y las llamadas a K4 (k7-02)
+
+Observado en el baseline y en [EXP-13](../evidence/exp13-k1-final.md): de los +27,7 ms que separan K1 de L1 en cada transacción, +23,0 ms están en `open`. Cada petición de Thalyx llega a `k5link`, que atendía cada `get` de un objeto durable volviéndolo a leer de K4. Leer un objeto de más de 3 072 bytes cuesta una llamada IPC por su árbol y otra por cada trozo. Cada publicación volvía a preparar y a ligar la raíz entera. El baseline cuenta 992 llamadas a K4 por ronda de los 16 casos.
+
+Implementado en `user/k5link/src/managed.rs` ([ADR-012](../decisions/ADR-012-link-object-copies-and-root-reuse.md)), sin cambiar el protocolo de K4 ni lo que se escribe en el medio:
+
+- **Copias en la arena.** La arena del link ya no se vacía al publicar. Lo que tiene de objetos durables queda como copia, y un objeto leído de K4 se copia en ella. Un `get` o la comprobación del árbol de un candidato sirven esa copia sin llamar a K4. Cuando un `put` necesita sitio, `make_room` descarta las copias y conserva lo no publicado, así que el límite de lo no publicado es el mismo. Busca bajar `k7.tx_open`, y con él `k7.tx_e2e` y `k7.tx_store_calls`.
+- **No repetir lo que la raíz publicada tiene.** Al construir una raíz, el link calcula el digest de cada árbol y cada trozo. Si la raíz recién publicada ya alcanza el objeto, no lo prepara otra vez. Si ya liga un nombre al mismo objeto, no lo vuelve a ligar. Cualquier desenlace de `PUBLISH` que no sea `OK` olvida lo sabido. `FORK`, `FREEZE` y `PUBLISH` siguen pasando por el grant del trabajo, así que la barrera de un trabajo sigue llegando como `SCOPE_CLOSED` del kernel. Busca bajar `k7.tx_store_calls`.
+- **Autocomprobación.** El `stats` del plano de control añade `reads_cached`, `stages_reused` y `binds_reused` después de los campos que ya tenía.
+
+Diseñado, no medido: no se tocó el costo de cada llamada (consola virtio, despertar, IPC del kernel), solo cuántas se hacen. Un `get` servido desde la copia ya no observa el medio, y ninguna puerta ni prueba de EXP-13 lee ese caso. Las puertas K1–K6 y las pruebas de EXP-13 no se corrieron dentro de este mini sprint; las verifica el cierre de K7.
+
 ## Reanudar aquí
 
 **Último hito terminado y pusheado:** **K6 completo en su alcance** —protocolos emparejados, campaña de referencia, EXP-12, ocho cuellos medidos y corregidos, parámetros V0 revisados, inventario físico, puerta K6— en la rama `feat/k6-comparison-hardening-reference`. K5 quedó completo en `feat/k5-thalyx-port-tools`.

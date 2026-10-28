@@ -205,6 +205,12 @@ fn control_into(
             writer
                 .raw(b"{\"ok\":true,\"store_calls\":")
                 .number(store.store_calls)
+                .raw(b",\"reads_cached\":")
+                .number(store.reads_cached)
+                .raw(b",\"stages_reused\":")
+                .number(managed::reuse_counts().0)
+                .raw(b",\"binds_reused\":")
+                .number(managed::reuse_counts().1)
                 .raw(b",\"publications\":")
                 .number(store.backing.publications)
                 .raw(b",\"compactions\":")
