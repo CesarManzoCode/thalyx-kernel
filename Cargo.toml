@@ -56,3 +56,8 @@ overflow-checks = true
 debug = true
 lto = false
 codegen-units = 1
+
+# The loader runs once, before the kernel, and spends its time in firmware
+# calls; it is built for size. The kernel and the programs keep `opt-level = 3`.
+[profile.release.package.thalyx-boot-uefi]
+opt-level = "s"

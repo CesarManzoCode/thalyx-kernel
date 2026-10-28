@@ -435,9 +435,16 @@ def main() -> int:
     kernel = artifact(KERNEL_TARGET, arguments.profile, "kernel")
     shutil.copyfile(kernel, stage / "kernel.elf")
 
+    # The package carries each program without its debug sections: no loader
+    # reads them, and they were most of the package. The cargo artefact keeps
+    # them, and a copy beside the stripped one resolves a fault address the
+    # kernel records, as `build_native.py` does for the native images.
     for program in programs:
         source = artifact(KERNEL_TARGET, arguments.profile, program)
+        shutil.copyfile(source, stage / f"{program}.debug.elf")
         shutil.copyfile(source, stage / f"{program}.elf")
+        subprocess.run(["strip", "--strip-debug", str(stage / f"{program}.elf")],
+                       cwd=ROOT, check=True)
 
     native_images: list[str] = []
     if phase == "k6":

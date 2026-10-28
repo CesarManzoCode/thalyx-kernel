@@ -405,6 +405,18 @@ Diseñado, no medido. No se sabe cuánto pesa cada parte. Este cambio no toca tr
 
 Es una hipótesis que esas tres cosas sean lo que quede de `engine.load` y `engine.cancel`. La puerta K6 compara la respuesta del motor byte a byte en cada muestra, y es la que vería un cambio de resultado. Las puertas K1–K6 y las pruebas de EXP-13 no se corrieron dentro de este mini sprint; las verifica el cierre de K7.
 
+### Tamaño de la imagen (k7-08)
+
+Observado en el baseline y en los artefactos (`759bb62`): la carga del kernel es de 573 440 bytes, el paquete de la imagen de medida de 5 951 488 y el loader de 64 000. Los cuatro programas Rust del paquete pesan entre 1,0 y 1,8 MB cada uno, y la mayor parte son secciones de depuración que nada lee desde el paquete. A los tres segmentos del kernel les sobran 3 217, 2 472 y 3 815 bytes antes de su última página. El kernel se enlaza sin plegado de código idéntico. El loader se compila con `opt-level = 3`.
+
+Implementado ([ADR-018](../decisions/ADR-018-image-size-stripped-modules-folded-kernel-small-loader.md)), sin cambiar ningún segmento cargable de los programas, ninguna interfaz ni ningún parámetro:
+
+- **Programas sin depuración en el paquete.** `tools/build_image.py` aplica `strip --strip-debug` a la copia de cada programa Rust que entra al paquete. La copia completa queda en `build/<imagen>/<programa>.debug.elf`. Busca bajar `k7.size_package`.
+- **Plegado en el kernel.** `kernel/build.rs` enlaza con `--icf=all`. Busca bajar `k7.size_kernel_load`.
+- **Loader para tamaño.** `Cargo.toml` compila `thalyx-boot-uefi` con `opt-level = "s"`. Busca bajar `k7.size_loader`.
+
+Diseñado, no medido. Que el plegado quite una página del kernel es una hipótesis: al texto le faltan 880 bytes para perder una, y no se sabe cuánto se pliega. Una dirección del kernel puede nombrar ahora a varias funciones plegadas, y un loader compilado para tamaño puede tardar algo más en `k7.boot_guest_ms`. Las puertas K1–K6 y las pruebas de EXP-13 no se corrieron dentro de este mini sprint; las verifica el cierre de K7.
+
 ## Reanudar aquí
 
 **Último hito terminado y pusheado:** **K6 completo en su alcance** —protocolos emparejados, campaña de referencia, EXP-12, ocho cuellos medidos y corregidos, parámetros V0 revisados, inventario físico, puerta K6— en la rama `feat/k6-comparison-hardening-reference`. K5 quedó completo en `feat/k5-thalyx-port-tools`.
