@@ -76,13 +76,15 @@ const CLASSES: usize = 10;
 /// reports is the total and the worst wait, which is what "the lock was the
 /// limit" or "the lock was not the limit" is an argument about.
 ///
-/// One block per processor and class, each on its own cache line. Four
-/// machine-wide words did the same sums with one difference: every
-/// acquisition on every processor wrote the same line, so counting the lock's
-/// traffic was itself a line handed between processors as often as the lock
-/// was -- an extra transfer per acquisition, charged to the thing being
-/// measured.
-#[repr(C, align(64))]
+/// One block per processor and class, and each processor's blocks on cache
+/// lines of their own. Four machine-wide words did the same sums with one
+/// difference: every acquisition on every processor wrote the same line, so
+/// counting the lock's traffic was itself a line handed between processors as
+/// often as the lock was -- an extra transfer per acquisition, charged to the
+/// thing being measured. Two classes of one processor share a line: only that
+/// processor writes either, so the line is never handed anywhere, and a line
+/// per class cost 2.5 KiB of image for nothing.
+#[repr(C)]
 struct LockStats {
     acquisitions: AtomicU64,
     contended_waits: AtomicU64,
@@ -101,8 +103,12 @@ impl LockStats {
     }
 }
 
-static STATS: [[LockStats; CLASSES]; crate::limits::MAX_CPUS] =
-    [const { [const { LockStats::new() }; CLASSES] }; crate::limits::MAX_CPUS];
+/// One processor's blocks, starting on a cache line of their own.
+#[repr(C, align(64))]
+struct CpuLockStats([LockStats; CLASSES]);
+
+static STATS: [CpuLockStats; crate::limits::MAX_CPUS] =
+    [const { CpuLockStats([const { LockStats::new() }; CLASSES]) }; crate::limits::MAX_CPUS];
 
 /// This processor's block for one class. Every kernel path that can take a
 /// lock runs after its processor installed its per-processor block, on the
@@ -110,7 +116,7 @@ static STATS: [[LockStats; CLASSES]; crate::limits::MAX_CPUS] =
 /// spin loop's invalidation service already relies on.
 #[inline]
 fn stats(class: LockClass) -> &'static LockStats {
-    &STATS[crate::percpu::index()][class as usize]
+    &STATS[crate::percpu::index()].0[class as usize]
 }
 
 /// Acquisitions, acquisitions that had to wait, cycles spent waiting and the
@@ -119,7 +125,7 @@ fn stats(class: LockClass) -> &'static LockStats {
 pub fn contention(class: LockClass) -> (u64, u64, u64, u64) {
     let mut totals = (0, 0, 0, 0u64);
     for blocks in &STATS {
-        let stats = &blocks[class as usize];
+        let stats = &blocks.0[class as usize];
         totals.0 += stats.acquisitions.load(Ordering::Relaxed);
         totals.1 += stats.contended_waits.load(Ordering::Relaxed);
         totals.2 += stats.contended_cycles.load(Ordering::Relaxed);

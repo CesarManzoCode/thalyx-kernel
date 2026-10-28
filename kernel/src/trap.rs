@@ -39,7 +39,20 @@ pub fn note_user_entry(frame: &TrapFrame) {
 /// lock and the common case is a single read: the confirmation is a one-shot
 /// flag on this processor's own current thread, already set for every entry
 /// after the first.
+#[inline]
 pub fn note_entry_of(frame: &TrapFrame, current: usize, cell: &'static crate::thread::ThreadCell) {
+    if cell
+        .ring3_confirmed
+        .load(core::sync::atomic::Ordering::Relaxed)
+    {
+        return;
+    }
+    announce_entry(frame, current, cell);
+}
+
+#[cold]
+#[inline(never)]
+fn announce_entry(frame: &TrapFrame, current: usize, cell: &'static crate::thread::ThreadCell) {
     let announce = {
         if cell.kind() != ThreadKind::User
             || cell

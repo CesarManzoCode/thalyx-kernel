@@ -33,7 +33,59 @@ use crate::ucopy;
 use crate::{event, trace};
 
 /// Handles one `syscall` entry.
+///
+/// The two entries that only describe the interface and the moment take
+/// [`quick`]; every other entry takes [`handle_entry`]. The split is about
+/// what the processor does before the first useful instruction: the general
+/// handler carries the frame of every operation it can reach, and a version
+/// query paid for saving and restoring it.
+#[inline]
 pub fn handle(frame: &mut TrapFrame) {
+    match frame.rax {
+        entry::VERSION_QUERY | entry::CLOCK_QUERY => quick(frame),
+        _ => handle_entry(frame),
+    }
+}
+
+/// [`entry::VERSION_QUERY`] and [`entry::CLOCK_QUERY`]: the same thread
+/// bookkeeping, the same answers and the same exit as [`handle_entry`] gives
+/// them, without a call on the common path.
+///
+/// The one difference is where the exit's look at the running reservation
+/// takes the counter from. A clock query compares the reading it answers
+/// with; a version query, which reads no clock and runs a fixed handful of
+/// instructions, leaves an exhausted reservation to the next tick, as code
+/// that never enters the kernel does. Every other entry reads the counter on
+/// its way out, as before.
+#[inline(always)]
+fn quick(frame: &mut TrapFrame) {
+    // A clock query reads the counter before anything else: the reading's
+    // latency then overlaps the bookkeeping below instead of standing between
+    // it and the return, which waits for every value it restores.
+    let reading = (frame.rax == entry::CLOCK_QUERY).then(crate::time::monotonic_ns_and_counter);
+    let cpu = crate::percpu::index();
+    let current = crate::sched::current_thread_on(cpu);
+    let cell = crate::thread::get(current);
+    crate::trap::note_entry_of(frame, current, cell);
+    let count = cell.syscalls.load(core::sync::atomic::Ordering::Relaxed);
+    cell.syscalls
+        .store(count + 1, core::sync::atomic::Ordering::Relaxed);
+    let clock = if let Some((ns, counter)) = reading {
+        frame.rax = k2status::OK as u64;
+        frame.rdx = ns.unwrap_or(0);
+        crate::sched::ExitClock::At(counter)
+    } else {
+        frame.rax = status::OK as u64;
+        frame.rdx = thalyx_abi::pack_version(thalyx_abi::VERSION_MAJOR, thalyx_abi::VERSION_MINOR);
+        crate::sched::ExitClock::Tick
+    };
+    crate::sched::on_kernel_exit_with(cpu, clock);
+    crate::sched::leave_if_dead_after_entry(frame, current);
+}
+
+/// Every entry but the two [`quick`] answers.
+#[inline(never)]
+fn handle_entry(frame: &mut TrapFrame) {
     // No lock is taken to find out who entered: the current thread of this
     // processor is this processor's own, and the counter is its own. The
     // machine lock is taken by the operations that need it, which is what

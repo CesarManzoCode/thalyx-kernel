@@ -135,19 +135,31 @@ pub fn hz() -> u64 {
 /// Nanoseconds since the clock was established, or `None` before that.
 #[must_use]
 pub fn monotonic_ns() -> Option<u64> {
+    monotonic_ns_and_counter().0
+}
+
+/// [`monotonic_ns`] together with the counter value it was computed from,
+/// which is read even before the clock is established. The kernel's exit
+/// compares that same reading with the running reservation instead of
+/// reading the counter a second time.
+#[inline]
+#[must_use]
+pub fn monotonic_ns_and_counter() -> (Option<u64>, u64) {
+    let counter = cpu::rdtsc();
     if source() == Source::None {
-        return None;
+        return (None, counter);
     }
     let mult = TSC_MULT.load(Ordering::Relaxed);
     if mult == 0 {
-        return None;
+        return (None, counter);
     }
-    let delta = cpu::rdtsc().wrapping_sub(EPOCH_TSC.load(Ordering::Relaxed));
+    let delta = counter.wrapping_sub(EPOCH_TSC.load(Ordering::Relaxed));
     // 128-bit intermediate: a 64-bit product overflows after a few seconds at
     // gigahertz frequencies, which is well inside a K1 run. The shift that
     // follows is the scale the factor was computed at, so this is one widening
     // multiply and one shift, not a division.
-    Some(((u128::from(delta) * u128::from(mult)) >> SCALE_SHIFT) as u64)
+    let ns = ((u128::from(delta) * u128::from(mult)) >> SCALE_SHIFT) as u64;
+    (Some(ns), counter)
 }
 
 /// Counter ticks a span of `ns` nanoseconds lasts, or zero before the clock

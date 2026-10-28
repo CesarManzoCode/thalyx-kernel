@@ -283,7 +283,9 @@ core::arch::global_asm!(
     "push rcx",
     "push rbx",
     "push rax",
-    "cld",
+    // No `cld`: `IA32_FMASK` clears DF on every `syscall` (SYSCALL_FLAG_MASK
+    // in `arch::x86_64::syscall`), so compiled code already starts with it
+    // clear, as System V requires.
     "mov rdi, rsp",
     "call {syscall_dispatch}",
 

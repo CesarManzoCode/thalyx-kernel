@@ -445,6 +445,53 @@ Observado sin corregir: `/mnt/exp13` no está montado desde que se reinició el 
 
 Observado sin corregir: la retirada de `closure.unit` necesita más intentos. En la primera muestra de cada ronda, el cierre necesitó dos intentos en cuatro de seis rondas y tardó entre 4 y 25 µs. En el baseline A bastó uno en cinco de seis, con entre 10 y 14 µs. Es compatible con lo que [ADR-016](../decisions/ADR-016-quiet-idle-and-one-sweep-retirement.md) anticipó: el hilo despertado por la valla encuentra un procesador parado que hay que interrumpir. Revertir esa política movería `scale.ipc`, que con ella mejoró. La regresión de `entry.version` no tiene diagnóstico: el camino de `syscall` solo cambió en la lectura del hilo a la salida, y su intervalo, [0,913, 1,000], es ancho.
 
+### El segundo cierre de K7
+
+Observado en `build/k7/check-20261028T155106` (kernel `2f7e14f`, Thalyx `3ac575f`, `/mnt/exp13` montado). Las puertas K1–K5 pasan en las tres ejecuciones. La puerta K6 da 24/24 y las 7 pruebas de EXP-13 sobre la imagen de medida pasan, así que `k7.behavior_gates` y `k7.behavior_tests` (419 contra 392) pasan. De las 48 métricas pasan 21:
+
+- Las nueve `k7.tx_*` se midieron por primera vez. Pasan `tx_e2e`, `tx_open`, `tx_settle`, `tx_store_calls` y `tx_serial_records`. No pasan `tx_end`, `tx_request`, `tx_validate` ni `tx_observe`.
+- No pasan 22 de las de K6.
+- No pasa `k7.size_kernel_load`, con 577 536 bytes.
+
+Corregido ([ADR-022](../decisions/ADR-022-short-entries-quick-exit-and-kernel-image-pages.md)):
+
+- **Las consultas de versión y de reloj, por un camino propio.** `syscall::handle` las atiende en línea (`quick`), y el despachador general queda fuera de línea. La salida de la consulta de versión no lee el contador. La de reloj compara la reserva con la lectura que responde, tomada al entrar. La salida sin trabajo son cuatro lecturas en línea. La entrada de `syscall` no ejecuta `cld`, porque `IA32_FMASK` ya limpia DF. Busca bajar `k7.k6_entry_version_0` y `k7.k6_entry_clock_0`.
+- **Dos páginas menos de carga.** `begin_response` queda fuera de línea (estaba copiada en 21 operaciones, unos 4,3 KB). Las estadísticas de cerrojos van agrupadas por procesador en lugar de una línea por clase (2,5 KiB menos). Compilado, son 569 344 bytes contra 577 536. Busca bajar `k7.size_kernel_load`.
+
+Medido con todo lo anterior en `build/k7/check-20261028T170958`, sin otro cambio sobre `2f7e14f` y con Thalyx en `3ac575f`:
+
+- Las puertas K1–K5 pasan en las tres ejecuciones. La puerta K6 da 24/24 con autocomprobación 27/27, y las 7 pruebas de EXP-13 pasan, así que `k7.behavior_gates` y `k7.behavior_tests` (419) pasan.
+- Pasan 22 de las 48 métricas, una más que en el segundo cierre: `k7.size_kernel_load` pasa con 569 344 bytes.
+- `k7.k6_entry_version_0` no pasa por la cuantización. El brazo nativo cae en 50 ns en las seis rondas, contra 60 de Linux, y la razón da 0,83352. El umbral del baseline, 0,833494, es exactamente 50,01 / 60, y la desigualdad es estricta. Hace falta que la mayoría de las muestras caiga en 40 ns. Hoy cae entre un 41 % y un 46 % en cinco rondas, y ninguna en la sexta.
+- `k7.k6_entry_clock_0` no pasa. Cae en 60 ns en cinco rondas y en 70 en una.
+- Fallan las mismas 26 métricas que en el segundo cierre, sin `k7.size_kernel_load`. Otras dos variantes del camino propio (`fx-e6`, `fx-e7`) no movieron nada más allá de la variación entre arranques.
+
+Observado sin corregir. La entrada de IPC que sigue a una entrada relevada corre unos 420 ns más lenta en cada llamada, durante toda la entrada (≈1 640 ciclos de mediana). Las entradas relevadas son `closure.unit`, `engine.load` y `engine.cancel`. El plan se sortea con la misma semilla en cada campaña, así que esas posiciones son siempre las mismas. En `2f7e14f` explican:
+
+- los extremos altos de los intervalos de `k7.k6_ipc_lineage_0`, `_16` y `_28`;
+- los de `k7.k6_ipc_call_256`;
+- las rondas lentas de `k7.k6_sched_wake_0`.
+
+En `d6ac7f1` (`check-20261028T122146`) y en el baseline, esas mismas posiciones medían lo normal. Medido con `closure.unit`, `ipc.call:0` e `ipc.lineage:0`, cuatro rondas nativas por campaña. La causa es la espera de [ADR-020](../decisions/ADR-020-auditor-settles-after-handoff-and-scope-walks-out-of-line.md):
+
+| Campaña | Espera antes de `HANDOFF_DONE` | Resultado |
+| --- | --- | --- |
+| `fx-o1` | Tres ventanas | La entrada que sigue es lenta en 4 de 4 |
+| `fx-o5` | Una ventana | Lenta en 4 de 4 |
+| `fx-o3` | Hasta media ventana después de la frontera | Lenta en 3 de 4 |
+| `fx-o2` | Ninguna | Normal en 4 de 4 |
+| `fx-o4` | Tres ventanas, y `select_cpu` prefiere un procesador que sondea antes que el propio | Sigue lenta, y la IPC normal también sube un poco. Descartado. |
+
+Quitar la espera no es una corrección: es lo que evita el `LIMIT_EXHAUSTED` de `no_loss` en la puerta K6. El mecanismo no está identificado. Una hipótesis, no medida: la IPC es rápida cuando el auditor está retenido por su ventana y no compite con ella. Con espera, el auditor empieza la entrada con presupuesto. En `fx-o2` los procesadores 1 a 3 registraron entre 1 591 y 2 377 `budget_stalls`, y en `fx-o5` entre 44 y 1 418, en una sola ronda.
+
+Observado sin mecanismo en este cambio:
+
+- `tx_request`, `tx_validate` y `tx_observe` corren en el anfitrión sin llamar al link. Sus umbrales piden que K1 − L1 quede por debajo de 1,0, 0,55 y 1,5 µs. Midieron [9,4, 27,2], [0,57, 6,1] y [1,05, 7,9] µs.
+- `ipc.call` e `ipc.caps` necesitan entre un 3 % y un 8 % menos por llamada.
+- `scale.compute` y `scale.ipc` con 1 y 3 pares.
+- `closure.unit`, cuya retirada sigue necesitando dos intentos.
+- `engine.load`, `engine.infer` con el prompt 4, `engine.cancel` y `audit.drain`.
+
 ## Reanudar aquí
 
 **Último hito terminado y pusheado:** **K6 completo en su alcance** —protocolos emparejados, campaña de referencia, EXP-12, ocho cuellos medidos y corregidos, parámetros V0 revisados, inventario físico, puerta K6— en la rama `feat/k6-comparison-hardening-reference`. K5 quedó completo en `feat/k5-thalyx-port-tools`.

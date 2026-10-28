@@ -347,7 +347,13 @@ pub fn set_offline(cpu: usize) {
 #[inline]
 #[must_use]
 pub fn current_thread() -> usize {
-    let cpu = percpu::index();
+    current_thread_on(percpu::index())
+}
+
+/// [`current_thread`] for a caller that has already read its processor.
+#[inline]
+#[must_use]
+pub fn current_thread_on(cpu: usize) -> usize {
     let index = cpu_state(cpu).current.load(Ordering::Relaxed);
     if index == NO_THREAD {
         idle_thread(cpu)
@@ -1559,13 +1565,65 @@ fn delegate_aged_sync(me: usize) {
     }
 }
 
+/// Where the exit's look at the running reservation takes the counter from.
+#[derive(Clone, Copy)]
+pub enum ExitClock {
+    /// Read it now: the entry may have run for any length of time.
+    Read,
+    /// A reading this entry already took, a few instructions ago.
+    At(u64),
+    /// No look. The entry ran a bounded handful of instructions, blocked on
+    /// nothing and read no clock, so a reservation that runs out under it
+    /// ends at the next tick, as it does for code that never enters the
+    /// kernel at all.
+    Tick,
+}
+
 /// Called on the way back to a thread that keeps running: a thread it woke
 /// synchronously and did not pick up is handed to an idle processor once it
 /// has aged, and a wake that asked for this processor is honoured.
 pub fn on_kernel_exit() {
-    // One reading of the processor index for the whole exit: nothing below
-    // switches before the first `schedule`, and each `schedule` returns.
-    let me = percpu::index();
+    on_kernel_exit_with(percpu::index(), ExitClock::Read);
+}
+
+/// [`on_kernel_exit`] for an entry that already knows its processor and how
+/// the reservation should be looked at.
+///
+/// The common exit has nothing to do: no deferred wake, no reschedule asked
+/// for, no aged hint and a reservation still running. That is four reads of
+/// this processor's own state, done here without a call; anything else takes
+/// the full exit, which reads them again in their order.
+#[inline]
+pub fn on_kernel_exit_with(me: usize, clock: ExitClock) {
+    let state = &CPUS[me];
+    if state.deferred_count.load(Ordering::Relaxed) == 0
+        && !state.need_resched.load(Ordering::Acquire)
+        && state.sync_since.load(Ordering::Relaxed) == 0
+        && !reservation_over(me, clock)
+    {
+        return;
+    }
+    kernel_exit(me, clock);
+}
+
+/// Whether the running reservation has run out, by the counter `clock` names.
+#[inline]
+fn reservation_over(me: usize, clock: ExitClock) -> bool {
+    let deadline = CPUS[me].deadline_tsc.load(Ordering::Relaxed);
+    deadline != u64::MAX
+        && match clock {
+            ExitClock::Read => cpu::rdtsc() >= deadline,
+            ExitClock::At(now) => now >= deadline,
+            ExitClock::Tick => false,
+        }
+}
+
+/// The exit with something to do, out of line.
+///
+/// `me` is read once by the caller for the whole exit: nothing below switches
+/// before the first `schedule`, and each `schedule` returns.
+#[inline(never)]
+fn kernel_exit(me: usize, clock: ExitClock) {
     flush_wakes_on(me);
     if CPUS[me].need_resched.load(Ordering::Acquire) {
         schedule(me);
@@ -1579,8 +1637,7 @@ pub fn on_kernel_exit() {
     // because of it. Every return from the kernel to a thread's own code is
     // a point where the reservation can be honoured exactly, and it costs one
     // counter read.
-    let deadline = CPUS[me].deadline_tsc.load(Ordering::Relaxed);
-    if deadline != u64::MAX && cpu::rdtsc() >= deadline {
+    if reservation_over(me, clock) {
         {
             // The reservation ran out while the thread was in the kernel, so
             // its dispatch ends here rather than at the next tick. Counted the

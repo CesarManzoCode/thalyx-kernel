@@ -1217,6 +1217,11 @@ pub const BODY: usize = core::mem::size_of::<DescriptorHeader>();
 ///
 /// A response never leaves the caller's own request bytes in the tail of the
 /// buffer: the descriptor a caller reads back is entirely the kernel's.
+///
+/// Out of line: every operation that answers calls it once, and inlined it
+/// was copied into twenty-one of them, about 4 KiB of text for a call saved
+/// beside a loop that clears the body.
+#[inline(never)]
 pub fn begin_response(staging: &mut Staging, operation: u32) {
     staging.filled = true;
     let cookie: u64 = staging.read::<DescriptorHeader>(0).cookie;
