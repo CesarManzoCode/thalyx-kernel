@@ -220,6 +220,9 @@ pub struct CpuState {
     pub user_ns: AtomicU64,
     /// Reschedule interrupts this processor sent to others.
     pub kicks: AtomicU64,
+    /// Wakes this processor took itself because an interrupt found it idle
+    /// and the thread's last processor had halted: kicks not sent.
+    pub idle_takes: AtomicU64,
     /// Credits, one per scope.
     credits: [Credit; MAX_SCOPES],
 }
@@ -257,6 +260,7 @@ impl CpuState {
             budget_stalls: AtomicU64::new(0),
             user_ns: AtomicU64::new(0),
             kicks: AtomicU64::new(0),
+            idle_takes: AtomicU64::new(0),
             credits: [const { Credit::empty() }; MAX_SCOPES],
         }
     }
@@ -1116,12 +1120,28 @@ fn idle_cpu_for(index: usize, me: usize, last_only: bool) -> Option<usize> {
 }
 
 /// Chooses the processor a woken thread should run on when its waker keeps
-/// running: where it last ran if that is idle, else any idle processor, else
-/// where it last ran.
+/// running: this one if an interrupt woke it out of its idle loop and where
+/// the thread last ran is not polling, else where it last ran if that is
+/// idle, else any idle processor, else where it last ran.
 fn select_cpu(index: usize, me: usize) -> usize {
     // SAFETY: the thread is blocked and standing on no processor, so nothing
     // writes its scheduling record.
     let last = unsafe { thread::get(index).sched().last_cpu };
+    // The waker is this processor's idle loop: an interrupt that landed on a
+    // processor with nothing to run, which is where every device interrupt
+    // lands, because every MSI-X entry names processor 0. This processor is
+    // already awake and takes the thread on the way out of the interrupt. A
+    // halted one where the thread last ran would cost an inter-processor
+    // interrupt and, under KVM, waking a second virtual processor -- on every
+    // completion a driver waits for, which is every request the K5 link
+    // serves and every block K4 writes. A processor still polling takes the
+    // work by looking and has the warm cache, so it keeps it.
+    if waker_is_idle(me) && queue_depth(me) == 0 && !polling_for(last, me) {
+        if last != me {
+            CPUS[me].idle_takes.fetch_add(1, Ordering::Relaxed);
+        }
+        return me;
+    }
     if let Some(idle) = idle_cpu_for(index, me, true) {
         return idle;
     }
@@ -1159,6 +1179,25 @@ fn select_cpu(index: usize, me: usize) -> usize {
         }
     }
     best
+}
+
+/// Whether this processor is running its idle thread, and not because a
+/// budget window refuses it work: the wake comes from an interrupt that found
+/// it with nothing to do.
+fn waker_is_idle(me: usize) -> bool {
+    CPUS[me].current.load(Ordering::Relaxed) == idle_thread(me)
+        && !CPUS[me].throttled.load(Ordering::Acquire)
+}
+
+/// Whether `last`, where the thread last ran, is another processor polling in
+/// its idle loop with nothing queued: one that takes the thread without being
+/// interrupted.
+fn polling_for(last: usize, me: usize) -> bool {
+    last < MAX_CPUS
+        && last != me
+        && CPUS[last].is_online()
+        && CPUS[last].idle.load(Ordering::Acquire) == IDLE_POLLING
+        && queue_depth(last) == 0
 }
 
 /// How many threads are waiting in a processor's queue, read without its

@@ -337,6 +337,17 @@ Implementado en `user/k5link/src/managed.rs` ([ADR-012](../decisions/ADR-012-lin
 
 Diseñado, no medido: no se tocó el costo de cada llamada (consola virtio, despertar, IPC del kernel), solo cuántas se hacen. Un `get` servido desde la copia ya no observa el medio, y ninguna puerta ni prueba de EXP-13 lee ese caso. Las puertas K1–K6 y las pruebas de EXP-13 no se corrieron dentro de este mini sprint; las verifica el cierre de K7.
 
+### Las demás fases de la transacción (k7-03)
+
+Observado en el baseline y en [EXP-13](../evidence/exp13-k1-final.md): después de `open`, la única fase con una diferencia clara es `settle` (+0,19 ms). `end`, `request`, `validate` y `observe` quedan entre +0,003 y +0,022 ms, con intervalos que no tocan el cero. Observado en el código de Thalyx (`3ac575f`, sin cambios): en el brazo K1, `end` es un solo `published` que el link sirve de memoria, y `settle` son tres idas y vueltas más la publicación en K4. `request`, `validate` y `observe` corren en el anfitrión sin llamar al link. Observado en este árbol: toda interrupción de dispositivo llega al procesador 0. El despertar que provoca iba al procesador donde el hilo corrió por última vez, y si ese procesador estaba parado había que interrumpirlo. Además, el link esperaba la interrupción de transmisión completada de cada respuesta, que QEMU ya había entregado al socket.
+
+Implementado ([ADR-013](../decisions/ADR-013-idle-takes-interrupt-wakes-and-quiet-tx.md)):
+
+- **El procesador ocioso que recibe la interrupción se queda con el hilo.** En `select_cpu` (`kernel/src/sched.rs`), un despertar cuyo despertador es el hilo ocioso del procesador encola el hilo ahí si ese procesador no está retenido, su cola está vacía y el procesador donde el hilo corrió por última vez no está sondeando. Así no hay interrupción entre procesadores ni hay que despertar un segundo procesador virtual. `sched.cpu_summary` añade `idle_takes` al final de cada fila. Busca bajar `k7.tx_end` y `k7.tx_settle`, y el bloque de K4 se beneficia igual en la publicación.
+- **El link no espera a que el dispositivo tome la respuesta.** Las colas de transmisión de los puertos llevan `VIRTQ_AVAIL_F_NO_INTERRUPT`. `send` publica y vuelve, y `drain_tx` recoge la completación anterior antes de escribir otra vez el búfer. Solo si la encuentra en vuelo activa la interrupción mientras espera. `Console::flush` vacía las colas antes de que el link salga. El `stats` del plano de control añade `tx_waits` al final. Busca bajar `k7.tx_end` y `k7.tx_settle`, con una interrupción y un despertar del link menos por respuesta.
+
+Diseñado, no medido. Que esto mueva `k7.tx_request`, `k7.tx_validate` y `k7.tx_observe` es una hipótesis: esas fases no tocan la máquina virtual, y el cambio solo les quitaría actividad del invitado que compite por el anfitrión. El tick periódico de cada procesador no se tocó. No se cambió Thalyx. Las puertas K1–K6 y las pruebas de EXP-13 no se corrieron dentro de este mini sprint; las verifica el cierre de K7.
+
 ## Reanudar aquí
 
 **Último hito terminado y pusheado:** **K6 completo en su alcance** —protocolos emparejados, campaña de referencia, EXP-12, ocho cuellos medidos y corregidos, parámetros V0 revisados, inventario físico, puerta K6— en la rama `feat/k6-comparison-hardening-reference`. K5 quedó completo en `feat/k5-thalyx-port-tools`.

@@ -148,6 +148,7 @@ fn control_into(
     store: &mut Managed,
     works: &mut Works,
     port_line: &mut [u32],
+    tx_waits: u64,
     out: &mut [u8],
 ) -> (usize, bool) {
     let mut writer = json::Writer::new(out);
@@ -223,6 +224,8 @@ fn control_into(
                 .number(works.retired)
                 .raw(b",\"k4_generation\":")
                 .number(store.backing.k4_generation)
+                .raw(b",\"tx_waits\":")
+                .number(tx_waits)
                 .raw(b"}");
         }
         b"shutdown" => {
@@ -377,7 +380,15 @@ fn run() -> ! {
                 let (ports, reply) = (&b.ports, &mut b.reply);
                 let request = &ports[port as usize].buffer[offset..offset + length];
                 if port == CONTROL_PORT {
-                    control_into(request, &mut store, &mut works, &mut port_line, reply)
+                    let tx_waits = console.tx_waits;
+                    control_into(
+                        request,
+                        &mut store,
+                        &mut works,
+                        &mut port_line,
+                        tx_waits,
+                        reply,
+                    )
                 } else {
                     let (line, principal) = mapping(&port_line, port);
                     let len = store
@@ -402,6 +413,9 @@ fn run() -> ! {
         }
     }
 
+    // A reply is published without waiting for the device to take it; the
+    // last ones are taken before the data object they are in goes away.
+    console.flush();
     k2::note(note::FRAMES, console.rx_frames);
     rt::exit(0)
 }

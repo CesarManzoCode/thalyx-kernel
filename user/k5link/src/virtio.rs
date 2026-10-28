@@ -49,6 +49,10 @@ const FEATURE_VERSION_1: u32 = 1 << 0;
 const CONFIG_MAX_PORTS: u64 = 4;
 
 const DESC_WRITE: u16 = 2;
+/// `VIRTQ_AVAIL_F_NO_INTERRUPT`, §2.7.7: the driver does not want to be
+/// interrupted when the device uses a buffer of this queue. Without the event
+/// index, which this driver does not negotiate, the device honours it.
+const AVAIL_NO_INTERRUPT: u16 = 1;
 
 /// Entries in every queue this driver publishes.
 const QUEUE_DEPTH: u16 = 8;
@@ -198,6 +202,22 @@ impl Queue {
         Some(head)
     }
 
+    /// Whether the device is to interrupt when it uses a buffer of this queue.
+    /// Fenced after the write, so a completion read after this call either
+    /// was seen or will interrupt.
+    fn interrupts(&self, on: bool) {
+        let flags = if on { 0 } else { AVAIL_NO_INTERRUPT };
+        // SAFETY: inside the mapped object, the `flags` field of the
+        // available ring.
+        unsafe { ring_write::<u16>(self.base + AVAIL_OFFSET, flags) };
+        fence(Ordering::SeqCst);
+    }
+
+    /// Whether a buffer published here has not been used yet.
+    fn busy(&self) -> bool {
+        self.in_flight.iter().any(|desc| desc.len != 0)
+    }
+
     /// Consumes one completion: which descriptor, and how many bytes the
     /// device wrote (or read, for a transmit).
     fn consume(&mut self) -> Option<(u16, u32)> {
@@ -278,6 +298,8 @@ pub struct Console {
     control_tx_next: u16,
     pub rx_frames: u64,
     pub tx_frames: u64,
+    /// Sends that found the previous piece still in flight and waited for it.
+    pub tx_waits: u64,
 }
 
 fn rx_queue(port: u32) -> usize {
@@ -339,6 +361,7 @@ impl Console {
             control_tx_next: 0,
             rx_frames: 0,
             tx_frames: 0,
+            tx_waits: 0,
         };
         let _ = DATA_PAGES;
 
@@ -424,6 +447,14 @@ impl Console {
                     notify: notify_base + u64::from(notify_off) * u64::from(multiplier),
                     enabled: true,
                 };
+            }
+            // A port's transmit completion does not interrupt. The reply is on
+            // the host's socket before the device marks it used, so nothing
+            // waits for the completion; it is reclaimed before the buffer is
+            // written again (`send`). Waking for it cost a device interrupt
+            // and a wake of this domain per reply.
+            for port in 1..=console.max_ports {
+                console.queues[tx_queue(port)].interrupts(false);
             }
             mmio_write::<u8>(
                 common + DEVICE_STATUS,
@@ -594,8 +625,10 @@ impl Console {
         }
     }
 
-    /// Sends bytes on a port, in pieces the transmit buffer holds, waiting for
-    /// each piece to be taken before the next is written over it.
+    /// Sends bytes on a port, in pieces the transmit buffer holds. Returns
+    /// once the last piece is published: each piece waits only for the one
+    /// before it -- this reply's, or the previous reply's -- to be taken
+    /// before it is written over it.
     pub fn send(&mut self, port: u32, bytes: &[u8]) -> bool {
         let (vaddr, iova) = self.tx_buffer(port);
         let queue = tx_queue(port);
@@ -603,9 +636,12 @@ impl Console {
         let mut sent = 0usize;
         while sent < bytes.len() {
             let piece = (bytes.len() - sent).min(capacity);
+            if !self.drain_tx(queue) {
+                return false;
+            }
             // SAFETY: the transmit buffer is `TX_PAGES` pages of the data
             // object the supervisor mapped writable here, and nothing is in
-            // flight on it: the previous piece completed below.
+            // flight on it: `drain_tx` saw the previous piece completed.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     bytes[sent..sent + piece].as_ptr(),
@@ -620,25 +656,50 @@ impl Console {
             {
                 return false;
             }
-            let deadline = k2::now_ns() + 10_000_000_000;
-            loop {
-                self.serve_control();
-                if self.queues[queue].consume().is_some() {
-                    break;
-                }
-                if k2::now_ns() >= deadline {
-                    k2::note(note::LINK_UNEXPECTED, 0x0C04);
-                    return false;
-                }
-                let _ = k2::signal_wait(
-                    self.irq,
-                    thalyx_user_k4fmt::pkg::bit::DEVICE,
-                    k2::now_ns() + 50_000_000,
-                );
-            }
             sent += piece;
         }
         self.tx_frames += 1;
         true
+    }
+
+    /// Waits until every transmit buffer of every port has been taken, so the
+    /// data object can be let go of. Called before the domain exits.
+    pub fn flush(&mut self) {
+        for port in 1..=self.max_ports {
+            let _ = self.drain_tx(tx_queue(port));
+        }
+    }
+
+    /// Reclaims a transmit queue's completions and, if a buffer is still in
+    /// flight, waits for it with the completion interrupt turned on for the
+    /// wait only.
+    fn drain_tx(&mut self, queue: usize) -> bool {
+        while self.queues[queue].consume().is_some() {}
+        if !self.queues[queue].busy() {
+            return true;
+        }
+        self.tx_waits += 1;
+        // Turned on before looking again: a completion the device made before
+        // it read the flag is seen below, and one made after interrupts.
+        self.queues[queue].interrupts(true);
+        let deadline = k2::now_ns() + 10_000_000_000;
+        let done = loop {
+            self.serve_control();
+            while self.queues[queue].consume().is_some() {}
+            if !self.queues[queue].busy() {
+                break true;
+            }
+            if k2::now_ns() >= deadline {
+                k2::note(note::LINK_UNEXPECTED, 0x0C04);
+                break false;
+            }
+            let _ = k2::signal_wait(
+                self.irq,
+                thalyx_user_k4fmt::pkg::bit::DEVICE,
+                k2::now_ns() + 50_000_000,
+            );
+        };
+        self.queues[queue].interrupts(false);
+        done
     }
 }

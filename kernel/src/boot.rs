@@ -930,7 +930,8 @@ fn scheduling_summary() {
     // written after the others have parked.
     let online = sched::cpus_started();
     let peak = crate::scope::peak_running();
-    let mut rows = [(0usize, 0u32, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64); crate::limits::MAX_CPUS];
+    type Row = (usize, u32, u64, u64, u64, u64, u64, u64, u64);
+    let mut rows = [Row::default(); crate::limits::MAX_CPUS];
     let mut count = 0usize;
     for cpu in 0..crate::limits::MAX_CPUS {
         let slot = sched::cpu_state(cpu);
@@ -948,6 +949,7 @@ fn scheduling_summary() {
                 .load(core::sync::atomic::Ordering::Relaxed),
             slot.user_ns.load(core::sync::atomic::Ordering::Relaxed),
             slot.kicks.load(core::sync::atomic::Ordering::Relaxed),
+            slot.idle_takes.load(core::sync::atomic::Ordering::Relaxed),
         );
         count += 1;
     }
@@ -955,15 +957,19 @@ fn scheduling_summary() {
     let (_, _, _, _, interval) = sched::totals();
 
     for slot in 0..count {
-        let (cpu, apic_id, ticks, dispatches, preemptions, stalls, user_ns, kicks) = rows[slot];
+        let (cpu, apic_id, ticks, dispatches, preemptions, stalls, user_ns, kicks, idle_takes) =
+            rows[slot];
         // The interrupts this processor sent to make another one look at its
         // queue: each is a microsecond and a half of the sender's time on
         // this platform, and a round trip that pays one is not on one
-        // processor.
+        // processor. `idle_takes` counts the wakes an interrupt delivered to
+        // this processor's idle loop and this processor ran itself, instead of
+        // kicking the halted processor the thread last ran on.
         event!(
             "sched.cpu_summary",
             "cpu={cpu} apic_id={apic_id} ticks={ticks} dispatches={dispatches} \
-             preemptions={preemptions} budget_stalls={stalls} user_ns={user_ns} kicks={kicks}"
+             preemptions={preemptions} budget_stalls={stalls} user_ns={user_ns} kicks={kicks} \
+             idle_takes={idle_takes}"
         );
     }
     // Every scope that was ever given a budget, with the most it was actually
