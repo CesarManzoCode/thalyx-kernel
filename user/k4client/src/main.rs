@@ -82,11 +82,17 @@ const READER_FORK_TRIES: u32 = 8;
 /// Intents a broker remembers, so a repeated key is answered as one.
 const BROKER_KEYS: usize = 8;
 
-/// How long a broker waits for an intent before deciding the run is over.
-const BROKER_IDLE_NS: u64 = 1_000_000_000;
+/// How long one wait of a broker for an intent lasts before it looks whether
+/// the supervisor has said the run is over.
+const BROKER_POLL_NS: u64 = 100_000_000;
 
-/// Idle waits a broker takes before it stops.
-const BROKER_IDLE_ROUNDS: u32 = 4;
+/// How long a broker goes without an intent before it stops on its own, told
+/// or not: the four idle waits of a second it used to take before every stop.
+const BROKER_IDLE_NS: u64 = 4_000_000_000;
+
+/// Refused receives in a row, other than a wait that ran out, after which a
+/// broker stops.
+const BROKER_ERRORS: u32 = 4;
 
 /// The staging buffer this client lends by capability.
 fn stage() -> &'static mut [u8] {
@@ -1007,19 +1013,42 @@ fn run_reader(client: &mut Client) {
 /// intent seen twice, and the answer says so; a scenario that asks for it gets
 /// `UNKNOWN`, which the service has to record as a result rather than retry
 /// into a second delivery.
-fn run_broker(endpoint: u64, config: &ClientConfig) {
+///
+/// It stops when the supervisor raises `bit::BROKER_STOP`, which it does once
+/// every other client has ended. An intent only ever reaches the broker from
+/// inside a publication a client is waiting on, so with no client left none is
+/// on its way; the broker looks at the bit only after a wait found the
+/// endpoint empty. Without the bit it stops after `BROKER_IDLE_NS` without an
+/// intent, as it always did -- that idle time used to be how every run ended,
+/// several seconds of each leg under emulation spent waiting for nothing.
+fn run_broker(endpoint: u64, done: u64, config: &ClientConfig) {
     let mut keys = [[0u8; 32]; BROKER_KEYS];
     let mut attempts = [0u32; BROKER_KEYS];
     let mut held = 0usize;
-    let mut idle = 0u32;
+    let mut idle_since = k2::now_ns();
+    let mut errors = 0u32;
 
-    while idle < BROKER_IDLE_ROUNDS {
-        let deadline = k2::now_ns() + BROKER_IDLE_NS;
-        let Ok((message, invocation)) = k2::endpoint_receive(endpoint, deadline, false) else {
-            idle += 1;
-            continue;
+    loop {
+        let deadline = k2::now_ns() + BROKER_POLL_NS;
+        let (message, invocation) = match k2::endpoint_receive(endpoint, deadline, false) {
+            Ok(received) => received,
+            Err(code) => {
+                if code != status::TIMED_OUT {
+                    errors += 1;
+                    if errors >= BROKER_ERRORS {
+                        break;
+                    }
+                    continue;
+                }
+                let told = k2::signal_query(done)
+                    .is_ok_and(|info| info.bits & bit::BROKER_STOP != 0);
+                if told || k2::now_ns().saturating_sub(idle_since) >= BROKER_IDLE_NS {
+                    break;
+                }
+                continue;
+            }
         };
-        idle = 0;
+        errors = 0;
         let Some(intent) = OutboxIntent::read_from(&message.payload, 0) else {
             let answer = OutboxAnswer {
                 status: outbox_status::REFUSED,
@@ -1057,6 +1086,7 @@ fn run_broker(endpoint: u64, config: &ClientConfig) {
         // The ticket is a handle on a request that is over, and every one kept
         // is an invocation record the machine cannot reuse.
         let _ = k2::cap_close(invocation);
+        idle_since = k2::now_ns();
     }
 }
 
@@ -1067,7 +1097,7 @@ fn run() -> ! {
 
     let done = boot_handle(client_slot::DONE);
     if config.role == role::BROKER {
-        run_broker(boot_handle(client_slot::SERVICE), &config);
+        run_broker(boot_handle(client_slot::SERVICE), done, &config);
     } else {
         let mut client = Client {
             store: boot_handle(client_slot::STORE),

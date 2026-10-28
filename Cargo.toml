@@ -50,14 +50,31 @@ panic = "abort"
 overflow-checks = true
 debug = true
 
+# Debug information does not change the code generated, only the build's time
+# and the non-loadable sections. The kernel keeps all of it. The programs enter
+# the package stripped of it (`tools/build_image.py`), and nothing reads more
+# than an address-to-line table from the full copy kept beside the image, so
+# they carry only that.
 [profile.release]
 panic = "abort"
 overflow-checks = true
-debug = true
+debug = "line-tables-only"
 lto = false
 codegen-units = 1
 
+[profile.release.package.thalyx-kernel]
+debug = true
+
 # The loader runs once, before the kernel, and spends its time in firmware
 # calls; it is built for size. The kernel and the programs keep `opt-level = 3`.
+# It is linked with `/DEBUG:NONE` (`.cargo/config.toml`), so whatever debug
+# information it and its dependencies were compiled with was discarded at the
+# link: they are compiled without it.
 [profile.release.package.thalyx-boot-uefi]
 opt-level = "s"
+debug = false
+
+# Every package outside the workspace is one of the loader's dependencies or a
+# procedure macro of theirs.
+[profile.release.package."*"]
+debug = false

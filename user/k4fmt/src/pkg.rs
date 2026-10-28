@@ -74,7 +74,8 @@ pub mod client_slot {
     pub const STAGE: u32 = 2;
     /// The endpoint a broker receives on.
     pub const SERVICE: u32 = 3;
-    /// The signal a client raises when it has finished.
+    /// The signal a client raises when it has finished. A broker also reads
+    /// `bit::BROKER_STOP` from it.
     pub const DONE: u32 = 4;
 }
 
@@ -114,6 +115,10 @@ pub mod bit {
     /// request before the supervisor could see it -- and there is nothing else
     /// it should wake up for. What ends that wait is being terminated.
     pub const NEVER: u64 = 1 << 5;
+    /// Every client but the broker has ended, so no publication is left to
+    /// hand the broker an intent. The supervisor raises it once; the broker
+    /// is the only one that reads it, and it never consumes it.
+    pub const BROKER_STOP: u64 = 1 << 6;
 }
 
 /// What a client was built to do in this run.

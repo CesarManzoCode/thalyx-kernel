@@ -417,6 +417,17 @@ Implementado ([ADR-018](../decisions/ADR-018-image-size-stripped-modules-folded-
 
 Diseñado, no medido. Que el plegado quite una página del kernel es una hipótesis: al texto le faltan 880 bytes para perder una, y no se sabe cuánto se pliega. Una dirección del kernel puede nombrar ahora a varias funciones plegadas, y un loader compilado para tamaño puede tardar algo más en `k7.boot_guest_ms`. Las puertas K1–K6 y las pruebas de EXP-13 no se corrieron dentro de este mini sprint; las verifica el cierre de K7.
 
+### Tiempo de build y de las puertas (k7-09)
+
+Observado en el baseline y en la última ejecución de las puertas (`ab742e6`): de los unos 280 s de `tools/run_gates.py --platform tcg`, `k4-run` se lleva entre 173 y 189. Un tramo de K4 sin corte tarda unos 6 s de reloj, y en el de `baseline` el trabajo termina antes de 0,7·10⁹ ciclos del invitado mientras el tramo sigue hasta 4,5·10⁹. Lo que falta es el broker, que solo se detenía tras cuatro esperas de 1 s sin intención. El servicio llama al broker solo dentro de una publicación que un cliente espera. `release` generaba depuración completa en todo el espacio de trabajo, aunque el loader la tira al enlazar y los programas entran sin ella al paquete.
+
+Implementado ([ADR-019](../decisions/ADR-019-broker-told-to-stop-and-lighter-release-debug.md)), sin tocar `tools/check_k*.py`, los runners ni lo que contesta el broker:
+
+- **El broker se detiene cuando se lo dicen.** El supervisor de K4 levanta `bit::BROKER_STOP` en la señal `DONE` cuando todos los demás clientes terminaron, o antes de salir cuando el servicio pide el corte. El broker espera en ventanas de 100 ms y, cuando una vence con el endpoint vacío y el bit está, sale de forma voluntaria como antes. Sin el bit, sale tras 4 s sin intención, el mismo total de siempre. Busca bajar `k7.gates_seconds`, en unos 3 a 4 s de reloj por cada tramo de K4 que terminaba esperando al broker.
+- **Depuración donde se lee.** `release` usa `debug = "line-tables-only"`, el kernel conserva `debug = true`, y el loader y sus dependencias se compilan sin depuración. Busca bajar `k7.build_seconds`.
+
+Diseñado, no medido. No se sabe cuánto del build es depuración: el kernel la conserva y puede ser el camino crítico. Los tramos donde un cliente queda bloqueado en una llamada al servicio detenido terminan cuando vence su llamada de 8 s, y siguen igual. `k5-cases`, `k5-stages` y las autocomprobaciones no tienen un mecanismo en este cambio. El broker deja ahora un `k2.refused` por cada ventana de 100 ms que vence. Las puertas K1–K6 y las pruebas de EXP-13 no se corrieron dentro de este mini sprint; las verifica el cierre de K7.
+
 ## Reanudar aquí
 
 **Último hito terminado y pusheado:** **K6 completo en su alcance** —protocolos emparejados, campaña de referencia, EXP-12, ocho cuellos medidos y corregidos, parámetros V0 revisados, inventario físico, puerta K6— en la rama `feat/k6-comparison-hardening-reference`. K5 quedó completo en `feat/k5-thalyx-port-tools`.

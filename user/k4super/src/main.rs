@@ -884,6 +884,7 @@ fn run() -> ! {
     let rounds = if scenario == 4 { 12 } else { DEFAULT_ROUNDS };
     let mut clients = [0u64; CLIENTS];
     let mut built = 0usize;
+    let mut broker = None;
     let roster: [(&str, u64, u64); CLIENTS] = [
         ("k4broker", role::BROKER, 4),
         ("k4reader", role::READER, facet::READER),
@@ -917,6 +918,9 @@ fn run() -> ! {
             store_facet,
         ) {
             Some(domain) => {
+                if which == role::BROKER {
+                    broker = Some(built);
+                }
                 clients[built] = domain;
                 built += 1;
             }
@@ -955,6 +959,7 @@ fn run() -> ! {
     });
     let stall_limit = k2::now_ns() + STALL_LIMIT_NS;
     let mut stall_over_at: Option<u64> = None;
+    let mut broker_told = false;
     loop {
         // Scenario 5 is the one where the control plane is lost. The auditor
         // stops reading until the log is full, and a full log does not lose
@@ -995,6 +1000,11 @@ fn run() -> ! {
                 drain_receipts(log, &mut audit);
                 report_audit(&audit);
                 k2::note(note::SUPER_CRASH, run.instances);
+                // The service stopped right after asking, so nothing will
+                // hand the broker an intent either.
+                if !broker_told {
+                    let _ = k2::signal_raise(done, bit::BROKER_STOP);
+                }
                 rt::exit(0)
             }
             if info.bits & bit::RESTART != 0 && restarts == 0 {
@@ -1036,15 +1046,28 @@ fn run() -> ! {
         }
 
         let mut finished = 0usize;
-        for domain in clients.iter().take(built) {
+        let mut broker_finished = false;
+        for (at, domain) in clients.iter().take(built).enumerate() {
             if let Ok(info) = k2::domain_query(*domain)
                 && (info.state == domain_state::DEAD || info.state == domain_state::FAULTED)
             {
                 finished += 1;
+                broker_finished |= broker == Some(at);
             }
         }
         if finished == built {
             break;
+        }
+        // Every client but the broker has ended. An intent reaches the broker
+        // only from inside a publication a client is waiting on, so none is
+        // coming, and the broker is told rather than left to find out by
+        // waiting. The run ends when it has gone, as before.
+        let others = built - usize::from(broker.is_some());
+        if !broker_told && finished - usize::from(broker_finished) == others {
+            broker_told = true;
+            if let Err(code) = k2::signal_raise(done, bit::BROKER_STOP) {
+                k2::note(report::UNEXPECTED, code as u64);
+            }
         }
         if k2::now_ns() > deadline {
             k2::note(report::UNEXPECTED, u64::MAX);
