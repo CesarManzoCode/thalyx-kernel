@@ -748,6 +748,34 @@ pub fn is_within(ancestor: ScopeId, candidate: ScopeId) -> bool {
     Chain::of(candidate).nodes().contains(&ancestor)
 }
 
+/// The scopes at or below `root`, one bit per table index: [`is_within`]
+/// asked once per scope, for a pass that would otherwise ask it once per
+/// object of every table.
+///
+/// The answer holds while the parent links do, which is under the machine
+/// lock: a scope is linked at creation and unlinked at collection, and both
+/// hold it.
+#[must_use]
+pub fn subtree(root: ScopeId) -> u64 {
+    let mut members = 0u64;
+    for index in 0..MAX_SCOPES {
+        if is_within(root, index as ScopeId) {
+            members |= 1u64 << index;
+        }
+    }
+    members
+}
+
+/// Whether `scope` is one of the [`subtree`] `members`: [`is_within`] for
+/// the root the set was taken of. An index outside the table is in no
+/// subtree, as `is_within` answers for it.
+#[must_use]
+pub fn in_subtree(members: u64, scope: ScopeId) -> bool {
+    (scope as usize) < MAX_SCOPES && members & (1u64 << scope) != 0
+}
+
+const _: () = assert!(MAX_SCOPES <= 64);
+
 /// Adds `amount` to one counter with a ceiling, or leaves it untouched.
 ///
 /// The check and the add are one compare-and-exchange: the counter moves only

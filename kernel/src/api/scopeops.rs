@@ -333,7 +333,8 @@ pub fn retire(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
     // numbers have to be read after the release, or "retained" would mean
     // "held before anyone tried to free it", which is exactly the reassuring
     // and useless figure the resource contract warns against.
-    let released = release_sponsored(machine, root);
+    let members = scope::subtree(root);
+    let released = release_sponsored(machine, members);
 
     let node = &scope::table()[root as usize];
     let id = node.id();
@@ -342,7 +343,7 @@ pub fn retire(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
     let metadata = node.metadata.load(Ordering::Relaxed);
     for index in 0..scope::table().len() {
         let other = &scope::table()[index];
-        if other.state() == State::Empty || !scope::is_within(root, index as ScopeId) {
+        if other.state() == State::Empty || !scope::in_subtree(members, index as ScopeId) {
             continue;
         }
         other.set_state(State::Retired);
@@ -370,21 +371,85 @@ pub fn retire(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result
     Ok(pages)
 }
 
-/// Withdraws every capability that names `object`, wherever it is held.
+/// The objects a retirement frees, one bit per table index of each kind.
+///
+/// Decided before any capability is touched: withdrawing a handle changes a
+/// reference count and nothing a retirement decides on -- not an object's
+/// state, sponsor, mapping count or generation -- so the set is the one the
+/// object-by-object pass arrived at.
+#[derive(Default)]
+struct Doomed {
+    memories: u128,
+    endpoints: u32,
+    signals: u32,
+    timers: u32,
+}
+
+const _: () = assert!(crate::limits::MAX_MEMORY_OBJECTS <= 128);
+const _: () = assert!(crate::limits::MAX_ENDPOINTS <= 32);
+const _: () = assert!(crate::limits::MAX_SIGNALS <= 32);
+const _: () = assert!(crate::limits::MAX_TIMERS <= 32);
+
+impl Doomed {
+    fn is_empty(&self) -> bool {
+        self.memories == 0 && self.endpoints == 0 && self.signals == 0 && self.timers == 0
+    }
+
+    /// Whether `object` is one of these, at the generation its table slot
+    /// has now. A slot keeps its generation when it is emptied, so the check
+    /// reads the same before and after the object goes.
+    fn names(&self, machine: &Machine, object: ObjRef) -> bool {
+        let index = object.index as usize;
+        match object.kind {
+            ObjKind::Memory => {
+                index < 128
+                    && self.memories & (1u128 << index) != 0
+                    && machine.memories[index].generation == object.generation
+            }
+            ObjKind::Endpoint => {
+                index < 32
+                    && self.endpoints & (1u32 << index) != 0
+                    && machine.endpoint_ids[index].generation == object.generation
+            }
+            ObjKind::Signal => {
+                index < 32
+                    && self.signals & (1u32 << index) != 0
+                    && machine.signals[index].generation == object.generation
+            }
+            ObjKind::Timer => {
+                index < 32
+                    && self.timers & (1u32 << index) != 0
+                    && machine.timers[index].generation == object.generation
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Withdraws every capability that names one of `doomed`, wherever it is held.
 ///
 /// A retired object's table slot is reused, and its generation is what stops an
 /// old handle from naming the next occupant. Withdrawing the entries as well is
 /// what keeps the accounting honest rather than merely safe: the grant and the
 /// metadata charge behind each entry are released to whoever was paying for
 /// them, instead of surviving as a charge on a scope that no longer exists.
-fn withdraw_everywhere(machine: &mut Machine, object: ObjRef) {
+///
+/// One sweep of the capability tables for the whole retirement. The sweep
+/// used to run once per freed object -- sixteen domains of thirty-two slots
+/// for each memory object, endpoint, signal and timer of the perimeter --
+/// and that, not the freeing, was most of what `closure.unit` measured in
+/// the retirement.
+fn withdraw_everywhere(machine: &mut Machine, doomed: &Doomed) {
+    if doomed.is_empty() {
+        return;
+    }
     for domain in 0..machine.domains.len() {
         if machine.domains[domain].state == crate::state::DomainState::Empty {
             continue;
         }
         for slot in 0..crate::limits::MAX_CAPS {
             let entry = machine.domains[domain].caps.get_mut().slots[slot];
-            if entry.live && entry.object == object {
+            if entry.live && doomed.names(machine, entry.object) {
                 crate::api::cap_release_slot(machine, domain, slot);
             }
         }
@@ -402,33 +467,60 @@ fn withdraw_everywhere(machine: &mut Machine, object: ObjRef) {
 /// left to take down here that this pass could confirm, and freeing a frame a
 /// live page table still points at would be exactly the dangerous reuse the
 /// memory contract forbids. It stays, and the retained counters say so.
-fn release_sponsored(machine: &mut Machine, root: ScopeId) -> (u64, u64) {
+///
+/// `members` is the perimeter, from [`scope::subtree`]. Three passes: decide
+/// what goes, withdraw every handle to it in one sweep, free it. The objects
+/// are freed in the order the single pass freed them, kind by kind and index
+/// by index, so the records come out in the same order.
+fn release_sponsored(machine: &mut Machine, members: u64) -> (u64, u64) {
+    let within = |scope: ScopeId| scope::in_subtree(members, scope);
+    let mut doomed = Doomed::default();
+    for (index, object) in machine.memories.iter().enumerate() {
+        if object.state == crate::memobj::State::Empty
+            || !within(object.sponsor)
+            || object.map_count != 0
+        {
+            continue;
+        }
+        doomed.memories |= 1u128 << index;
+    }
+    for index in 0..machine.endpoints.len() {
+        let used = machine.endpoint_ids[index].used;
+        if used && within(machine.endpoints[index].get_mut().owner_scope) {
+            doomed.endpoints |= 1u32 << index;
+        }
+    }
+    for (index, signal) in machine.signals.iter().enumerate() {
+        if signal.used && within(signal.owner_scope) {
+            doomed.signals |= 1u32 << index;
+        }
+    }
+    for (index, timer) in machine.timers.iter().enumerate() {
+        if timer.used && within(timer.owner_scope) {
+            doomed.timers |= 1u32 << index;
+        }
+    }
+
+    withdraw_everywhere(machine, &doomed);
+
     let mut pages = 0;
     let mut objects = 0;
 
-    for index in 0..machine.memories.len() {
-        let (state, sponsor, map_count, generation, base, page_count, id) = {
+    let mut remaining = doomed.memories;
+    while remaining != 0 {
+        let index = remaining.trailing_zeros() as usize;
+        remaining &= remaining - 1;
+        let (state, sponsor, generation, base, page_count, id) = {
             let object = &machine.memories[index];
             (
                 object.state,
                 object.sponsor,
-                object.map_count,
                 object.generation,
                 object.base,
                 object.pages,
                 object.id,
             )
         };
-        if state == crate::memobj::State::Empty || !scope::is_within(root, sponsor) {
-            continue;
-        }
-        if map_count != 0 {
-            continue;
-        }
-        withdraw_everywhere(
-            machine,
-            ObjRef::new(ObjKind::Memory, index as u16, generation),
-        );
         let count = u64::from(page_count);
         for page in 0..count {
             // SAFETY: the object has no mapping (`map_count == 0`), so no page
@@ -456,55 +548,39 @@ fn release_sponsored(machine: &mut Machine, root: ScopeId) -> (u64, u64) {
         objects += 1;
     }
 
-    for index in 0..machine.endpoints.len() {
-        let (used, generation) = (
-            machine.endpoint_ids[index].used,
-            machine.endpoint_ids[index].generation,
-        );
+    let mut remaining = doomed.endpoints;
+    while remaining != 0 {
+        let index = remaining.trailing_zeros() as usize;
+        remaining &= remaining - 1;
         let owner_scope = machine.endpoints[index].get_mut().owner_scope;
-        if !used || !scope::is_within(root, owner_scope) {
-            continue;
-        }
-        withdraw_everywhere(
-            machine,
-            ObjRef::new(ObjKind::Endpoint, index as u16, generation),
-        );
         scope::release(owner_scope, Resource::Metadata, 1);
         *machine.endpoints[index].get_mut() = crate::ipc::Endpoint::empty();
         machine.endpoint_ids[index].used = false;
         objects += 1;
     }
 
-    for index in 0..machine.signals.len() {
-        let (used, owner_scope, generation) = {
+    let mut remaining = doomed.signals;
+    while remaining != 0 {
+        let index = remaining.trailing_zeros() as usize;
+        remaining &= remaining - 1;
+        let (owner_scope, generation) = {
             let signal = &machine.signals[index];
-            (signal.used, signal.owner_scope, signal.generation)
+            (signal.owner_scope, signal.generation)
         };
-        if !used || !scope::is_within(root, owner_scope) {
-            continue;
-        }
-        withdraw_everywhere(
-            machine,
-            ObjRef::new(ObjKind::Signal, index as u16, generation),
-        );
         scope::release(owner_scope, Resource::Metadata, 1);
         machine.signals[index] = crate::events::Signal::empty();
         machine.signals[index].generation = generation;
         objects += 1;
     }
 
-    for index in 0..machine.timers.len() {
-        let (used, owner_scope, generation) = {
+    let mut remaining = doomed.timers;
+    while remaining != 0 {
+        let index = remaining.trailing_zeros() as usize;
+        remaining &= remaining - 1;
+        let (owner_scope, generation) = {
             let timer = &machine.timers[index];
-            (timer.used, timer.owner_scope, timer.generation)
+            (timer.owner_scope, timer.generation)
         };
-        if !used || !scope::is_within(root, owner_scope) {
-            continue;
-        }
-        withdraw_everywhere(
-            machine,
-            ObjRef::new(ObjKind::Timer, index as u16, generation),
-        );
         scope::release(owner_scope, Resource::Metadata, 1);
         machine.timers[index] = crate::events::Timer::empty();
         machine.timers[index].generation = generation;

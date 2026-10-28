@@ -373,6 +373,19 @@ Implementado ([ADR-015](../decisions/ADR-015-targeted-seal-wait-and-table-walks.
 
 Diseñado, no medido. No se sabe cuánto pesa cada parte. Si el costo de mapear una página lo dominan la creación del objeto o la entrada al kernel, este cambio puede no alcanzar su umbral. El registro del sello nombra ahora la generación de la última retirada del objeto, no una propia. Las puertas K1–K6 y las pruebas de EXP-13 no se corrieron dentro de este mini sprint; las verifica el cierre de K7.
 
+### Planificador, escala y cierre (k7-06)
+
+Observado en el baseline: las razones nativo / Linux de K6 son 0,452 y 0,447 para `sched.wake`; para `scale.ipc` con 1 a 4 pares, de 2,93 a 0,61; para `scale.compute`, entre 0,994 y 0,997; y para `closure.unit`, 0,278 y 0,290. La primera muestra de `closure.unit` de cada ronda del baseline A se reparte en unos 3 µs de valla, 5 de terminación y entre 10 y 14 de retirada, con un intento. Observado en el código (`bc2ba73`): un procesador ocioso al que un tick despertaba sin traerle nada volvía a sondear 200 µs, dos quintos de su tiempo con un tick cada 500 µs. Mientras sondea, lee cada 16 µs las líneas que un procesador ocupado escribe en cada ida y vuelta. El turno ocioso que encontraba un hilo en su cola hacía antes la recogida de dominios muertos y la contabilidad del tick. `SIGNAL_WAIT`, despertado, tomaba dos veces el cerrojo de control. La retirada recorría las 512 ranuras de capacidad de la máquina una vez por cada objeto que liberaba.
+
+Implementado ([ADR-016](../decisions/ADR-016-quiet-idle-and-one-sweep-retirement.md)), sin cambiar ninguna interfaz, estado, parámetro ni orden de comprobación:
+
+- **Sondeo solo después de haber corrido algo.** `halt_counting` (`kernel/src/sched.rs`) dice si el `hlt` terminó sin que se despachara un hilo de usuario. Si fue así, el siguiente `poll_before_halt` mira una vez y vuelve a parar. Un procesador que acaba de dejar de correr un hilo sondea los 200 µs de siempre. Busca subir `k7.k6_scale_ipc_1` a `_3` y `k7.k6_scale_compute_1` a `_3`, que tienen procesadores ociosos.
+- **El hilo despertado antes que la contabilidad.** `idle_turn` despacha primero si su cola no está vacía. `reap_dead` y `tick_bookkeeping` quedan para el turno que no encuentra nada y para los ticks. Busca bajar `k7.k6_sched_wake_0`.
+- **Una toma del cerrojo al despertar.** `evtops::wait` baja la cuenta de esperantes de la señal en la misma toma que vuelve a mirar los bits. Busca bajar `k7.k6_sched_wake_0`.
+- **Un barrido por retirada.** `scope::subtree` calcula el perímetro una vez. `release_sponsored` decide qué objetos se liberan, retira todas sus capacidades en un solo barrido y los libera en el mismo orden de antes. Busca bajar `k7.k6_closure_unit_0`.
+
+Diseñado, no medido. Que las lecturas de los procesadores ociosos pesen en `scale` es una hipótesis. `scale.compute` con cuatro hilos y `scale.ipc` con cuatro pares no tienen procesadores ociosos, y no hay en este cambio un mecanismo dirigido a ellos. La distancia de `scale.compute` con Linux probablemente viene del tick de 2 kHz, que no se tocó. Un despertar que llega a un procesador ocioso después de un tick sin trabajo lo encuentra ahora parado y lo interrumpe; `kicks` en `sched.cpu_summary` dice cuánto. Las puertas K1–K6 y las pruebas de EXP-13 no se corrieron dentro de este mini sprint; las verifica el cierre de K7.
+
 ## Reanudar aquí
 
 **Último hito terminado y pusheado:** **K6 completo en su alcance** —protocolos emparejados, campaña de referencia, EXP-12, ocho cuellos medidos y corregidos, parámetros V0 revisados, inventario físico, puerta K6— en la rama `feat/k6-comparison-hardening-reference`. K5 quedó completo en `feat/k5-thalyx-port-tools`.

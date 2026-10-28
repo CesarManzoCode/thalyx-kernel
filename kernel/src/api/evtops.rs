@@ -225,10 +225,22 @@ pub fn wait(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
     if request.bits == 0 {
         return Err(status::INVALID_ARGUMENT);
     }
+    // The signal a wake has just ended this thread's wait on. Its waiter
+    // count goes down in the same hold of the machine that looks at the bits
+    // again: one acquisition of the control lock between the wake and the
+    // answer, where there were two -- one to leave the wait, one to look --
+    // with nothing in between that the second did not repeat. The woken
+    // thread is what `sched.wake` times, and a write hold of the machine
+    // lock, just released by the processor that raised the signal, is a line
+    // that has to come over from it.
+    let mut leaving: Option<usize> = None;
     loop {
         let index;
         {
             let mut machine = MACHINE.write();
+            if let Some(left) = leaving.take() {
+                leave_wait(&mut machine, left);
+            }
             let cap = resolve(
                 &machine,
                 ctx.domain,
@@ -265,15 +277,18 @@ pub fn wait(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
         }
         crate::sched::block_current();
         let (woken, _) = thread::take_wake_status(ctx.thread);
-        {
-            let mut machine = MACHINE.write();
-            if machine.signals.get(index).is_some_and(|signal| signal.used) {
-                machine.signals[index].waiters = machine.signals[index].waiters.saturating_sub(1);
-            }
-        }
         if woken != status::OK {
+            leave_wait(&mut MACHINE.write(), index);
             return Err(woken);
         }
+        leaving = Some(index);
+    }
+}
+
+/// Takes a thread that has stopped waiting off a signal's count of waiters.
+fn leave_wait(machine: &mut Machine, index: usize) {
+    if machine.signals.get(index).is_some_and(|signal| signal.used) {
+        machine.signals[index].waiters = machine.signals[index].waiters.saturating_sub(1);
     }
 }
 

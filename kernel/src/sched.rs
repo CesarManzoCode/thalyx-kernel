@@ -101,6 +101,10 @@ const DEFERRED_WAKES: usize = 4;
 /// takes a wake that arrives soon without either. Two hundred microseconds is
 /// what a Linux guest's `haltpoll` governor polls for by default, so the two
 /// sides of the comparison idle the same way.
+///
+/// After the processor stops running something, not after every halt: a
+/// halt ended by a tick that brought nothing is followed by one look and
+/// another halt (see `halt_counting`). The value is unchanged.
 pub const IDLE_POLL_NS: u64 = 200_000;
 
 /// How often a polling processor looks at the *other* processors' queues for
@@ -1949,7 +1953,11 @@ fn progress_possible() -> bool {
 /// interrupts enabled as a halt would have them. Whether something arrived,
 /// or the run was told to stop, in which case the caller should reconsider
 /// rather than halt.
-fn poll_before_halt(cpu: usize) -> bool {
+///
+/// Without `full` the watch is the look on the way in and one look at the
+/// local queue, and then the processor halts: the caller has just come out
+/// of a halt that ran nothing (see [`halt_counting`]).
+fn poll_before_halt(cpu: usize, full: bool) -> bool {
     // Whatever this processor still holds is capacity its siblings are being
     // refused for, and it has nothing to spend it on.
     release_credits(cpu);
@@ -1960,7 +1968,11 @@ fn poll_before_halt(cpu: usize) -> bool {
     if hz == 0 {
         return false;
     }
-    let budget = IDLE_POLL_NS * hz / 1_000_000_000;
+    let budget = if full {
+        IDLE_POLL_NS * hz / 1_000_000_000
+    } else {
+        0
+    };
     let scan_interval = IDLE_SCAN_INTERVAL_NS * hz / 1_000_000_000;
     let start = cpu::rdtsc();
     CPUS[cpu].idle.store(IDLE_POLLING, Ordering::Release);
@@ -2098,7 +2110,21 @@ fn halt(cpu: usize) {
 /// Returns the thread it dispatched, or `None` when the processor found
 /// nothing and should consider whether the run is over.
 fn idle_turn(cpu: usize) -> Option<usize> {
-    flush_wakes();
+    flush_wakes_on(cpu);
+    // A thread already in this processor's queue was woken onto it, and the
+    // processor is here because its poll saw the bit. It is dispatched
+    // before the turn's reclamation and bookkeeping rather than after them:
+    // both are done by every timer tick of every processor and by the next
+    // idle turn that finds nothing queued, and neither is anything the woken
+    // thread has to wait behind. `sched.wake` measures exactly this path --
+    // a wake from a thread that keeps running, taken by a processor polling
+    // in its idle loop.
+    if !local_queue_empty(cpu) {
+        let next = schedule(cpu);
+        if next != idle_thread(cpu) {
+            return Some(next);
+        }
+    }
     crate::domain::reap_dead();
     tick_bookkeeping(time::observe());
     let next = schedule(cpu);
@@ -2115,15 +2141,36 @@ fn idle_turn(cpu: usize) -> Option<usize> {
 /// that is not this processor's job, because it cannot see whether another one
 /// is about to make a thread runnable.
 pub fn run_ap(cpu: usize) -> ! {
+    let mut quiet = false;
     loop {
         if smp::shutting_down() {
             smp::park(cpu);
         }
-        if idle_turn(cpu).is_some() || poll_before_halt(cpu) {
+        if idle_turn(cpu).is_some() || poll_before_halt(cpu, !quiet) {
+            quiet = false;
             continue;
         }
-        halt(cpu);
+        quiet = halt_counting(cpu);
     }
+}
+
+/// Halts, and says whether the halt was quiet: whatever ended it dispatched
+/// no user thread here.
+///
+/// A quiet halt was ended by a timer tick, an invalidation or an interrupt
+/// for another processor's business, and an idle processor that goes on to
+/// poll for [`IDLE_POLL_NS`] after one is polling on no evidence that work
+/// is coming. With a tick every 500 us it spent two fifths of its idle time
+/// polling, and every 16 us of that reading the lines a busy processor
+/// writes on each round trip ([`IDLE_SCAN_INTERVAL_NS`]). The poll is for a
+/// processor that has just stopped running something, whose thread is likely
+/// to be woken again soon -- which is what Linux's `haltpoll` governor
+/// adapts to, shrinking the poll after polls that found nothing, and what a
+/// Linux guest's idle processor never wakes for at all, having no tick.
+fn halt_counting(cpu: usize) -> bool {
+    let dispatched = CPUS[cpu].dispatches.load(Ordering::Relaxed);
+    halt(cpu);
+    CPUS[cpu].dispatches.load(Ordering::Relaxed) == dispatched
 }
 
 /// Runs the bootstrap processor's idle thread: reclaims what died, waits for
@@ -2135,8 +2182,10 @@ pub fn run_ap(cpu: usize) -> ! {
 /// the whole table and then stops the others.
 pub fn run_until_idle() -> Terminal {
     let cpu = percpu::index();
+    let mut quiet = false;
     loop {
         if idle_turn(cpu).is_some() {
+            quiet = false;
             continue;
         }
 
@@ -2158,10 +2207,11 @@ pub fn run_until_idle() -> Terminal {
         });
 
         if busy {
-            if poll_before_halt(cpu) {
+            if poll_before_halt(cpu, !quiet) {
+                quiet = false;
                 continue;
             }
-            halt(cpu);
+            quiet = halt_counting(cpu);
             continue;
         }
         if !any {
@@ -2170,14 +2220,15 @@ pub fn run_until_idle() -> Terminal {
         if !possible {
             return Terminal::Deadlock;
         }
-        if poll_before_halt(cpu) {
+        if poll_before_halt(cpu, !quiet) {
+            quiet = false;
             continue;
         }
         // Something can still happen, but not here and not now. Let the timer
         // in: this and the application processors' idle loops are the only
         // points where interrupts are enabled outside user mode, and no lock is
         // held across it.
-        halt(cpu);
+        quiet = halt_counting(cpu);
     }
 }
 
