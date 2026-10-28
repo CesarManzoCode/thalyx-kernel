@@ -327,7 +327,7 @@ fn admit(
     let origin_scope = thread::get(ctx.thread).effective_scope();
     let charged = if ordinary {
         let bytes = MESSAGE_OVERHEAD_BYTES + u64::from(request.payload_len);
-        if !scope::reserve(origin_scope, Resource::QueueBytes, bytes) {
+        if !scope::reserve_inline(origin_scope, Resource::QueueBytes, bytes) {
             machine.release_invocation(invocation_index);
             machine.release_message(message_index);
             let scope = &scope::table()[origin_scope as usize];
@@ -1079,7 +1079,7 @@ fn release_invocation(machine: &Machine, index: usize) {
         facts
     };
     if invocation.charged_bytes != 0 {
-        scope::release(
+        scope::release_inline(
             invocation.origin_scope,
             Resource::QueueBytes,
             invocation.charged_bytes,
@@ -1302,7 +1302,7 @@ pub fn begin_effect(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> 
     }
 
     let lineage = crate::api::lineage_status(machine, invocation.grant, ctx.now);
-    let scope_open = scope::is_open(invocation.origin_scope);
+    let scope_open = scope::is_open_inline(invocation.origin_scope);
     if lineage != status::OK || !scope_open {
         machine.invocations[index].get_mut().effect = Effect::Refused;
         let code = if lineage != status::OK {

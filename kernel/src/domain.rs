@@ -142,6 +142,19 @@ pub(crate) fn allocate_kernel_stack(machine: &mut Machine) -> Result<(usize, u64
             failure = Some(error.into());
             break;
         }
+        // The slot's address may have named the stack of the thread that last
+        // held it, and that translation is global: no `CR3` write on this
+        // processor retired it, and nothing makes the creating processor
+        // catch up with the release before it writes the new thread's first
+        // context through this address. Writing through the old entry put the
+        // context in the old frame, in quarantine, and the processor that
+        // dispatched the thread -- which does refresh first -- read the new
+        // one, zeroed: `ret` to address zero on the slot's first switch, seen
+        // once in the K7 campaigns.
+        //
+        // SAFETY: the entry was just written in the address space this
+        // processor is running in; invalidating it only drops a cached copy.
+        unsafe { cpu::invlpg(vaddr) };
         mapped += 1;
     }
 
@@ -171,26 +184,34 @@ fn release_kernel_stack(machine: &mut Machine, slot: usize) {
     if slot >= MAX_KSTACKS || !machine.kstack_used[slot] {
         return;
     }
-    // One generation for the whole stack: every page of it has its entry
-    // cleared here, under one lock. A kernel-half one: the entries are
-    // global, and the flush that retires them is the one this asks for.
-    let stamp = crate::tlb::retire_stamp_kernel();
     let base = layout::kstack_slot_base(slot);
-    for page in 0..layout::KSTACK_PAGES {
-        let vaddr = base + (page + 1) * PAGE_SIZE;
-        let (space, allocator) = split_space(machine);
-        if let Some(frame) = space.unmap(vaddr) {
-            // The mapping is gone from this processor's tables, but another
-            // processor may still hold the translation: the kernel half is
-            // shared, so this address means the same thing everywhere. The
-            // frame therefore goes to quarantine and comes back only once every
-            // processor has invalidated past this point.
-            allocator.retire_at(frame, Owner::Kernel, stamp);
+    let mut frames = [None; layout::KSTACK_PAGES as usize];
+    for (page, slot_frame) in frames.iter_mut().enumerate() {
+        let vaddr = base + (page as u64 + 1) * PAGE_SIZE;
+        let (space, _) = split_space(machine);
+        *slot_frame = space.unmap(vaddr);
+        if slot_frame.is_some() {
             // SAFETY: the entry was just removed from the address space this
             // processor is running in; invalidating it is what makes the
             // removal take effect here.
             unsafe { cpu::invlpg(vaddr) };
         }
+    }
+    // One generation for the whole stack, taken after every entry of it is
+    // cleared: a processor that catches up with it flushes at a point where
+    // the entries are already gone, and cannot walk them back in afterwards.
+    // Taken before the clearing, a processor flushing in between counted as
+    // past it while the entries were still there to cache. A kernel-half one:
+    // the entries are global, and the flush that retires them is the one this
+    // asks for.
+    let stamp = crate::tlb::retire_stamp_kernel();
+    for frame in frames.into_iter().flatten() {
+        // The mapping is gone from this processor's tables, but another
+        // processor may still hold the translation: the kernel half is
+        // shared, so this address means the same thing everywhere. The frame
+        // therefore goes to quarantine and comes back only once every
+        // processor has invalidated past this point.
+        machine.allocator().retire_at(frame, Owner::Kernel, stamp);
     }
     machine.kstack_used[slot] = false;
 }

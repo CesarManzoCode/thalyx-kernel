@@ -264,7 +264,9 @@ impl AddressSpace {
         alloc: &mut FrameAllocator,
         owner: Owner,
     ) -> Result<(), (u64, MapError)> {
-        rights.validate().map_err(|error| (0, MapError::Rights(error)))?;
+        rights
+            .validate()
+            .map_err(|error| (0, MapError::Rights(error)))?;
         if vaddr % PAGE_SIZE != 0 {
             return Err((0, MapError::BadAddress));
         }

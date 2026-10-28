@@ -106,6 +106,10 @@ const RUN_DEADLINE_NS: u64 = 1_200_000_000_000;
 /// a handoff instead: the bound on how long a handed-over entry waits to
 /// start, which is not part of what any entry measures.
 const AUDIT_SLEEP_NS: u64 = 500_000;
+/// Execution windows that begin, with the auditor asleep, between the end of a
+/// handed-over entry and the client's next one: enough to repay an overrun of
+/// up to two budgets, so the next entry starts with the auditor dispatchable.
+const SETTLE_WINDOWS: u64 = 3;
 
 pub fn image_named(label: &str) -> Option<u64> {
     let wanted = name16(label);
@@ -547,6 +551,7 @@ fn run() -> ! {
             let mut answer = Handoff::read_from(&bytes, 0).unwrap_or_else(Handoff::zeroed);
             answer.status = status;
             let _ = k2::memory_write(shared, generated::SHARED_HANDOFF_OFFSET, answer.as_bytes());
+            entries::settle(&mut run, SETTLE_WINDOWS);
             let _ = k2::signal_raise(handoff, generated::HANDOFF_DONE_BIT);
         }
         if let Ok(info) = k2::domain_query(client.domain)

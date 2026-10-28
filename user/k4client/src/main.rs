@@ -1040,8 +1040,8 @@ fn run_broker(endpoint: u64, done: u64, config: &ClientConfig) {
                     }
                     continue;
                 }
-                let told = k2::signal_query(done)
-                    .is_ok_and(|info| info.bits & bit::BROKER_STOP != 0);
+                let told =
+                    k2::signal_query(done).is_ok_and(|info| info.bits & bit::BROKER_STOP != 0);
                 if told || k2::now_ns().saturating_sub(idle_since) >= BROKER_IDLE_NS {
                     break;
                 }

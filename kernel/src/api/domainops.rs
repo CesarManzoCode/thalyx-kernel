@@ -186,9 +186,8 @@ pub fn map(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u6
     let charged_before = machine.allocator().charged(Owner::Domain(target as u16)) as u64;
     // One walk of the hierarchy per page table rather than per page: the
     // entries written are the ones the page-by-page loop wrote.
-    let first = crate::mm::Frame::containing(
-        base.addr() + u64::from(request.offset_pages) * PAGE_SIZE,
-    );
+    let first =
+        crate::mm::Frame::containing(base.addr() + u64::from(request.offset_pages) * PAGE_SIZE);
     let installed = u64::from(request.page_count);
     let failure = {
         let space = machine.domains[target]

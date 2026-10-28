@@ -668,11 +668,28 @@ impl Chain {
 /// [`Chain`] first: the array is thirty-odd bytes of stores and a second loop
 /// for a chain that is usually three scopes long, and an `is_open` that finds
 /// the leaf closed has no reason to read the root at all.
+///
+/// The three are kept out of line. Each is a counted walk of up to seventeen
+/// steps, and inlined into the sixty-odd places that reserve, release or ask
+/// it was copied, unrolled, into each of them: forty kilobytes of kernel text
+/// where one shared copy reached by a call does. The call was then seen in
+/// the IPC round trip, about 35 ns of `ipc.lineage` at every depth, so the few
+/// places on that path -- admission, the release of an invocation, a
+/// capability installed or released, the lineage walk -- ask the `_inline`
+/// forms, which are the same walk copied into them.
 const MAX_STEPS: usize = thalyx_abi::limit::MAX_SCOPE_DEPTH as usize + 1;
 
 /// True when `scope` and every ancestor are open.
 #[must_use]
+#[inline(never)]
 pub fn is_open(scope: ScopeId) -> bool {
+    is_open_inline(scope)
+}
+
+/// [`is_open`], copied into its caller: for the IPC round trip only.
+#[must_use]
+#[inline(always)]
+pub fn is_open_inline(scope: ScopeId) -> bool {
     let mut current = scope;
     for _ in 0..MAX_STEPS {
         let Some(node) = SCOPES.get(current as usize) else {
@@ -725,7 +742,7 @@ impl OpenMemo {
         if self.seen[..self.len].contains(&scope) {
             return true;
         }
-        if !is_open(scope) {
+        if !is_open_inline(scope) {
             return false;
         }
         if self.len < self.seen.len() {
@@ -808,10 +825,17 @@ fn bounded_add(counter: &AtomicU64, amount: u64, limit: u64) -> Result<u64, u64>
 /// Every level is checked as it is charged, and a refusal at any level undoes
 /// the levels below it, so no counter ends up above its ceiling and a refusal
 /// leaves no charge behind. A closed scope refuses like an exhausted one.
+#[inline(never)]
 pub fn reserve(scope: ScopeId, resource: Resource, amount: u64) -> bool {
+    reserve_inline(scope, resource, amount)
+}
+
+/// [`reserve`], copied into its caller: for the IPC round trip only. The
+/// refusal, which undoes and reports, stays a call in every copy.
+#[inline(always)]
+pub fn reserve_inline(scope: ScopeId, resource: Resource, amount: u64) -> bool {
     let mut current = scope;
     let mut done = 0;
-    let mut binding = None;
     for _ in 0..MAX_STEPS {
         let Some(node) = SCOPES.get(current as usize) else {
             break;
@@ -819,8 +843,8 @@ pub fn reserve(scope: ScopeId, resource: Resource, amount: u64) -> bool {
         let refused = node.state() != State::Open
             || bounded_add(node.account(resource), amount, node.limit(resource)).is_err();
         if refused {
-            binding = Some(current);
-            break;
+            refuse(scope, current, done, resource, amount);
+            return false;
         }
         done += 1;
         match node.parent() {
@@ -828,9 +852,14 @@ pub fn reserve(scope: ScopeId, resource: Resource, amount: u64) -> bool {
             None => break,
         }
     }
-    let Some(binding) = binding else {
-        return true;
-    };
+    true
+}
+
+/// The refusal of [`reserve`] at `binding`, after `done` levels below it were
+/// charged.
+#[cold]
+#[inline(never)]
+fn refuse(scope: ScopeId, binding: ScopeId, done: usize, resource: Resource, amount: u64) {
     // The levels below the one that refused, leaf first, the same links the
     // charge followed: they are stable while the leaf is live.
     let mut current = scope;
@@ -858,11 +887,17 @@ pub fn reserve(scope: ScopeId, resource: Resource, amount: u64) -> bool {
         node.limit(resource),
         node.state().name()
     );
-    false
 }
 
 /// Returns `amount` of `resource` to `scope` and every ancestor.
+#[inline(never)]
 pub fn release(scope: ScopeId, resource: Resource, amount: u64) {
+    release_inline(scope, resource, amount);
+}
+
+/// [`release`], copied into its caller: for the IPC round trip only.
+#[inline(always)]
+pub fn release_inline(scope: ScopeId, resource: Resource, amount: u64) {
     let mut current = scope;
     for _ in 0..MAX_STEPS {
         let Some(node) = SCOPES.get(current as usize) else {

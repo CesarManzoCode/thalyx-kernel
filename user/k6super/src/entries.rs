@@ -130,6 +130,27 @@ pub fn drain_timed(run: &mut Run, wait_until: u64) -> bool {
     }
 }
 
+/// Audits, asleep in the kernel between batches, until `windows` execution
+/// windows have begun.
+///
+/// The auditor is this domain, and this domain's scope has half a window of
+/// execution. A handed-over entry can spend all of it and more: `closure.unit`
+/// ends by writing its samples as synchronous serial notes, about 2.4 ms each
+/// under KVM, and the kernel carries the overrun into the next window. Handing
+/// the client back then starts its next entry while the auditor cannot be
+/// dispatched, and nothing drains the log: in the K7 campaigns `ipc.caps`
+/// after `closure.unit` made exactly the 248 admissions the log's ordinary
+/// cells hold and the next one was refused with `LIMIT_EXHAUSTED`. Sleeping
+/// costs no execution, so each window that begins repays up to one budget;
+/// none of it is inside any entry's samples.
+pub fn settle(run: &mut Run, windows: u64) {
+    let window = run.window_ns.max(1);
+    let until = (k2::now_ns() / window + windows) * window;
+    while k2::now_ns() < until {
+        drain_timed(run, until);
+    }
+}
+
 /// Runs one handed-over entry. Zero, or the negated status it stopped with.
 pub fn run(run: &mut Run, request: &Handoff) -> u32 {
     let samples = (request.samples as usize).min(SAMPLES);

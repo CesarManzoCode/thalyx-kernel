@@ -207,7 +207,7 @@ pub fn cap_install(
     slot: Option<usize>,
 ) -> Option<u64> {
     let owner = machine.domains[domain].owner_scope;
-    if !scope::reserve(owner, scope::Resource::Metadata, 1) {
+    if !scope::reserve_inline(owner, scope::Resource::Metadata, 1) {
         return None;
     }
     let handle = match slot {
@@ -257,7 +257,7 @@ pub fn cap_release_slot(machine: &Machine, domain: usize, slot: usize) -> bool {
 
 fn release_entry(machine: &Machine, domain: usize, entry: crate::obj::CapEntry) {
     let owner = machine.domains[domain].owner_scope;
-    scope::release(owner, scope::Resource::Metadata, 1);
+    scope::release_inline(owner, scope::Resource::Metadata, 1);
     if entry.grant != NO_GRANT {
         let mut node = machine.grants.nodes[entry.grant as usize].lock();
         node.refs = node.refs.saturating_sub(1);
