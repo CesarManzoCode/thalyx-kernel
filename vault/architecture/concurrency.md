@@ -39,7 +39,7 @@ propios módulos, con estas reglas:
 |---|---|---|
 | Contextos de ejecución | `kernel/src/thread.rs` | Campos atómicos; un cerrojo por hilo para el registro de espera; el resto pertenece al planificador o al plano de control, declarado por acceso. |
 | Colas de ejecución, créditos, máscaras de ocioso | `kernel/src/sched.rs` | Un cerrojo por procesador; a lo sumo dos a la vez, en orden ascendente de índice, para robar trabajo. |
-| Cuentas de ámbito | `kernel/src/scope.rs` | Atómicos con suma acotada: el techo se comprueba y se toma en un solo paso, y el nivel que no cabe deshace los que ya tomó. La ventana se cierra bajo un seqlock, y una reserva que la cruzó se rehace contra la ventana nueva. |
+| Cuentas de ámbito | `kernel/src/scope.rs` | Atómicos con suma acotada: el techo se comprueba y se toma en un solo intercambio comparado, de modo que ningún contador pasa su techo ni siquiera de forma transitoria y un rechazo se decide contra lo que el contador tiene de verdad ([ADR-014](../decisions/ADR-014-exact-scope-reservations-and-lineage-walks.md)); el nivel que no cabe deshace los que ya tomó. Estructura, contadores de reserva y contadores de despacho de cada ámbito ocupan líneas de caché distintas. La ventana se cierra bajo un seqlock, y una reserva que la cruzó se rehace contra la ventana nueva. |
 | Traducciones por espacio | `kernel/src/tlb.rs` | Generaciones y máscaras atómicas. |
 
 ### El cerrojo de control se toma compartido

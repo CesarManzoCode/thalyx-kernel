@@ -1343,7 +1343,11 @@ pub fn defer_wake(index: usize, hint: WakeHint) {
 /// processor blocks or idles: a deferred wake is issued by the processor that
 /// deferred it before that processor does anything else with its time.
 pub fn flush_wakes() {
-    let me = percpu::index();
+    flush_wakes_on(percpu::index());
+}
+
+/// [`flush_wakes`] for a processor index the caller has already read.
+fn flush_wakes_on(me: usize) {
     let count = CPUS[me].deferred_count.load(Ordering::Relaxed);
     if count == 0 {
         return;
@@ -1555,8 +1559,10 @@ fn delegate_aged_sync(me: usize) {
 /// synchronously and did not pick up is handed to an idle processor once it
 /// has aged, and a wake that asked for this processor is honoured.
 pub fn on_kernel_exit() {
-    flush_wakes();
+    // One reading of the processor index for the whole exit: nothing below
+    // switches before the first `schedule`, and each `schedule` returns.
     let me = percpu::index();
+    flush_wakes_on(me);
     if CPUS[me].need_resched.load(Ordering::Acquire) {
         schedule(me);
         return;
@@ -1850,6 +1856,26 @@ pub fn leave_if_dead(frame: &trap::TrapFrame) {
     }
     let cpu = percpu::index();
     let current = CPUS[cpu].current.load(Ordering::Relaxed);
+    leave_if_stopped(frame, cpu, current);
+}
+
+/// [`leave_if_dead`] for a `syscall` entry, which already knows the thread
+/// that entered and that it came from ring 3.
+///
+/// The entry found its thread once on the way in, and it is the same thread on
+/// the way out whichever processor it is returning on: a thread that blocked
+/// inside the entry resumes on its own kernel stack. Asking the processor
+/// again cost a per-processor read and a load of a line the scheduler writes,
+/// on every entry including the ones that only ask for the version or the
+/// time.
+pub fn leave_if_dead_after_entry(frame: &trap::TrapFrame, current: usize) {
+    if !thread::get(current).stop.load(Ordering::Acquire) {
+        return;
+    }
+    leave_if_stopped(frame, percpu::index(), current);
+}
+
+fn leave_if_stopped(frame: &trap::TrapFrame, cpu: usize, current: usize) {
     let cell = thread::get(current);
     if !cell.stop.load(Ordering::Acquire) {
         return;

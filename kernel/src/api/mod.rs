@@ -464,19 +464,41 @@ pub fn lineage_status(machine: &Machine, grant: GrantId, now: u64) -> i64 {
 
 /// The walk itself: one node held at a time, towards the root.
 fn walk_lineage(machine: &Machine, grant: GrantId, now: u64) -> i64 {
+    walk_lineage_from(machine, grant, None, now)
+}
+
+/// The walk, starting from a copy of the first node when the caller already
+/// read it in its own hold of that node's lock.
+///
+/// Resolution reads the leaf's object, rights and facet and then walked the
+/// lineage, which took the leaf's lock a second time to read the same record:
+/// on a round trip, a second transfer of a line the replier's processor had
+/// just written. A copy taken in one hold is the same reading the walk would
+/// make, a few instructions earlier.
+fn walk_lineage_from(
+    machine: &Machine,
+    grant: GrantId,
+    first: Option<crate::obj::Grant>,
+    now: u64,
+) -> i64 {
     let mut current = grant;
     let mut steps = 0;
+    let mut first = first;
+    // The sponsor and life scopes of a lineage repeat from node to node; each
+    // is walked to the root once per lineage, not once per node.
+    let mut open = scope::OpenMemo::new();
     while current != NO_GRANT {
         steps += 1;
         if steps > thalyx_abi::limit::MAX_DERIVE_DEPTH + 1 {
             return status::INVALID_HANDLE;
         }
-        let Some(node) = machine
-            .grants
-            .nodes
-            .get(current as usize)
-            .map(|node| *node.lock())
-        else {
+        let Some(node) = first.take().or_else(|| {
+            machine
+                .grants
+                .nodes
+                .get(current as usize)
+                .map(|node| *node.lock())
+        }) else {
             return status::INVALID_HANDLE;
         };
         if !node.used {
@@ -489,7 +511,7 @@ fn walk_lineage(machine: &Machine, grant: GrantId, now: u64) -> i64 {
             return status::EXPIRED;
         }
         if let Some(life) = node.life_scope
-            && !scope::is_open(life)
+            && !open.is_open(life)
         {
             return status::SCOPE_CLOSED;
         }
@@ -499,7 +521,7 @@ fn walk_lineage(machine: &Machine, grant: GrantId, now: u64) -> i64 {
         // acting through a handle it happens to still hold, and through every
         // handle it had already given away. This is the check that makes the
         // barrier reach a capability the closed domain moved to someone else.
-        if !scope::is_open(node.sponsor) {
+        if !open.is_open(node.sponsor) {
             return status::SCOPE_CLOSED;
         }
         current = node.parent;
@@ -585,18 +607,16 @@ fn resolve_entry(
     let grant = entry.grant;
     // The node's three facts, read in one hold of the tree and checked
     // outside it: the object's own record is taken after, never inside.
-    let (object, rights, facet) = {
-        let node = machine
-            .grants
-            .nodes
-            .get(grant as usize)
-            .map(|node| *node.lock())
-            .filter(|node| node.used)
-            .ok_or(status::INVALID_HANDLE)?;
-        (node.object, node.rights, node.facet)
-    };
+    let leaf = machine
+        .grants
+        .nodes
+        .get(grant as usize)
+        .map(|node| *node.lock())
+        .filter(|node| node.used)
+        .ok_or(status::INVALID_HANDLE)?;
+    let (object, rights, facet) = (leaf.object, leaf.rights, leaf.facet);
     if let Some(now) = now {
-        let lineage = walk_lineage(machine, grant, now);
+        let lineage = walk_lineage_from(machine, grant, Some(leaf), now);
         if lineage != status::OK {
             return Err(lineage);
         }

@@ -348,6 +348,19 @@ Implementado ([ADR-013](../decisions/ADR-013-idle-takes-interrupt-wakes-and-quie
 
 Diseñado, no medido. Que esto mueva `k7.tx_request`, `k7.tx_validate` y `k7.tx_observe` es una hipótesis: esas fases no tocan la máquina virtual, y el cambio solo les quitaría actividad del invitado que compite por el anfitrión. El tick periódico de cada procesador no se tocó. No se cambió Thalyx. Las puertas K1–K6 y las pruebas de EXP-13 no se corrieron dentro de este mini sprint; las verifica el cierre de K7.
 
+### Entradas al kernel, IPC y capacidades (k7-04)
+
+Observado en el baseline: la puerta K6 da 23/24 en las dos réplicas. Solo cae `no_loss`, por `LIMIT_EXHAUSTED` en el brazo nativo en `scale.ipc` con 2 y 4 pares y en `ipc.caps` con 1 capacidad, una vez por boot afectado, en rondas distintas. `ipc.lineage` crece de 2 065 ns con 0 derivaciones a 2 330 ns con 28. Observado en el código (`b6b8017`): la suma acotada de `scope.rs` sumaba y luego deshacía, así que una reserva que iba a fallar dejaba su contador por encima del techo mientras se deshacía, y un hermano que lo leyera en ese momento se rechazaba. La recorrida de un linaje recorría la cadena de ámbitos hasta la raíz dos veces por nodo. La resolución tomaba dos veces el cerrojo del nodo hoja. El estado de cada ámbito compartía línea de caché con sus contadores de despacho.
+
+Implementado ([ADR-014](../decisions/ADR-014-exact-scope-reservations-and-lineage-walks.md)), sin cambiar ningún techo, estado, interfaz ni orden de comprobación:
+
+- **Suma acotada exacta.** `bounded_add` mueve el contador con `compare_exchange` solo a un valor que no pasa el techo, así que un rechazo se decide contra lo que el contador tiene de verdad. Sirve a `reserve` y a `reserve_cpu`. Busca que `no_loss` vuelva a pasar y la puerta K6 a 24/24 (`k7.behavior_gates`). Que los −9 del baseline vengan de aquí es una hipótesis, porque la imagen de medida no escribe qué recurso rechazó.
+- **Recorridas sin arreglo y una memoria por linaje.** `is_open`, `reserve` y `release` siguen los enlaces al padre sin construir un `Chain`. `scope::OpenMemo` hace que `walk_lineage` pregunte una sola vez por cada ámbito en una recorrida. `resolve_entry` le pasa a la recorrida la copia del nodo hoja que ya leyó. Busca bajar `k7.k6_ipc_lineage_*` (0, 8, 16 y 28), `k7.k6_ipc_call_*`, `k7.k6_ipc_caps_*` y `k7.k6_cap_derive_0`.
+- **Disposición de `Scope` por línea de caché.** `repr(C, align(64))`: estructura, identidad y estadísticas, contadores de reserva y contadores de despacho van cada uno en su línea. Una aserción en tiempo de compilación exige que la estructura quepa en la primera. Busca bajar las mismas métricas de IPC, porque cada reserva y cada comprobación de linaje leen la estructura de cada ancestro.
+- **Salida de la entrada.** `on_kernel_exit` lee una vez el índice del procesador, y `syscall` comprueba la parada con el hilo que encontró al entrar. Busca bajar `k7.k6_entry_version_0` y `k7.k6_entry_clock_0`, en poco: quita lecturas, no cambia la forma de la entrada.
+
+Diseñado, no medido. Queda una ventana residual: si un ancestro rechaza, los niveles inferiores quedan cargados unos nanosegundos mientras se deshacen. La lectura previa al intercambio puede costar más bajo contención que el `fetch_add`, y su balance con la separación de líneas lo mide el cierre. `k7.k6_audit_drain_0` no tiene un mecanismo dirigido en este cambio. Las puertas K1–K6 y las pruebas de EXP-13 no se corrieron dentro de este mini sprint; las verifica el cierre de K7.
+
 ## Reanudar aquí
 
 **Último hito terminado y pusheado:** **K6 completo en su alcance** —protocolos emparejados, campaña de referencia, EXP-12, ocho cuellos medidos y corregidos, parámetros V0 revisados, inventario físico, puerta K6— en la rama `feat/k6-comparison-hardening-reference`. K5 quedó completo en `feat/k5-thalyx-port-tools`.

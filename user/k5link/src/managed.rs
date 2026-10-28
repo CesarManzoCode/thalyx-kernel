@@ -397,12 +397,7 @@ impl Published {
 
 /// Stages an object for a root commit, or, with `reuse`, names it without a
 /// call when the published closure already holds it.
-fn put_staged(
-    store: &mut Store,
-    object_type: u32,
-    bytes: &[u8],
-    reuse: bool,
-) -> Option<[u8; 32]> {
+fn put_staged(store: &mut Store, object_type: u32, bytes: &[u8], reuse: bool) -> Option<[u8; 32]> {
     if !reuse {
         return store.put_object(object_type, bytes);
     }

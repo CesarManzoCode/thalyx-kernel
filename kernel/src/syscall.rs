@@ -136,7 +136,7 @@ pub fn handle(frame: &mut TrapFrame) {
 
     // Every return to ring 3 passes here. A thread whose domain was terminated
     // by authority while it was inside this entry does not get the return.
-    crate::sched::leave_if_dead(frame);
+    crate::sched::leave_if_dead_after_entry(frame, thread);
 }
 
 /// Writes the effective interface limits into the caller's buffer.

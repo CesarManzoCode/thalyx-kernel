@@ -20,13 +20,14 @@
 //! who is whose parent, what a scope's ceilings are, which slot is in use --
 //! still changes only under the machine lock, because it changes rarely. The
 //! *counters* are atomics, and a reservation over a chain is a sequence of
-//! atomic increments, each checked against its ceiling as it lands and undone
-//! from the tail if a later ancestor refuses. A ceiling is therefore never
-//! exceeded, not even transiently: the increment that would exceed it is the
-//! one that fails. What is given up is only the pretence that the whole chain
-//! was checked before any counter moved; a refusal now leaves a charge behind
-//! for the few nanoseconds it takes to undo it, and nothing can observe more
-//! than the ceiling in that window.
+//! compare-and-exchange steps, each moving a counter only to a value at or
+//! under its ceiling and undone from the tail if a later ancestor refuses. A
+//! ceiling is therefore never exceeded, not even transiently, and a level
+//! refuses only against what it really holds: no counter ever shows a sibling
+//! the charge of a reservation that was already failing. What is given up is
+//! only the pretence that the whole chain was checked before any counter
+//! moved; a refusal at an ancestor leaves the levels below it charged for the
+//! few nanoseconds it takes to undo them.
 //!
 //! The processor budget goes one step further, for the reason Linux's
 //! bandwidth controller keeps a per-runqueue slice of a group's quota: a
@@ -55,6 +56,14 @@ pub const DEBT_RECORD_LIMIT: u32 = 16;
 
 /// A scope index that names no scope.
 pub const NO_SCOPE: u16 = u16::MAX;
+
+/// A zero-sized field that starts a new cache line in a `repr(C)` record.
+///
+/// Its alignment moves the offset of whatever follows it to the next line, and
+/// it occupies nothing itself.
+#[derive(Clone, Copy, Default)]
+#[repr(align(64))]
+struct CacheLine;
 
 /// Ceilings of one scope.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -229,28 +238,104 @@ impl State {
 /// was true at some instant rather than a torn one. The **counters** are
 /// atomics that any processor moves without the lock, following the rules in
 /// the module documentation.
+///
+/// The layout is fixed and split by cache line, because the classes are read
+/// and written at very different rates by different processors. Every
+/// reservation and every lineage check reads the state, parent and ceilings of
+/// each ancestor up to the root; every context switch writes `running` and
+/// `parallelism_used` of the scope it dispatches. Left to the compiler, the
+/// small fields were packed together at the end of the record, so the root's
+/// state shared a line with its dispatch counters and an IPC round trip on one
+/// processor read a line another processor's scheduler had just written. Each
+/// class now starts its own line: the structure is read-mostly and stays shared
+/// in every cache, reservations move one line, dispatches another.
+#[repr(C, align(64))]
 pub struct Scope {
     /// Lifecycle state.
     state: AtomicU8,
-    /// Generation of this table slot, so a stale reference is refused.
-    pub generation: AtomicU32,
-    /// Diagnostic identity, unique within the boot epoch.
-    pub id: AtomicU64,
     /// Parent scope, or [`NO_SCOPE`] for the root.
     parent: AtomicU16,
     /// Distance from the root, bounded by the interface's scope depth.
     pub depth: AtomicU16,
+    /// Generation of this table slot, so a stale reference is refused.
+    pub generation: AtomicU32,
+    /// Ceilings.
+    pub limits: Ceilings,
+    /// Identity and per-window statistics: written at creation and when a
+    /// window rolls, read by reports and by the per-tick "is any window
+    /// stale" check.
+    _identity: CacheLine,
+    /// Diagnostic identity, unique within the boot epoch.
+    pub id: AtomicU64,
     /// Diagnostic label. A name grants nothing. Written once, at creation,
     /// under the machine lock, while nothing names the slot.
     label: [AtomicU8; 16],
-    /// Ceilings.
-    pub limits: Ceilings,
+    /// Live children, so a parent is not reused while a child exists.
+    pub children: AtomicU32,
+    /// Capability entries naming this scope, wherever they are held.
+    pub refs: AtomicU32,
+    /// Threads whose owning domain belongs to this scope.
+    pub threads: AtomicU32,
+    /// Window the charges above belong to.
+    pub window_index: AtomicU64,
+    /// What `cpu_window_ns` held when the current window opened: the overrun
+    /// the previous window carried in.
+    pub window_opened_ns: AtomicU64,
+    /// Windows that have closed with this scope in existence.
+    pub windows_closed: AtomicU64,
+    /// Of those, how many closed over budget.
+    pub overruns: AtomicU64,
+    /// The largest overrun observed.
+    pub max_overrun_ns: AtomicU64,
+    /// Most this scope was charged in any window that has closed.
+    ///
+    /// The number the reservation exists to bound. With one processor it is
+    /// bounded by arithmetic; with several it is bounded only if a dispatch
+    /// takes the balance before it runs, and reading it back afterwards is how
+    /// that stops being an assertion.
+    pub max_window_ns: AtomicU64,
+    /// Most this scope was charged *inside* one window, carried debt excluded.
+    pub max_charged_in_window_ns: AtomicU64,
+    /// Most a window was charged beyond what that window could admit.
+    ///
+    /// This is the number the reservation is supposed to bound, and it is not
+    /// the same as the overrun. A window that opens already in debt can close
+    /// over budget having executed nothing; what says whether admission held is
+    /// how much ran beyond what admission allowed. Preemption is timer-driven,
+    /// so a dispatch can outlive its reservation by the interrupt latency on
+    /// each processor, and that is the whole of what this may contain.
+    pub max_excess_ns: AtomicU64,
+    /// Overrun carried into later windows. Never cleared by a window change.
+    pub cpu_debt_ns: AtomicU64,
+    /// Overruns written out as their own `scope.debt` record. Every overrun is
+    /// counted in `overruns`; past [`DEBT_RECORD_LIMIT`] the plane stops writing
+    /// one line per window and the summary states how many it stands for.
+    pub debt_records: AtomicU32,
+    /// Messages withdrawn undelivered when the barrier went up.
+    pub undelivered_cancelled: AtomicU32,
+    /// Reservation counters: moved by admissions -- a message, a capability,
+    /// a page -- on whichever processor makes them.
+    _reservations: CacheLine,
     /// Pages held by this subtree.
     pub memory_pages: AtomicU64,
     /// Kernel objects held by this subtree.
     pub metadata: AtomicU64,
     /// Queue bytes held by this subtree.
     pub queue_bytes: AtomicU64,
+    /// Invocations admitted under this scope and not yet resolved.
+    pub invocations_pending: AtomicU32,
+    /// Effects admitted under this scope and not yet resolved.
+    pub effects_pending: AtomicU32,
+    /// Mappings installed under this scope's authority.
+    pub maps_pending: AtomicU32,
+    /// Closing capacity admitted effects are still holding but have not spent.
+    pub closure_reserved_ns: AtomicU64,
+    /// Monotonic time of the last observed drain progress.
+    pub last_progress_ns: AtomicU64,
+    /// Progress token: two equal readings mean nothing moved between them.
+    pub drain_token: AtomicU64,
+    /// Dispatch counters: moved on context switches and window charges.
+    _dispatch: CacheLine,
     /// Ordinary execution charged in the current window.
     pub cpu_window_ns: AtomicU64,
     /// Ordinary execution committed in the current window: charged plus
@@ -267,6 +352,19 @@ pub struct Scope {
     pub closure_used_ns: AtomicU64,
     /// Closing capacity committed: used plus promised to recovery dispatches.
     pub closure_committed_ns: AtomicU64,
+    /// Most this scope ever had committed at once in a window: what it had
+    /// already spent plus what it had promised and not yet spent.
+    ///
+    /// The reservation exists so this never exceeds the budget. Recording the
+    /// peak where the commitment is made turns that from a claim about the
+    /// code into a number a run either contradicts or does not.
+    pub max_committed_ns: AtomicU64,
+    /// Ordinary execution charged since creation.
+    pub cpu_total_ns: AtomicU64,
+    /// Dispatch reservations granted.
+    pub dispatch_grants: AtomicU64,
+    /// Dispatch reservations refused for want of budget or simultaneity.
+    pub dispatch_refusals: AtomicU64,
     /// Processors holding a dispatch credit or a running thread of this
     /// scope right now.
     pub running: AtomicU32,
@@ -276,77 +374,13 @@ pub struct Scope {
     /// for. A report can only see the instant it runs in, and on several
     /// processors that instant is very unlikely to be the interesting one.
     pub max_running: AtomicU32,
-    /// Most this scope ever had committed at once in a window: what it had
-    /// already spent plus what it had promised and not yet spent.
-    ///
-    /// The reservation exists so this never exceeds the budget. Recording the
-    /// peak where the commitment is made turns that from a claim about the
-    /// code into a number a run either contradicts or does not.
-    pub max_committed_ns: AtomicU64,
-    /// Dispatch reservations granted.
-    pub dispatch_grants: AtomicU64,
-    /// Dispatch reservations refused for want of budget or simultaneity.
-    pub dispatch_refusals: AtomicU64,
-    /// What `cpu_window_ns` held when the current window opened: the overrun
-    /// the previous window carried in.
-    pub window_opened_ns: AtomicU64,
-    /// Most this scope was charged *inside* one window, carried debt excluded.
-    pub max_charged_in_window_ns: AtomicU64,
-    /// Most a window was charged beyond what that window could admit.
-    ///
-    /// This is the number the reservation is supposed to bound, and it is not
-    /// the same as the overrun. A window that opens already in debt can close
-    /// over budget having executed nothing; what says whether admission held is
-    /// how much ran beyond what admission allowed. Preemption is timer-driven,
-    /// so a dispatch can outlive its reservation by the interrupt latency on
-    /// each processor, and that is the whole of what this may contain.
-    pub max_excess_ns: AtomicU64,
-    /// Ordinary execution charged since creation.
-    pub cpu_total_ns: AtomicU64,
-    /// Overrun carried into later windows. Never cleared by a window change.
-    pub cpu_debt_ns: AtomicU64,
-    /// Closing capacity admitted effects are still holding but have not spent.
-    pub closure_reserved_ns: AtomicU64,
-    /// Window the charges above belong to.
-    pub window_index: AtomicU64,
-    /// Most this scope was charged in any window that has closed.
-    ///
-    /// The number the reservation exists to bound. With one processor it is
-    /// bounded by arithmetic; with several it is bounded only if a dispatch
-    /// takes the balance before it runs, and reading it back afterwards is how
-    /// that stops being an assertion.
-    pub max_window_ns: AtomicU64,
-    /// Windows that have closed with this scope in existence.
-    pub windows_closed: AtomicU64,
-    /// Of those, how many closed over budget.
-    pub overruns: AtomicU64,
-    /// The largest overrun observed.
-    pub max_overrun_ns: AtomicU64,
-    /// Overruns written out as their own `scope.debt` record. Every overrun is
-    /// counted in `overruns`; past [`DEBT_RECORD_LIMIT`] the plane stops writing
-    /// one line per window and the summary states how many it stands for.
-    pub debt_records: AtomicU32,
-    /// Threads whose owning domain belongs to this scope.
-    pub threads: AtomicU32,
     /// Threads currently charging this scope.
     pub parallelism_used: AtomicU32,
-    /// Invocations admitted under this scope and not yet resolved.
-    pub invocations_pending: AtomicU32,
-    /// Effects admitted under this scope and not yet resolved.
-    pub effects_pending: AtomicU32,
-    /// Mappings installed under this scope's authority.
-    pub maps_pending: AtomicU32,
-    /// Messages withdrawn undelivered when the barrier went up.
-    pub undelivered_cancelled: AtomicU32,
-    /// Monotonic time of the last observed drain progress.
-    pub last_progress_ns: AtomicU64,
-    /// Progress token: two equal readings mean nothing moved between them.
-    pub drain_token: AtomicU64,
-    /// Live children, so a parent is not reused while a child exists.
-    pub children: AtomicU32,
-    /// Capability entries naming this scope, wherever they are held.
-    pub refs: AtomicU32,
 }
+
+// The structure has to fit the first line, or the point of the layout is lost
+// without anybody noticing.
+const _: () = assert!(core::mem::offset_of!(Scope, _identity) == 64);
 
 impl Scope {
     /// A free slot.
@@ -360,6 +394,9 @@ impl Scope {
             depth: AtomicU16::new(0),
             label: [const { AtomicU8::new(0) }; 16],
             limits: Ceilings::zero(),
+            _identity: CacheLine,
+            _reservations: CacheLine,
+            _dispatch: CacheLine,
             memory_pages: AtomicU64::new(0),
             metadata: AtomicU64::new(0),
             queue_bytes: AtomicU64::new(0),
@@ -624,12 +661,85 @@ impl Chain {
     }
 }
 
+/// The parent of `index` and the step bound the walks below share.
+///
+/// The walks that run on every round trip -- [`is_open`], [`reserve`],
+/// [`release`] -- follow the parent links directly instead of building a
+/// [`Chain`] first: the array is thirty-odd bytes of stores and a second loop
+/// for a chain that is usually three scopes long, and an `is_open` that finds
+/// the leaf closed has no reason to read the root at all.
+const MAX_STEPS: usize = thalyx_abi::limit::MAX_SCOPE_DEPTH as usize + 1;
+
 /// True when `scope` and every ancestor are open.
 #[must_use]
 pub fn is_open(scope: ScopeId) -> bool {
-    Chain::of(scope)
-        .iter()
-        .all(|node| node.state() == State::Open)
+    let mut current = scope;
+    for _ in 0..MAX_STEPS {
+        let Some(node) = SCOPES.get(current as usize) else {
+            return true;
+        };
+        if node.state() != State::Open {
+            return false;
+        }
+        match node.parent() {
+            Some(parent) => current = parent,
+            None => return true,
+        }
+    }
+    true
+}
+
+/// Scopes already found open during one walk of a grant lineage.
+///
+/// A lineage of depth *n* names a sponsor scope at every node, and nearly always
+/// the same one or two: a capability derived twenty-eight times in one domain
+/// is sponsored by that domain's scope twenty-eight times. Asking [`is_open`]
+/// at each node walked the scope chain to the root at each node, which is what
+/// `ipc.lineage` measured growing with depth. A scope found open once in a walk
+/// is not asked again in the same walk.
+///
+/// This is not a cache with a lifetime: it lives on the stack of one walk and
+/// is dropped with it. States only move forward, so a scope that was open at
+/// the first reading was open at every earlier instant, and the walk as a
+/// whole already answered "open at the instant each node was read" rather
+/// than "open at one instant"; reusing the first reading moves that instant
+/// a few nanoseconds earlier for the later nodes and decides nothing a fresh
+/// read could not have decided the same way.
+pub struct OpenMemo {
+    seen: [ScopeId; 4],
+    len: usize,
+}
+
+impl OpenMemo {
+    /// An empty memo for one walk.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            seen: [NO_SCOPE; 4],
+            len: 0,
+        }
+    }
+
+    /// [`is_open`], asked at most once per scope in this walk.
+    pub fn is_open(&mut self, scope: ScopeId) -> bool {
+        if self.seen[..self.len].contains(&scope) {
+            return true;
+        }
+        if !is_open(scope) {
+            return false;
+        }
+        if self.len < self.seen.len() {
+            self.seen[self.len] = scope;
+            self.len += 1;
+        }
+        true
+    }
+}
+
+impl Default for OpenMemo {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// True when `candidate` is `ancestor` or below it.
@@ -640,20 +750,29 @@ pub fn is_within(ancestor: ScopeId, candidate: ScopeId) -> bool {
 
 /// Adds `amount` to one counter with a ceiling, or leaves it untouched.
 ///
-/// The check and the add are one atomic step from every observer's point of
-/// view: the value the counter held before the add is what `fetch_add`
-/// returns, and if that plus the amount is past the ceiling the add is undone
-/// before returning. Another processor may see the counter above the ceiling
-/// for the duration of the undo; nothing it can do with that reading admits
-/// anything, because its own increment is checked the same way.
+/// The check and the add are one compare-and-exchange: the counter moves only
+/// to a value at or under the ceiling, and a refusal is issued only against a
+/// value the counter really held. The previous form added first and undid the
+/// add if it overshot, which kept every *successful* reservation under the
+/// ceiling but let a reservation that was going to fail stand above it for the
+/// length of the undo -- and a sibling reading the counter in that window was
+/// refused for room that was in fact free. That is the false exhaustion OQ-04
+/// rules out, and the K7 baseline campaigns recorded `LIMIT_EXHAUSTED` on the
+/// native arm three times in twelve boots where nothing in the benchmark comes
+/// near a ceiling on its own. The cost is a load before the exchange; the line
+/// is the one the exchange takes anyway.
 fn bounded_add(counter: &AtomicU64, amount: u64, limit: u64) -> Result<u64, u64> {
-    let previous = counter.fetch_add(amount, Ordering::AcqRel);
-    let next = previous.saturating_add(amount);
-    if next > limit {
-        counter.fetch_sub(amount, Ordering::AcqRel);
-        return Err(previous);
+    let mut current = counter.load(Ordering::Acquire);
+    loop {
+        let next = current.saturating_add(amount);
+        if next > limit {
+            return Err(current);
+        }
+        match counter.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return Ok(next),
+            Err(seen) => current = seen,
+        }
     }
-    Ok(next)
 }
 
 /// Reserves `amount` of `resource` in `scope` and every ancestor, or nothing.
@@ -662,27 +781,38 @@ fn bounded_add(counter: &AtomicU64, amount: u64, limit: u64) -> Result<u64, u64>
 /// the levels below it, so no counter ends up above its ceiling and a refusal
 /// leaves no charge behind. A closed scope refuses like an exhausted one.
 pub fn reserve(scope: ScopeId, resource: Resource, amount: u64) -> bool {
-    let chain = Chain::of(scope);
-    let nodes = chain.nodes();
+    let mut current = scope;
     let mut done = 0;
     let mut binding = None;
-    for &index in nodes {
-        let node = &SCOPES[index as usize];
+    for _ in 0..MAX_STEPS {
+        let Some(node) = SCOPES.get(current as usize) else {
+            break;
+        };
         let refused = node.state() != State::Open
             || bounded_add(node.account(resource), amount, node.limit(resource)).is_err();
         if refused {
-            binding = Some(index);
+            binding = Some(current);
             break;
         }
         done += 1;
+        match node.parent() {
+            Some(parent) => current = parent,
+            None => break,
+        }
     }
     let Some(binding) = binding else {
         return true;
     };
-    for &index in &nodes[..done] {
-        SCOPES[index as usize]
-            .account(resource)
-            .fetch_sub(amount, Ordering::AcqRel);
+    // The levels below the one that refused, leaf first, the same links the
+    // charge followed: they are stable while the leaf is live.
+    let mut current = scope;
+    for _ in 0..done {
+        let node = &SCOPES[current as usize];
+        node.account(resource).fetch_sub(amount, Ordering::AcqRel);
+        match node.parent() {
+            Some(parent) => current = parent,
+            None => break,
+        }
     }
     // Which scope and which resource, not merely that something was refused.
     // A limit that is only ever reported as a status code is a limit whose
@@ -705,19 +835,26 @@ pub fn reserve(scope: ScopeId, resource: Resource, amount: u64) -> bool {
 
 /// Returns `amount` of `resource` to `scope` and every ancestor.
 pub fn release(scope: ScopeId, resource: Resource, amount: u64) {
-    for node in Chain::of(scope).iter() {
+    let mut current = scope;
+    for _ in 0..MAX_STEPS {
+        let Some(node) = SCOPES.get(current as usize) else {
+            break;
+        };
         let counter = node.account(resource);
         // Saturating at zero, as the old arithmetic did: a release that
         // exceeds what was charged is a bookkeeping error to report, not a
         // wrap to give the scope a fortune.
-        let mut current = counter.load(Ordering::Relaxed);
+        let mut held = counter.load(Ordering::Relaxed);
         loop {
-            let next = current.saturating_sub(amount);
-            match counter.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Relaxed)
-            {
+            let next = held.saturating_sub(amount);
+            match counter.compare_exchange_weak(held, next, Ordering::AcqRel, Ordering::Relaxed) {
                 Ok(_) => break,
-                Err(seen) => current = seen,
+                Err(seen) => held = seen,
             }
+        }
+        match node.parent() {
+            Some(parent) => current = parent,
+            None => break,
         }
     }
 }
