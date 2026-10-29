@@ -543,6 +543,22 @@ Cambiado sin medir, por la regla del mini sprint ([ADR-025](../decisions/ADR-025
 
 No atacado en esta ronda: `ipc.call`, `ipc.caps`, `scale.ipc` con 1 y 3 pares, `entry.*`, `engine.*` y los cuatro `tx_*` que fallan (`end`, `request`, `validate`, `observe`).
 
+### El sexto cierre de K7
+
+Observado en `build/k7/check-20261029T161139` (kernel `d8f09aa`). Fallan 20 criterios, todos de métricas. Las puertas K1–K5 pasan en las tres ejecuciones, la puerta K6 de la medida da 24/24, las 7 pruebas de EXP-13 pasan y `k7.behavior_tests` da 421 contra 392. La campaña aparte de `check_k6.py` dio 23/24: falla `no_loss`, con el brazo nativo saliendo con 33 en las seis rondas. El baseline ya fallaba `no_loss` así, y `check_k7.py` lo registra en su autocomprobación.
+
+- **Las entradas que siguen a un relevo miden 1,2 veces la normal.** No es solo IPC: también `entry.version`, `entry.clock`, `mem.map` y `sched.wake`, como razón sobre toda la distribución y no como un coste sumado. Se recuperan con el uso en unos milisegundos. Ninguna entrada que sigue a otra cosa es lenta. Explica los extremos altos de `ipc.lineage` con 0, 16 y 28, `ipc.call:256`, `ipc.caps:1` y `sched.wake`, y la ronda de 60 ns de `entry.version`. El análisis está en [ADR-026](../decisions/ADR-026-k6-client-rewarms-after-handoff.md).
+- **`scale.compute:3`**, en la ronda 2, da 55 900 por corte en los 50 cortes, exactamente dos tercios. Durante toda la entrada corrieron dos procesadores de tres. Sin diagnóstico.
+- **`entry.version` está limitado por la cuantización.** El contador del anfitrión avanza de 10 en 10 ns. En las rondas normales, el brazo nativo cae en 40 ns en el 39 % de las muestras y en 50 en el 61 %. Su mediana es 50,01 contra 60,01 de Linux, y la razón, 0,83352, queda por encima del umbral de 0,833494 aun sin rondas lentas. Pasar pide que la mayoría caiga en 40 ns: unos 2 ns menos por entrada.
+- **`tx_request`, `tx_validate` y `tx_observe`** midieron [8,9, 37,4], [1,55, 5,36] y [4,9, 17,6] µs, contra umbrales de 1,0, 0,55 y 1,53 µs. Son fases que corren en el anfitrión sin llamar al link. Los intervalos del baseline son igual de anchos, y ningún cambio del kernel los acerca: es ruido de medición. `tx_end` midió 20,3 [18,7, 22,2] µs contra menos de 20,16.
+- **`ipc.call:0` y `:64`, `ipc.caps:4`, `ipc.lineage:0`, `scale.ipc` con 1 y 3 pares, `scale.compute:4` y `engine.infer:4`** quedan fuera aun en las rondas normales. Necesitan entre un 1 % y un 9 % por llamada o por corte.
+
+Cambiado sin medir, por la regla del mini sprint ([ADR-026](../decisions/ADR-026-k6-client-rewarms-after-handoff.md)):
+
+- **El cliente nativo de K6 calienta dos procesadores después de cada relevo.** El hilo inicial y el ayudante 1 giran 20 ms antes de la siguiente entrada, fuera de toda muestra. Busca que pasen `k7.k6_ipc_lineage_16`, `_28` y `k7.k6_sched_wake_0`, y estrechar `ipc.call:256`, `ipc.caps:1`, `entry.*` y `mem.map:1`. La causa atribuida es que el anfitrión baja el reloj del núcleo mientras el procesador virtual está parado. Es una inferencia: no se leyó la frecuencia durante una campaña.
+
+No atacado en esta ronda: `scale.compute:3`, la cuantización de `entry.*` y los tres `tx_*` que son ruido.
+
 ## Reanudar aquí
 
 **Último hito terminado y pusheado:** **K6 completo en su alcance** —protocolos emparejados, campaña de referencia, EXP-12, ocho cuellos medidos y corregidos, parámetros V0 revisados, inventario físico, puerta K6— en la rama `feat/k6-comparison-hardening-reference`. K5 quedó completo en `feat/k5-thalyx-port-tools`.

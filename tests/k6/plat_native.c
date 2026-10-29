@@ -396,6 +396,41 @@ static int64_t engine_infer(uint32_t index, uint32_t *out, uint32_t n)
 
 /* ------------------------------------------------------------- handoff */
 
+/* How long the client keeps two processors busy after a handoff before its
+ * next entry begins. */
+#define HANDOFF_REWARM_NS 20000000ull
+
+static void rewarm_spin(void *argument)
+{
+    uint64_t until = (uint64_t)(uintptr_t)argument;
+    while (bench_cycles() < until) { }
+}
+
+/* A handoff is the one place in a plan where this program blocks for long:
+ * through the handed-over entry and the supervisor's settling after it, two
+ * windows at least, while the processors it runs on halt. Every entry that
+ * followed one in the K7 campaigns ran about 1.2 times slower than in the
+ * rounds where the same entry followed another -- `ipc.*`, `entry.*`,
+ * `mem.map` and `sched.wake` alike, a ratio and not an added cost -- and the
+ * slow ones recover within the entry when it lasts long enough. That is what
+ * a host processor whose clock was lowered while its virtual processor
+ * halted looks like as it ramps back up. A run of entries never halts for
+ * that long, and Linux, which runs those entries itself, has no such wait.
+ * So before the next entry starts, this thread and the helper `sched.wake`
+ * wakes spin for HANDOFF_REWARM_NS: outside every sample, after the
+ * supervisor's own have been written, and with no kernel entry but the
+ * helper's start, its runtime's work note and the join. */
+static void rewarm(void)
+{
+    uint64_t hz = bench_tsc_hz();
+    if (hz == 0) { return; }
+    uint64_t until = bench_cycles() + hz / (1000000000ull / HANDOFF_REWARM_NS);
+    int helper = plat_helper_threads() >= 1
+                 && plat_thread_start(1, rewarm_spin, (void *)(uintptr_t)until) == 0;
+    rewarm_spin((void *)(uintptr_t)until);
+    if (helper) { plat_thread_join(1); }
+}
+
 /* An entry this program cannot run is run by its supervisor, in the plan's
  * order: the request goes in the shared page, a bit says it is there, and the
  * program blocks until the supervisor says it is done. The supervisor's
@@ -413,7 +448,9 @@ static int64_t hand_off(uint32_t bench, uint32_t param, uint32_t samples)
     status = th_signal_wait(K6_SLOT_HANDOFF, K6_HANDOFF_DONE_BIT, 0);
     if (status != THALYX_STATUS_OK) { return status; }
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
-    return handoff->status ? -(int64_t)handoff->status : 0;
+    int64_t result = handoff->status ? -(int64_t)handoff->status : 0;
+    rewarm();
+    return result;
 }
 
 int64_t plat_special(uint32_t bench, uint32_t param, uint32_t *out, uint32_t max)
