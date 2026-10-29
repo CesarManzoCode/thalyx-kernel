@@ -492,6 +492,21 @@ Observado sin mecanismo en este cambio:
 - `closure.unit`, cuya retirada sigue necesitando dos intentos.
 - `engine.load`, `engine.infer` con el prompt 4, `engine.cancel` y `audit.drain`.
 
+### El tercer cierre de K7
+
+Observado en `build/k7/check-20261028T215528` (kernel `a635d89`). Fallan 27 criterios, y entre ellos los dos de comportamiento:
+
+- `k7.behavior_gates`. En la segunda de las tres ejecuciones TCG de K1–K5 cae `budget` de K2, y con él K3, K4 y K5. En `a635d89` ya había caído en `check-20261028T174953`, así que son 2 de 6 ejecuciones. Antes de `a635d89` no cayó en ninguna de 27.
+- La puerta K6 da 23/24. Falla `no_loss`, con −9 en `scale.ipc` con 1 y 2 pares. Ese −9 en `scale.ipc` ya estaba en el baseline y en los dos cierres anteriores.
+- `k7.behavior_tests` da 307 contra 392. Faltan las autocomprobaciones de K2 y K3 de la ejecución que falló (28 + 57).
+
+Cambiado sin medir, por la regla del mini sprint ([ADR-023](../decisions/ADR-023-exit-records-starvation-and-auditor-turns.md)):
+
+- **La retención por presupuesto, registrada también en la salida.** Cuando `kernel_exit` termina un despacho porque se acabó la reserva y el ámbito ya no tiene nada disponible, escribe el mismo `sched.preempt` que el tick, con `trigger=exit`. Solo lo hace con las trazas activas. `budget` de K2 acepta `trigger` igual a `timer` o `exit` con `voluntary=0`, y tiene dos daños nuevos (30). Busca que `budget` deje de depender de si llega antes el tick o la siguiente salida.
+- **El auditor de K6, con menos entradas por vuelta.** Una vuelta que drenó recibos vuelve al log sin consultar el relevo, el estado del cliente ni el plazo, salvo cada 64 vueltas. Una tanda incompleta no se relee una vez tomadas las muestras de `audit.drain`. Busca que el auditor no agote su media ventana en `scale.ipc`.
+
+No atacado en esta ronda: las 25 métricas que siguen en `FAIL`. Las cifras están en el cierre anterior y en el registro de aceptación.
+
 ## Reanudar aquí
 
 **Último hito terminado y pusheado:** **K6 completo en su alcance** —protocolos emparejados, campaña de referencia, EXP-12, ocho cuellos medidos y corregidos, parámetros V0 revisados, inventario físico, puerta K6— en la rama `feat/k6-comparison-hardening-reference`. K5 quedó completo en `feat/k5-thalyx-port-tools`.

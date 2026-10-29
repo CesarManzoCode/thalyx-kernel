@@ -1582,8 +1582,8 @@ pub enum ExitClock {
 /// Called on the way back to a thread that keeps running: a thread it woke
 /// synchronously and did not pick up is handed to an idle processor once it
 /// has aged, and a wake that asked for this processor is honoured.
-pub fn on_kernel_exit() {
-    on_kernel_exit_with(percpu::index(), ExitClock::Read);
+pub fn on_kernel_exit(frame: &trap::TrapFrame) {
+    on_kernel_exit_with(percpu::index(), ExitClock::Read, frame);
 }
 
 /// [`on_kernel_exit`] for an entry that already knows its processor and how
@@ -1593,8 +1593,11 @@ pub fn on_kernel_exit() {
 /// for, no aged hint and a reservation still running. That is four reads of
 /// this processor's own state, done here without a call; anything else takes
 /// the full exit, which reads them again in their order.
+///
+/// `frame` is the entry's, read only when the exit ends a dispatch whose
+/// scope has nothing left, to say where the thread was stopped.
 #[inline]
-pub fn on_kernel_exit_with(me: usize, clock: ExitClock) {
+pub fn on_kernel_exit_with(me: usize, clock: ExitClock, frame: &trap::TrapFrame) {
     let state = &CPUS[me];
     if state.deferred_count.load(Ordering::Relaxed) == 0
         && !state.need_resched.load(Ordering::Acquire)
@@ -1603,7 +1606,7 @@ pub fn on_kernel_exit_with(me: usize, clock: ExitClock) {
     {
         return;
     }
-    kernel_exit(me, clock);
+    kernel_exit(me, clock, frame);
 }
 
 /// Whether the running reservation has run out, by the counter `clock` names.
@@ -1618,12 +1621,52 @@ fn reservation_over(me: usize, clock: ExitClock) -> bool {
         }
 }
 
+/// Whether the dispatch this exit is ending leaves its scope with nothing to
+/// renew it from, and if so what the record of it names.
+///
+/// The question [`on_tick`] asks of a dispatch that has spent what it was
+/// promised, asked here because the exit found the reservation over. It is
+/// asked only while traces are written: the answer is for the record, and
+/// the scheduler that runs next asks the accounts its own way.
+fn starved_at_exit(me: usize, current: usize) -> Option<(usize, u64, u64)> {
+    if !crate::diag::trace_enabled() {
+        return None;
+    }
+    let cell = thread::get(current);
+    // In the order the scheduler takes them: a window that has turned is
+    // rolled before the charge, or the answer would be about the old one.
+    let now = time::observe();
+    if now / CPU_WINDOW_NS != CURRENT_WINDOW.load(Ordering::Relaxed) {
+        roll(now);
+    }
+    let starved = {
+        let _rq = CPUS[me].rq.lock();
+        charge(me, current, now);
+        // SAFETY: `current` is this processor's thread, under its lock.
+        let sched = unsafe { cell.sched() };
+        sched.dispatched && scope::available_ns(cell.effective_scope(), cell.is_recovery()) == 0
+    };
+    // SAFETY: this processor's own current thread.
+    let sched = unsafe { cell.sched() };
+    if !starved || sched.preempt_records >= PREEMPT_RECORD_LIMIT {
+        return None;
+    }
+    sched.preempt_records += 1;
+    PREEMPT_RECORDS.fetch_add(1, Ordering::Relaxed);
+    let scope = &scope::table()[cell.effective_scope() as usize];
+    Some((
+        cell.domain(),
+        scope.id(),
+        scope.cpu_window_ns.load(Ordering::Relaxed),
+    ))
+}
+
 /// The exit with something to do, out of line.
 ///
 /// `me` is read once by the caller for the whole exit: nothing below switches
 /// before the first `schedule`, and each `schedule` returns.
 #[inline(never)]
-fn kernel_exit(me: usize, clock: ExitClock) {
+fn kernel_exit(me: usize, clock: ExitClock, frame: &trap::TrapFrame) {
     flush_wakes_on(me);
     if CPUS[me].need_resched.load(Ordering::Acquire) {
         schedule(me);
@@ -1638,21 +1681,46 @@ fn kernel_exit(me: usize, clock: ExitClock) {
     // a point where the reservation can be honoured exactly, and it costs one
     // counter read.
     if reservation_over(me, clock) {
-        {
-            // The reservation ran out while the thread was in the kernel, so
-            // its dispatch ends here rather than at the next tick. Counted the
-            // same way: what the number means is "the timer ended my turn",
-            // and where the kernel noticed is not the thread's business. A
-            // thread that spends milliseconds inside one entry -- writing a
-            // diagnostic record, say -- has every one of its turns ended here
-            // and none of them at a tick.
-            let cell = thread::get(CPUS[me].current.load(Ordering::Relaxed));
-            if cell.is_user() {
-                // SAFETY: this processor's own current thread.
-                unsafe { cell.sched() }.preemptions += 1;
+        // The reservation ran out while the thread was in the kernel, so its
+        // dispatch ends here rather than at the next tick. Counted the same
+        // way: what the number means is "the timer ended my turn", and where
+        // the kernel noticed is not the thread's business. A thread that
+        // spends milliseconds inside one entry -- writing a diagnostic
+        // record, say -- has every one of its turns ended here and none of
+        // them at a tick.
+        let current = CPUS[me].current.load(Ordering::Relaxed);
+        let cell = thread::get(current);
+        let record = if cell.is_user() {
+            // SAFETY: this processor's own current thread.
+            unsafe { cell.sched() }.preemptions += 1;
+            starved_at_exit(me, current)
+        } else {
+            None
+        };
+        let next = schedule_with(me, true);
+        if next != current && cell.is_user() {
+            // The processor was taken away here, as the timer takes it at a
+            // tick, and it is counted where the timer's is.
+            CPUS[me].preemptions.fetch_add(1, Ordering::Relaxed);
+            // A turn its scope's window had nothing left to renew is recorded
+            // as the timer's is. The exit is where most such turns end -- a
+            // thread that enters the kernel between bursts of work meets its
+            // deadline on the way out before a tick arrives -- and a record
+            // kept only at the tick made whether a run showed its budget
+            // holding a thread back depend on which came first.
+            if let Some((domain, scope_id, used)) = record {
+                trace!(
+                    "sched.preempt",
+                    "cpu={me} domain={domain} thread={current} next={next} rip=0x{:x} \
+                     cs=0x{:x} cpl={} trigger=exit vector=0x{:x} voluntary=0 \
+                     effective_scope={scope_id} window_used_ns={used} starved=1",
+                    frame.rip,
+                    frame.cs,
+                    frame.cpl(),
+                    frame.vector
+                );
             }
         }
-        schedule_with(me, true);
         return;
     }
     if CPUS[me].sync_since.load(Ordering::Relaxed) != 0 {

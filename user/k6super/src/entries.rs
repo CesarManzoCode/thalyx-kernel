@@ -127,6 +127,14 @@ pub fn drain_timed(run: &mut Run, wait_until: u64) -> bool {
             run.drain.count += 1;
         }
         waiting = false;
+        // A batch short of full emptied the log when it was read, and a
+        // receipt written since wakes the next waiting read at once. Reading
+        // again only to find the log empty was one more entry on every turn
+        // of the auditor. It is still made while `audit.drain` is taking its
+        // samples, so the batches it times are the ones it timed before.
+        if (batch.count as usize) < batch.records.len() && run.drain.count >= SAMPLES {
+            return drained;
+        }
     }
 }
 

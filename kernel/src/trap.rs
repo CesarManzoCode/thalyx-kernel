@@ -179,7 +179,7 @@ pub fn handle(frame: &mut TrapFrame) {
             crate::device::on_interrupt(vector as u8);
             // The interrupted thread keeps running; a driver thread the
             // interrupt woke is handed to an idle processor now.
-            sched::on_kernel_exit();
+            sched::on_kernel_exit(frame);
         }
         vector if vector == u64::from(SPURIOUS_VECTOR) => {
             // A spurious interrupt is not acknowledged.

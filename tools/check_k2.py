@@ -931,8 +931,17 @@ def check_aggregate_budget(records: list[Record], run: dict) -> Result:
 
     # A scope's budget is enforced by the scheduler refusing to dispatch a
     # thread whose scope chain has spent its window.
+    # The kernel stops such a thread at a tick or on its way out of an entry,
+    # whichever meets the spent reservation first, and records both the same
+    # way. Neither is the thread's choice.
     preempts = by_event(records, "sched.preempt")
-    starved = [record for record in preempts if record.get("starved") == "1"]
+    starved = [
+        record
+        for record in preempts
+        if record.get("starved") == "1"
+        and record.number("voluntary") == 0
+        and record.get("trigger") in ("timer", "exit")
+    ]
     if not preempts:
         result.detail = "nothing was preempted, so no budget was ever consumed"
         return result
@@ -1444,6 +1453,16 @@ MUTATIONS = [
     (
         "a budget nothing was ever held back for",
         rewrite("starved=1", "starved=0"),
+        "budget",
+    ),
+    (
+        "a thread that gave up its window and was counted as held back",
+        rewrite("voluntary=0", "voluntary=1"),
+        "budget",
+    ),
+    (
+        "a thread held back by something that is neither the tick nor an exit",
+        rewrite_re(r"trigger=\w+", "trigger=fault"),
         "budget",
     ),
     ("no writer withdrawn before a seal", drop_event("mem.writer_withdrawn"), "memory"),

@@ -520,7 +520,23 @@ fn run() -> ! {
         // millisecond of the client's calls, and the admissions it was meant
         // to cover were refused for want of a cell. A read that waits costs
         // nothing while nothing happens and answers with the first receipt.
-        entries::drain_timed(&mut run, k2::now_ns() + AUDIT_SLEEP_NS);
+        let drained = entries::drain_timed(&mut run, k2::now_ns() + AUDIT_SLEEP_NS);
+        turn += 1;
+        if turn % 64 == 0 {
+            audit::observe(log, &mut run.auditor);
+        }
+        // A turn that found receipts goes straight back to the log. They come
+        // from an entry still running: the client asks for a handoff and ends
+        // only between entries, and from then on writes nothing, so the next
+        // turn finds the log empty and looks. Looking on every turn was three
+        // more entries -- the handoff signal, the client's state and the
+        // clock -- for every few receipts, and under one pair's `scale.ipc`
+        // the auditor that paid them could spend its half window draining
+        // and leave the log to fill. Every sixty-fourth turn still looks, so
+        // the deadline holds whatever the traffic.
+        if drained && turn % 64 != 0 {
+            continue;
+        }
         let request = k2::signal_query(handoff)
             .is_ok_and(|info| info.bits & generated::HANDOFF_REQUEST_BIT != 0)
             && k2::signal_wait(
@@ -529,10 +545,6 @@ fn run() -> ! {
                 k2::now_ns() + 1_000,
             )
             .is_ok_and(|seen| seen.bits & generated::HANDOFF_REQUEST_BIT != 0);
-        turn += 1;
-        if turn % 64 == 0 {
-            audit::observe(log, &mut run.auditor);
-        }
         if request {
             let mut bytes = [0u8; size_of::<Handoff>()];
             let status = match k2::memory_read(shared, generated::SHARED_HANDOFF_OFFSET, &mut bytes)

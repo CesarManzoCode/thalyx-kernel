@@ -79,7 +79,7 @@ fn quick(frame: &mut TrapFrame) {
         frame.rdx = thalyx_abi::pack_version(thalyx_abi::VERSION_MAJOR, thalyx_abi::VERSION_MINOR);
         crate::sched::ExitClock::Tick
     };
-    crate::sched::on_kernel_exit_with(cpu, clock);
+    crate::sched::on_kernel_exit_with(cpu, clock, frame);
     crate::sched::leave_if_dead_after_entry(frame, current);
 }
 
@@ -184,7 +184,7 @@ fn handle_entry(frame: &mut TrapFrame) {
     }
     // This thread keeps running: a thread it woke and nobody picked up is
     // handed to an idle processor here, on the way out.
-    crate::sched::on_kernel_exit();
+    crate::sched::on_kernel_exit(frame);
 
     // Every return to ring 3 passes here. A thread whose domain was terminated
     // by authority while it was inside this entry does not get the return.
