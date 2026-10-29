@@ -129,13 +129,35 @@ const NO_THREAD: usize = usize::MAX;
 
 /// What a waker knows about what it will do next.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(usize)]
 pub enum WakeHint {
     /// The waker is about to block or yield: the woken thread goes to the
     /// head of this processor's queue and runs here, with no interrupt.
-    Sync,
+    Sync = 1,
     /// The waker keeps running: the woken thread goes to an idle processor.
-    Any,
+    Any = 0,
+    /// The waker keeps running and the woken thread's work is not the
+    /// waker's: any idle processor, halted ones included, before the waker's
+    /// own. [`WakeHint::Any`] prefers the waker's processor to a halted one
+    /// when the thread last ran there, which pays a switch on the waker each
+    /// time instead of one interrupt, and keeps paying it: the thread runs
+    /// there again and is woken there again.
+    Away = 2,
+    /// The waker keeps running and the woken thread has nothing that cannot
+    /// wait for this processor's next decision: it is queued here and no
+    /// processor is interrupted for it. It runs when the waker blocks, when
+    /// the tick finds it has waited a quantum, or when an idle processor
+    /// steals it.
+    Lazy = 3,
 }
+
+/// The hints by discriminant, for a deferred wake's tag.
+const HINTS: [WakeHint; 4] = [
+    WakeHint::Any,
+    WakeHint::Sync,
+    WakeHint::Away,
+    WakeHint::Lazy,
+];
 
 /// The run queue of one processor.
 pub struct RunQueue {
@@ -1133,7 +1155,22 @@ fn idle_cpu_for(index: usize, me: usize, last_only: bool) -> Option<usize> {
 /// running: this one if an interrupt woke it out of its idle loop and where
 /// the thread last ran is not polling, else where it last ran if that is
 /// idle, else any idle processor, else where it last ran.
-fn select_cpu(index: usize, me: usize) -> usize {
+///
+/// `away` is [`WakeHint::Away`]: this processor comes after every idle one,
+/// halted ones included.
+///
+/// The K6 auditor is the case. It sleeps on the control log and is woken by
+/// the sixteenth admission since its last read, made by whichever client is
+/// calling. Once it had run on the client's processor, every later wake found
+/// it had last run there, the client still running and its queue empty, and
+/// put it there again: a switch to the auditor and back every sixteen calls,
+/// for the rest of the entry, while the other processors halted. That is the
+/// explanation ADR-025 gives for whole K6 entries running about 420 ns per
+/// call slower than the same entry in other rounds -- `ipc.call`,
+/// `ipc.caps` and `ipc.lineage` alike. One interrupt to a halted processor
+/// ends it: the auditor runs there, the processor polls after it, and the
+/// next wake finds it idle where it last ran.
+fn select_cpu(index: usize, me: usize, away: bool) -> usize {
     // SAFETY: the thread is blocked and standing on no processor, so nothing
     // writes its scheduling record.
     let last = unsafe { thread::get(index).sched().last_cpu };
@@ -1163,7 +1200,7 @@ fn select_cpu(index: usize, me: usize) -> usize {
     // trip. The woken thread takes this processor at the waker's next kernel
     // exit, which is what `need_resched` is for. Linux's `wake_affine` makes
     // the same choice for the same reason.
-    if last == me && queue_depth(me) == 0 {
+    if !away && last == me && queue_depth(me) == 0 {
         return me;
     }
     if let Some(idle) = idle_cpu_for(index, me, false) {
@@ -1338,10 +1375,7 @@ pub fn defer_wake(index: usize, hint: WakeHint) {
         wake(index, hint);
         return;
     }
-    let tag = match hint {
-        WakeHint::Sync => 1usize << 32,
-        WakeHint::Any => 0,
-    };
+    let tag = (hint as usize) << 32;
     CPUS[me].deferred[count].store(index | tag, Ordering::Relaxed);
     CPUS[me].deferred_count.store(count + 1, Ordering::Relaxed);
 }
@@ -1365,11 +1399,7 @@ fn flush_wakes_on(me: usize) {
     CPUS[me].deferred_count.store(0, Ordering::Relaxed);
     for slot in 0..count.min(DEFERRED_WAKES) {
         let tagged = CPUS[me].deferred[slot].load(Ordering::Relaxed);
-        let hint = if tagged >> 32 != 0 {
-            WakeHint::Sync
-        } else {
-            WakeHint::Any
-        };
+        let hint = HINTS[(tagged >> 32) & 3];
         wake(tagged & 0xFFFF_FFFF, hint);
     }
 }
@@ -1421,7 +1451,8 @@ pub fn wake(index: usize, hint: WakeHint) {
         // aged hint is delegated or honoured on the way out of the kernel.
         WakeHint::Sync if local_queue_empty(me) => me,
         WakeHint::Sync => idle_cpu_for(index, me, false).unwrap_or(me),
-        WakeHint::Any => select_cpu(index, me),
+        WakeHint::Any | WakeHint::Away => select_cpu(index, me, hint == WakeHint::Away),
+        WakeHint::Lazy => me,
     };
     {
         let mut rq = CPUS[target].rq.lock();
@@ -1437,10 +1468,11 @@ pub fn wake(index: usize, hint: WakeHint) {
     }
     drop(record);
     if target == me {
-        // A synchronous wake is taken when this processor blocks; anything
-        // else waits for this processor's next interrupt or entry, and the
-        // exit path delegates it if it ages.
-        if hint == WakeHint::Any {
+        // A synchronous wake is taken when this processor blocks, and a lazy
+        // one when this processor next decides anyway; anything else waits
+        // for this processor's next interrupt or entry, and the exit path
+        // delegates it if it ages.
+        if matches!(hint, WakeHint::Any | WakeHint::Away) {
             CPUS[me].need_resched.store(true, Ordering::Release);
         }
         return;

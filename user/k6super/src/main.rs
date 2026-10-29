@@ -105,7 +105,15 @@ const RUN_DEADLINE_NS: u64 = 1_200_000_000_000;
 /// How long the auditor waits in the kernel for a receipt before it looks for
 /// a handoff instead: the bound on how long a handed-over entry waits to
 /// start, which is not part of what any entry measures.
-const AUDIT_SLEEP_NS: u64 = 500_000;
+///
+/// Half a window. Receipts end the wait at once, sixteen at a time, so this
+/// is the period of the auditor's turns only while nothing is admitted --
+/// during `scale.compute`, for one. At 500 us that was a timed wake every
+/// tick, and with four computing threads on four processors each wake took
+/// one of them off its processor for a turn of five entries: the likeliest
+/// source of the 0.2 % by which `scale.compute` with four threads trailed
+/// three (ADR-025).
+const AUDIT_SLEEP_NS: u64 = 5_000_000;
 /// Windows in a row whose start the auditor, asleep, must be dispatched at
 /// between the end of a handed-over entry and the client's next one: the
 /// first says the overrun it carried is below one budget, the second that it

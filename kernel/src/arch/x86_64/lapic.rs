@@ -358,8 +358,13 @@ impl Lapic {
         self.write(REG_TIMER_INITIAL, initial_count);
     }
 
-    /// Signals end of interrupt.
+    /// Signals end of interrupt: through the host's deferred acknowledgement
+    /// when it offered one for this interrupt (see [`super::kvm`]), else by
+    /// writing the register.
     pub fn end_of_interrupt(&self) {
+        if super::kvm::take_deferred_eoi() {
+            return;
+        }
         self.write(REG_EOI, 0);
     }
 }
@@ -399,6 +404,15 @@ pub fn current() -> Option<Lapic> {
     // for xAPIC, the virtual address of the register page after it has been
     // mapped uncacheable and writable in the shared kernel half.
     Some(unsafe { Lapic::new(backend, base) })
+}
+
+/// Acknowledges the interrupt being handled on the calling processor, if a
+/// controller is installed. Out of line: every vector's handler calls it.
+#[inline(never)]
+pub fn end_of_interrupt() {
+    if let Some(controller) = current() {
+        controller.end_of_interrupt();
+    }
 }
 
 /// The identifier of the processor executing this call, read from its own

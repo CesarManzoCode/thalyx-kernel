@@ -100,6 +100,10 @@ pub fn read(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
 }
 
 /// Wakes a thread waiting on `index`, once the log holds a full batch for it.
+///
+/// Somewhere other than the writer's processor when one is idle: the writer
+/// is an admission, whose caller is in the middle of a call, and the reader
+/// is an auditor with work of its own (see [`WakeHint::Away`]).
 pub fn wake_reader(machine: &Machine, index: usize, generation: u32) {
     let mut waiting = {
         let log = machine.logs[index].lock();
@@ -117,7 +121,7 @@ pub fn wake_reader(machine: &Machine, index: usize, generation: u32) {
             |record| record.wait == Wait::Log(index as u16, generation),
             status::OK,
             0,
-            WakeHint::Any,
+            WakeHint::Away,
         ) {
             return;
         }

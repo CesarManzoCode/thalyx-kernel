@@ -226,6 +226,18 @@ pub fn set_limits(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> Re
 }
 
 /// Wakes every thread whose wait belongs to a fenced scope.
+///
+/// Onto the fencing processor's queue, interrupting nobody
+/// ([`WakeHint::Lazy`]). A thread woken by a fence has only its refusal to
+/// learn, and the fencer is usually about to terminate it. Sent to a halted
+/// processor, it costs an interrupt so that the thread can run for the
+/// instant before the termination stops it, and then the termination has to
+/// interrupt that processor again and the retirement wait for it to leave --
+/// the likeliest place for the 5 us `closure.unit` grew by in K7 (ADR-025).
+/// A thread queued here and stopped
+/// before it ran stands on no processor and is reaped at once. One the
+/// fencer does not stop runs when the fencer blocks, when the tick finds it
+/// has waited a quantum, or when an idle processor steals it.
 fn cancel_waits(root: ScopeId) -> u32 {
     let mut woken = 0;
     for (index, cell) in thread::iter() {
@@ -237,7 +249,7 @@ fn cancel_waits(root: ScopeId) -> u32 {
         if !scope::is_within(root, scope) && !scope::is_within(root, owner) {
             continue;
         }
-        if thread::wake_if(index, |_| true, status::CANCELLED, 0, WakeHint::Any) {
+        if thread::wake_if(index, |_| true, status::CANCELLED, 0, WakeHint::Lazy) {
             woken += 1;
         }
     }

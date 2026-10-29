@@ -524,6 +524,25 @@ Cambiado sin medir, por la regla del mini sprint ([ADR-024](../decisions/ADR-024
 
 No atacado en esta ronda: `entry.version` y `entry.clock`, que se miden en pasos de 10 ns (nativo 50 contra 60, y 60 contra 100). Tampoco `scale.compute`, `closure.unit`, `engine.*` ni `build_seconds`.
 
+### El quinto cierre de K7
+
+Observado en `build/k7/check-20261029T145738` (kernel `ad1a267`). Fallan 24 criterios, todos de métricas. Las puertas K1–K5 pasan en las tres ejecuciones, la puerta K6 da 24/24, las 7 pruebas de EXP-13 pasan y `k7.behavior_tests` da 421 contra 392. `/mnt/exp13` estaba montado y los nueve `tx_*` se midieron. Pasan `tx_e2e`, `tx_open`, `tx_settle`, `tx_store_calls` y `tx_serial_records`.
+
+- `closure.unit` sigue en 0,411 [0,397, 0,426]. La mediana nativa de cada ronda va de 16,7 a 18,7 µs, contra 12,2 a 13,2 en el baseline. El mínimo de las muestras no cambió (9,7 contra 9,2 µs): lo que creció es la cola.
+- `scale.compute` con 1 a 4 hilos queda entre un 0,05 % y un 0,17 % por debajo de su umbral. `scale.compute_4` va un 0,2 % por detrás de `_3`.
+- `ipc.lineage` con 0, 16 y 28 derivaciones tiene medianas por debajo del umbral. Lo que sube el límite superior del intervalo son una o dos rondas de seis, unos 420 ns más lentas por llamada.
+- `ipc.call` e `ipc.caps` necesitan entre un 2 % y un 9 % menos por llamada. `entry.version` y `entry.clock` siguen cuantizados en pasos de 10 ns. `engine.load`, `engine.infer_4` y `engine.cancel` tienen intervalos más anchos que la distancia a su umbral.
+
+Cambiado sin medir, por la regla del mini sprint ([ADR-025](../decisions/ADR-025-pv-eoi-lazy-fence-wakes-auditor-away.md)):
+
+- **Fin de interrupción paravirtual.** Bajo KVM, si `CPUID` ofrece `KVM_FEATURE_PV_EOI`, cada procesador registra una palabra con `MSR_KVM_PV_EOI_EN`. `lapic::end_of_interrupt` no escribe `EOI` cuando el anfitrión dejó el bit puesto. `timer.armed` y `smp.ap_online` dicen `pv_eoi`. Busca subir `k7.k6_scale_compute_1` a `_4`: una salida menos por tick, con 2 000 ticks por segundo por procesador.
+- **Los despertares de una valla, en el procesador que la puso.** `cancel_waits` usa `WakeHint::Lazy`: encola sin interrumpir a nadie. Busca bajar `k7.k6_closure_unit_0`. El hilo que la terminación detiene antes de correr se recoge en la misma terminación.
+- **El lector del log, lejos del escritor.** `logops::wake_reader` usa `WakeHint::Away`, que pone cualquier procesador ocioso antes que el del escritor. Busca quitar las rondas lentas de `k7.k6_ipc_lineage_0`, `_16` y `_28`. La hipótesis es que en ellas el auditor quedó pegado al procesador del cliente.
+- **El auditor de K6 duerme media ventana sin admisiones.** `AUDIT_SLEEP_NS` pasa de 500 µs a 5 ms. Busca subir `k7.k6_scale_compute_4`.
+- La carga del kernel sigue en 569 344 bytes. `end_of_interrupt` y `enable_pv_eoi` quedan fuera de línea para que el texto no pase de página.
+
+No atacado en esta ronda: `ipc.call`, `ipc.caps`, `scale.ipc` con 1 y 3 pares, `entry.*`, `engine.*` y los cuatro `tx_*` que fallan (`end`, `request`, `validate`, `observe`).
+
 ## Reanudar aquí
 
 **Último hito terminado y pusheado:** **K6 completo en su alcance** —protocolos emparejados, campaña de referencia, EXP-12, ocho cuellos medidos y corregidos, parámetros V0 revisados, inventario físico, puerta K6— en la rama `feat/k6-comparison-hardening-reference`. K5 quedó completo en `feat/k5-thalyx-port-tools`.

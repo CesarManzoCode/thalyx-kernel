@@ -342,9 +342,7 @@ pub fn refresh_local() {
 
 /// The interrupt one processor sends another to make it refresh.
 pub fn on_shootdown_interrupt() {
-    if let Some(controller) = lapic::current() {
-        controller.end_of_interrupt();
-    }
+    lapic::end_of_interrupt();
     refresh_local();
 }
 

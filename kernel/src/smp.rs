@@ -523,6 +523,7 @@ extern "C" fn ap_entry(cpu_index: u64) -> ! {
     time::observe();
 
     controller.start_periodic(trap::TIMER_VECTOR, count);
+    let pv_eoi = crate::arch::x86_64::kvm::enable_pv_eoi(cpu);
     ONLINE.fetch_or(1u64 << cpu, Ordering::AcqRel);
 
     let claimed = apic_id_of(cpu);
@@ -534,7 +535,7 @@ extern "C" fn ap_entry(cpu_index: u64) -> ! {
         "smp.ap_online",
         "cpu={cpu} apic_id={apic_id} claimed_apic_id={claimed} identity_match={} \
          backend={} lapic_hz={lapic_hz} initial_count={count} idle_thread={} \
-         kstack_top=0x{stack_top:x} smep={} smap={} cr0=0x{cr0:x} caches={}",
+         kstack_top=0x{stack_top:x} smep={} smap={} cr0=0x{cr0:x} caches={} pv_eoi={}",
         u8::from(apic_id == claimed),
         controller.backend().name(),
         idle_thread(cpu),
@@ -544,7 +545,8 @@ extern "C" fn ap_entry(cpu_index: u64) -> ! {
             "enabled"
         } else {
             "disabled"
-        }
+        },
+        u8::from(pv_eoi)
     );
 
     sched::run_ap(cpu)

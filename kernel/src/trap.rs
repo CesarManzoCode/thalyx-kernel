@@ -146,9 +146,7 @@ pub fn handle(frame: &mut TrapFrame) {
 
     match frame.vector {
         vector if vector == u64::from(TIMER_VECTOR) => {
-            if let Some(lapic) = lapic::current() {
-                lapic.end_of_interrupt();
-            }
+            lapic::end_of_interrupt();
             sched::on_tick(frame);
         }
         vector if vector == u64::from(TLB_VECTOR) => {
@@ -158,9 +156,7 @@ pub fn handle(frame: &mut TrapFrame) {
             // Acknowledged first: the switch below does not return to this
             // frame, and a controller left waiting for an acknowledgement
             // would deliver nothing else to this processor.
-            if let Some(lapic) = lapic::current() {
-                lapic.end_of_interrupt();
-            }
+            lapic::end_of_interrupt();
             // A processor told to look again does so here rather than on its
             // next timer tick. That is the difference between a wake taking
             // effect in microseconds and taking effect in a tick.
@@ -173,9 +169,7 @@ pub fn handle(frame: &mut TrapFrame) {
             // Acknowledged before the binding is looked up: the controller has
             // delivered it either way, and an interrupt for a binding that has
             // gone must not leave the controller waiting.
-            if let Some(lapic) = lapic::current() {
-                lapic.end_of_interrupt();
-            }
+            lapic::end_of_interrupt();
             crate::device::on_interrupt(vector as u8);
             // The interrupted thread keeps running; a driver thread the
             // interrupt woke is handed to an idle processor now.
@@ -186,9 +180,7 @@ pub fn handle(frame: &mut TrapFrame) {
         }
         vector if vector < 32 => exception(frame, cr2),
         vector => {
-            if let Some(lapic) = lapic::current() {
-                lapic.end_of_interrupt();
-            }
+            lapic::end_of_interrupt();
             event!(
                 "irq.unexpected",
                 "cpu={} vector={vector} cpl={} rip=0x{:x}",

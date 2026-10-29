@@ -544,6 +544,7 @@ fn build_kernel_space(info: &BootInfo, lapic_phys: u64, backend: lapic::Backend)
     };
 
     let delta = info.kernel_phys_base.wrapping_sub(info.kernel_virt_base);
+    crate::arch::x86_64::kvm::note_image_delta(delta);
     let text_start = (&raw const __thalyx_text_start) as u64;
     let text_end = (&raw const __thalyx_text_end) as u64;
     let rodata_start = (&raw const __thalyx_rodata_start) as u64;
@@ -609,11 +610,12 @@ fn start_timer(lapic_phys: u64, backend: lapic::Backend) -> lapic::Calibration {
     let count = calibration.lapic_hz / sched::TICK_HZ;
     let count = u32::try_from(count.max(1)).unwrap_or(u32::MAX);
     controller.start_periodic(trap::TIMER_VECTOR, count);
+    let pv_eoi = crate::arch::x86_64::kvm::enable_pv_eoi(0);
     trace!(
         "timer.armed",
         "cpu=0 vector=0x{:x} mode=periodic tick_hz={} lapic_hz={} initial_count={count} \
          quantum_ns={} quantum_ticks={} apic_id={} apic_version=0x{:x} \
-         lapic_phys=0x{lapic_phys:x} backend={}",
+         lapic_phys=0x{lapic_phys:x} backend={} pv_eoi={}",
         trap::TIMER_VECTOR,
         sched::TICK_HZ,
         calibration.lapic_hz,
@@ -621,7 +623,8 @@ fn start_timer(lapic_phys: u64, backend: lapic::Backend) -> lapic::Calibration {
         sched::QUANTUM_TICKS,
         controller.id(),
         controller.version(),
-        backend.name()
+        backend.name(),
+        u8::from(pv_eoi)
     );
     calibration
 }

@@ -10,6 +10,7 @@ pub mod cpu;
 pub mod fpu;
 pub mod gdt;
 pub mod idt;
+pub mod kvm;
 pub mod lapic;
 pub mod paging;
 pub mod pic;
