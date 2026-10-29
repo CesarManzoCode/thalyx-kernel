@@ -50,8 +50,11 @@ compartida en una línea propia y comprueba una palabra que casi nadie escribe,
 y el plano de control, al tomarlo en exclusiva, excluye nuevas tomas
 compartidas y espera a que se vacíen las que ya había. Las cuatro operaciones
 del viaje de ida y vuelta de IPC —admitir, recibir, responder y cerrar el
-ticket— lo toman compartido y se sirven de los cerrojos de cada registro; el
-resto de la interfaz lo sigue tomando en exclusiva, porque reescribe la
+ticket— lo toman compartido y se sirven de los cerrojos de cada registro.
+También la lectura, el acuse y la consulta del log de control, que sólo tocan
+el log y lo hacen bajo su cerrojo, el mismo con el que las admisiones escriben
+sus recibos ([ADR-024](../decisions/ADR-024-log-reads-shared-auditor-settles-until-dispatched-probe-spread.md)).
+El resto de la interfaz lo sigue tomando en exclusiva, porque reescribe la
 estructura de una tabla.
 
 Un cierre de capacidad es la excepción que se decide al resolver: si la

@@ -507,6 +507,23 @@ Cambiado sin medir, por la regla del mini sprint ([ADR-023](../decisions/ADR-023
 
 No atacado en esta ronda: las 25 métricas que siguen en `FAIL`. Las cifras están en el cierre anterior y en el registro de aceptación.
 
+### El cuarto cierre de K7
+
+Observado en `build/k7/check-20261029T134632` (kernel `61f27ad`) y en la campaña `kiln-k6` del mismo día. Fallan 34 criterios de K7, y `check_k6.py` da 23/24:
+
+- `k7.behavior_gates`. En la tercera de las tres ejecuciones TCG cae `shootdown` de K3, y con él K4 y K5. Desde `2f7e14f`, K3 falló en 3 de 18 ejecuciones, cada vez por un criterio distinto (`probe`, `k2`, `shootdown`).
+- `k7.behavior_tests` da 364 contra 392. Faltan los 57 daños de la autocomprobación de K3 de esa ejecución.
+- `no_loss` de K6, con −9 en `scale.ipc:1` (ronda 3, dos entradas después de `closure.unit`) y en `scale.ipc:4` (rondas 4 y 6).
+- Los nueve `tx_*`. `/mnt/exp13` no está montado, y montarlo pide root.
+
+Cambiado sin medir, por la regla del mini sprint ([ADR-024](../decisions/ADR-024-log-reads-shared-auditor-settles-until-dispatched-probe-spread.md)):
+
+- **El log de control, sin toma exclusiva.** `LOG_READ`, `LOG_ACK` y `LOG_QUERY` toman la máquina compartida y el cerrojo del log. Antes eran dos tomas exclusivas por cada 16 admisiones. Apunta a `no_loss` en `scale.ipc:4` y a las métricas de IPC del brazo nativo. La carga del kernel sigue en 569 344 bytes.
+- **El reposo del auditor, hasta pagar la deuda.** Después de un relevo, el auditor duerme hasta despertar a tiempo al comienzo de dos ventanas seguidas, con un límite de 400 ventanas. Antes eran tres ventanas fijas. Apunta a `no_loss` en `scale.ipc` después de un relevo.
+- **K3 espera al probe.** El supervisor espera a que el espacio del probe haya corrido en todos los procesadores antes de retirarle la página, como ya esperaba al escritor. Apunta a `shootdown`.
+
+No atacado en esta ronda: `entry.version` y `entry.clock`, que se miden en pasos de 10 ns (nativo 50 contra 60, y 60 contra 100). Tampoco `scale.compute`, `closure.unit`, `engine.*` ni `build_seconds`.
+
 ## Reanudar aquí
 
 **Último hito terminado y pusheado:** **K6 completo en su alcance** —protocolos emparejados, campaña de referencia, EXP-12, ocho cuellos medidos y corregidos, parámetros V0 revisados, inventario físico, puerta K6— en la rama `feat/k6-comparison-hardening-reference`. K5 quedó completo en `feat/k5-thalyx-port-tools`.

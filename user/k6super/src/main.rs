@@ -106,10 +106,12 @@ const RUN_DEADLINE_NS: u64 = 1_200_000_000_000;
 /// a handoff instead: the bound on how long a handed-over entry waits to
 /// start, which is not part of what any entry measures.
 const AUDIT_SLEEP_NS: u64 = 500_000;
-/// Execution windows that begin, with the auditor asleep, between the end of a
-/// handed-over entry and the client's next one: enough to repay an overrun of
-/// up to two budgets, so the next entry starts with the auditor dispatchable.
-const SETTLE_WINDOWS: u64 = 3;
+/// Windows in a row whose start the auditor, asleep, must be dispatched at
+/// between the end of a handed-over entry and the client's next one: the
+/// first says the overrun it carried is below one budget, the second that it
+/// is repaid, so the next entry starts with the auditor dispatchable however
+/// much the handed-over one wrote.
+const SETTLE_WINDOWS: u64 = 2;
 
 pub fn image_named(label: &str) -> Option<u64> {
     let wanted = name16(label);

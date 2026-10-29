@@ -547,6 +547,13 @@ fn run() -> ! {
     // woken thread on the processor that woke it when that processor is
     // about to yield, spread the writer less, and the assumption failed on
     // KVM. Waited for as conditions now, bounded, and reported either way.
+    //
+    // The withdrawal is judged the same way the seal is: against a space
+    // that had run on every processor (`shootdown` reads `space_cpus` off
+    // the probe's withdrawal). The probe's spread was left to the windows
+    // above, which K7's scheduler, keeping a woken thread on the processor
+    // its wake came from, no longer guarantees; `shootdown` failed in one of
+    // eighteen TCG runs since 2f7e14f. Its mask is waited for too.
     let everyone = if limits.cpus_online >= 32 {
         u32::MAX
     } else {
@@ -556,11 +563,12 @@ fn run() -> ! {
     let mut mask = 0u32;
     while waited < SPREAD_WINDOWS {
         mask = k2::domain_query(writer).map_or(0, |info| info.space_cpu_mask);
+        let probe_mask = k2::domain_query(probe).map_or(0, |info| info.space_cpu_mask);
         // SAFETY: the supervisor mapped the shared object writable in its own
         // domain at this address; slot 2 is the probe's word.
         let probe_rounds =
             unsafe { core::ptr::read_volatile((SUPER_SHARED_VADDR + 2 * 8) as *const u64) };
-        if mask & everyone == everyone && probe_rounds > 0 {
+        if mask & everyone == everyone && probe_mask & everyone == everyone && probe_rounds > 0 {
             break;
         }
         sleep_until(timer, stop, k2::now_ns() + limits.cpu_window_ns);

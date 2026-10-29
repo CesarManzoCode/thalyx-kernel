@@ -764,9 +764,7 @@ fn simple(
         op::TIMER_QUERY => evtops::query_timer(machine, ctx, staging),
 
         op::LOG_APPEND => logops::append(machine, ctx, staging),
-        op::LOG_ACK => logops::acknowledge(machine, ctx, staging),
-        op::LOG_QUERY => logops::query(machine, ctx, staging),
-
+        // LOG_ACK and LOG_QUERY are answered from the shared hold, always.
         op::DEVICE_QUERY => devops::query(machine, ctx, staging),
         op::DEVICE_MAP_REGION => devops::map_region(machine, ctx, staging),
         op::DEVICE_BIND_IRQ => devops::bind_irq(machine, ctx, staging),
@@ -1123,8 +1121,12 @@ fn refuse(domain: usize, operation: u32, code: i64) -> (i64, u64) {
 /// answering one, and letting go of the ticket that named it. What they touch
 /// -- a channel, an invocation, a message cell, a capability table, the
 /// authority tree, the control log -- has a lock of its own, so four pairs on
-/// four channels no longer queue behind each other for the machine. The rest
-/// of the interface rewrites the structure of the tables and keeps the
+/// four channels no longer queue behind each other for the machine. With them
+/// go the auditor's acknowledgement and query of the log those admissions
+/// write, which touch the log alone, under its lock: every sixteen admissions
+/// the auditor acknowledges a batch, and an exclusive hold for it waited for
+/// the readers of every processor and stopped the round trips meanwhile. The
+/// rest of the interface rewrites the structure of the tables and keeps the
 /// exclusive hold.
 ///
 /// Returns `None` when the operation is not one of these, or when the handle
@@ -1147,6 +1149,8 @@ fn shared(
             | op::CAP_DERIVE
             | op::CAP_COPY
             | op::CAP_INSPECT
+            | op::LOG_ACK
+            | op::LOG_QUERY
     ) {
         return None;
     }
@@ -1182,6 +1186,8 @@ fn shared(
                 op::CAP_DERIVE => capops::derive(&machine, &ctx, staging),
                 op::CAP_COPY => capops::copy(&machine, &ctx),
                 op::CAP_INSPECT => capops::inspect(&machine, &ctx, staging),
+                op::LOG_ACK => logops::acknowledge(&machine, &ctx, staging),
+                op::LOG_QUERY => logops::query(&machine, &ctx, staging),
                 _ => Err(status::NOT_SUPPORTED),
             }
         }

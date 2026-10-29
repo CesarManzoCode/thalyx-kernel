@@ -138,8 +138,8 @@ pub fn drain_timed(run: &mut Run, wait_until: u64) -> bool {
     }
 }
 
-/// Audits, asleep in the kernel between batches, until `windows` execution
-/// windows have begun.
+/// Audits, asleep in the kernel between batches, until the auditor has been
+/// dispatched at the start of `windows` execution windows in a row.
 ///
 /// The auditor is this domain, and this domain's scope has half a window of
 /// execution. A handed-over entry can spend all of it and more: `closure.unit`
@@ -151,13 +151,42 @@ pub fn drain_timed(run: &mut Run, wait_until: u64) -> bool {
 /// cells hold and the next one was refused with `LIMIT_EXHAUSTED`. Sleeping
 /// costs no execution, so each window that begins repays up to one budget;
 /// none of it is inside any entry's samples.
+///
+/// A fixed number of windows repaid a fixed debt, and the debt is not fixed:
+/// it is what the entry wrote, and an entry that wrote ten budgets' worth
+/// would leave the auditor held for seven more windows after three. In the
+/// kiln K6 campaign of 2026-10-29, `scale.ipc:1` two entries after
+/// `closure.unit` was refused 15 561 times.
+/// So the auditor asks to be woken at the start of the next window and looks
+/// at when it was: a thread whose scope still carries a budget or more is not
+/// dispatched in that window at all, and wakes one or more windows late. Woken
+/// within half a window of asking, `windows` times in a row, the carried
+/// overrun was below one budget and has since been repaid. [`SETTLE_LIMIT`]
+/// bounds the wait whatever the clock does.
 pub fn settle(run: &mut Run, windows: u64) {
     let window = run.window_ns.max(1);
-    let until = (k2::now_ns() / window + windows) * window;
-    while k2::now_ns() < until {
-        drain_timed(run, until);
+    let deadline = k2::now_ns() + SETTLE_LIMIT * window;
+    let mut prompt = 0u64;
+    while prompt < windows {
+        let asked = (k2::now_ns() / window + 1) * window;
+        while k2::now_ns() < asked {
+            drain_timed(run, asked);
+        }
+        let now = k2::now_ns();
+        prompt = if now - asked < window / 2 {
+            prompt + 1
+        } else {
+            0
+        };
+        if now >= deadline {
+            return;
+        }
     }
 }
+
+/// Windows [`settle`] waits at most: four seconds at ten milliseconds. A bound
+/// on a wait that should end in a few windows, not an expectation.
+const SETTLE_LIMIT: u64 = 400;
 
 /// Runs one handed-over entry. Zero, or the negated status it stopped with.
 pub fn run(run: &mut Run, request: &Handoff) -> u32 {
