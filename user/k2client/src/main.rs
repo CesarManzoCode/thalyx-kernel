@@ -321,6 +321,7 @@ fn malformed_requests(buffer: u64, endpoint: u64) {
         status::INVALID_ADDRESS,
     );
     k2::expect_refusal(malformed::unknown_flag(buffer), status::INVALID_ARGUMENT);
+    k2::expect_refusal(malformed::misplaced_close(buffer), status::INVALID_ARGUMENT);
     k2::expect_refusal(
         malformed::unassigned_operation(buffer),
         status::NOT_SUPPORTED,

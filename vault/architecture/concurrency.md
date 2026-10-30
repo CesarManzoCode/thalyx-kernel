@@ -112,6 +112,8 @@ siempre; se midió como un bloqueo en K4.
 
 Desmapear publica trabajo de shootdown bajo sincronización, suelta los locks y espera confirmación. El handler remoto confirma sin adquirir locks que el iniciador conserve. Las páginas pasan a una lista de retiro y no vuelven al allocator hasta completar el periodo de seguridad.
 
+El registro de un retiro (`mem.unmapped`, `mem.sealed`) se escribe después de los acuses, porque dice lo que la espera observó. Un fallo de usuario que ese retiro causa puede ocurrir antes, en un procesador que ya confirmó. Por eso el retiro cuenta como pendiente (`tlb::Unrecorded`) desde la toma de la máquina que quita las entradas hasta que escribe su registro o se rinde. Un fallo de usuario que, con la máquina tomada, encuentra uno pendiente la suelta, espera sin cerrojo, sirviendo los acuses como el giro de cualquier cerrojo, y la vuelve a tomar, una sola vez y con el límite de una espera de acuse. Así el fallo se registra después del retiro que lo causó ([ADR-027](../decisions/ADR-027-faults-after-their-withdrawal-and-reply-closes-ticket.md)).
+
 La publicación de una raíz usa un turno de transacción de usuario que puede abarcar I/O; no es un spinlock kernel ni un mutex que el driver o el worker de respuesta necesiten. Lectores conservan raíz anterior; el receptor de completions y la recuperación tienen ejecución independiente.
 
 ## Interleavings obligatorios

@@ -544,7 +544,18 @@ fn describe(machine: &Machine, index: usize) -> MemoryInfo {
 /// and the caller is told the drain is incomplete. Retrying is allowed and
 /// finishes the transition; declaring the bytes immutable is not.
 pub fn seal(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64> {
-    let (index, id, generation, withdrawn, pages, live, mask, withdrawn_at, withdrawn_cpus) = {
+    let (
+        index,
+        id,
+        generation,
+        withdrawn,
+        pages,
+        live,
+        mask,
+        withdrawn_at,
+        withdrawn_cpus,
+        _unrecorded,
+    ) = {
         let mut machine = MACHINE.write();
         let mut writers = [false; crate::state::MAX_DOMAINS];
         let cap = resolve(
@@ -614,6 +625,11 @@ pub fn seal(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
             pages += withdraw_map(&mut machine, map_index);
             withdrawn += 1;
         }
+        // In the hold that removed the writers' entries: a writer that
+        // faults on them is recorded after the seal, or after the failure
+        // that leaves the object sealing, and is held until this is dropped
+        // on the way out.
+        let unrecorded = crate::tlb::Unrecorded::hold();
         let mut live = 0u32;
         let mut mask = 0u64;
         for domain in 0..crate::state::MAX_DOMAINS {
@@ -640,6 +656,7 @@ pub fn seal(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
             mask,
             object.unmapped_at,
             object.unmapped_cpus,
+            unrecorded,
         )
     };
 

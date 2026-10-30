@@ -21,6 +21,8 @@ El encabezado incluye también la [faceta del endpoint](objects.md) y la referen
 
 La respuesta utiliza un objeto de una sola consumición vinculado al emisor y a esa invocación. Responder dos veces es error. La muerte o el timeout del emisor no libera por adelantado memoria que el receptor siga usando.
 
+El receptor suelta el ticket con `CAP_CLOSE` o, desde ABI 0.5, en la misma entrada que responde, con la bandera `CLOSE_AFTER` de `INVOCATION_REPLY` ([ADR-027](../decisions/ADR-027-faults-after-their-withdrawal-and-reply-closes-ticket.md)). El cierre es el de `CAP_CLOSE` y ocurre solo si la respuesta se aceptó. Una respuesta rechazada no cierra nada, y un cierre que falla después no deshace la respuesta. Cualquier otra operación con esa bandera se rechaza con `INVALID_ARGUMENT` sin efecto.
+
 Hay dos hechos distintos: «la llamada fue admitida» y «su respuesta llegó». Un timeout después de admisión no prueba ausencia de efecto. Las APIs de publicación usan identificador idempotente de aplicación y consulta de resultado, definidos en [persistencia](persistence.md).
 
 ## Trabajo y CPU

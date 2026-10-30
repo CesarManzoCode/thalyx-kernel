@@ -170,6 +170,9 @@ int64_t th_unbind_worker(uint64_t invocation);
 int64_t th_close(uint64_t handle);
 int64_t th_receive(uint64_t endpoint, th_message *out, uint64_t deadline_ns);
 int64_t th_reply(uint64_t invocation, uint64_t result, const th_payload *body);
+/* Replies and lets go of the ticket in one entry (`CLOSE_AFTER`). A refused
+ * reply closes nothing: the ticket is still the caller's to answer or close. */
+int64_t th_reply_close(uint64_t invocation, uint64_t result, const th_payload *body);
 /* Discharges an invocation nobody is waiting on any more: a caller whose scope
  * was closed has had its wait cancelled, and a reply to it is refused. The
  * obligation is still the receiver's until it says what became of it. */

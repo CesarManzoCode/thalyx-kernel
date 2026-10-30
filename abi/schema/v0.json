@@ -14,7 +14,7 @@
   ],
   "version": {
     "major": 0,
-    "minor": 4
+    "minor": 5
   },
   "limits": {
     "max_descriptor_len": 4096,
@@ -37,6 +37,11 @@
       "name": "NONBLOCKING",
       "bit": 0,
       "doc": "Refuse to wait: an operation that would have blocked returns WOULD_BLOCK instead. Carried in the flags register, never in the descriptor."
+    },
+    {
+      "name": "CLOSE_AFTER",
+      "bit": 1,
+      "doc": "Close the handle the operation was addressed to once the operation has succeeded, as CAP_CLOSE would. Accepted by INVOCATION_REPLY only and refused with INVALID_ARGUMENT elsewhere; a refused reply closes nothing."
     }
   ],
   "entries": [

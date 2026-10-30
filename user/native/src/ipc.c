@@ -77,7 +77,8 @@ int64_t th_receive(uint64_t endpoint, th_message *out, uint64_t deadline_ns)
     return THALYX_STATUS_OK;
 }
 
-int64_t th_reply(uint64_t invocation, uint64_t result, const th_payload *body)
+static int64_t reply_with(uint64_t invocation, uint64_t result, const th_payload *body,
+                          uint64_t flags)
 {
     thalyx_reply_request_t reply;
     memset(&reply, 0, sizeof(reply));
@@ -88,8 +89,18 @@ int64_t th_reply(uint64_t invocation, uint64_t result, const th_payload *body)
     th_desc d;
     th_desc_begin(&d, THALYX_OP_INVOCATION_REPLY);
     th_desc_put(&d, TH_BODY, &reply, sizeof(reply));
-    th_result r = th_op(invocation, THALYX_OP_INVOCATION_REPLY, &d, 0);
+    th_result r = th_op_flags(invocation, THALYX_OP_INVOCATION_REPLY, &d, flags, 0);
     return r.status;
+}
+
+int64_t th_reply(uint64_t invocation, uint64_t result, const th_payload *body)
+{
+    return reply_with(invocation, result, body, 0);
+}
+
+int64_t th_reply_close(uint64_t invocation, uint64_t result, const th_payload *body)
+{
+    return reply_with(invocation, result, body, THALYX_FLAG_CLOSE_AFTER);
 }
 
 int64_t th_resolve(uint64_t invocation, uint32_t outcome, uint64_t detail)

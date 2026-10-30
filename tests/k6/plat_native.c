@@ -20,6 +20,7 @@
  *   IDLE    blocks in the kernel until it is stopped, for `closure.unit`.
  */
 
+#include <stddef.h>
 #include <string.h>
 
 #include "bench.h"
@@ -477,24 +478,51 @@ int64_t plat_special(uint32_t bench, uint32_t param, uint32_t *out, uint32_t max
 
 /* --------------------------------------------------------------- roles */
 
+/* The answerer of every IPC entry, and on their critical path: a caller and
+ * its server share a processor, and the caller runs again only once the
+ * server is back in its receive. So the loop is what Linux's echo server is,
+ * a receive and an answer, with the payload copied once, from the descriptor
+ * the message arrived in to the one the reply leaves in, and the ticket let
+ * go of by the reply itself (`CLOSE_AFTER`) instead of by a third entry. A
+ * refused reply closes nothing, and the ticket is closed then. */
 static void serve(void *argument)
 {
     static const uint64_t slots[4] = {TH_SLOT_INBOUND, K6_SLOT_PAIR1, K6_SLOT_PAIR2, K6_SLOT_PAIR3};
     unsigned index = (unsigned)(uintptr_t)argument;
     uint64_t endpoint = slot(slots[index & 3]);
+    const size_t at_count = TH_BODY + offsetof(thalyx_receive_result_t, cap_count);
+    const size_t at_caps = TH_BODY + offsetof(thalyx_receive_result_t, caps);
+    const size_t at_len = TH_BODY + offsetof(thalyx_receive_result_t, header)
+                          + offsetof(thalyx_message_header_t, payload_len);
+    const size_t at_payload = TH_BODY + offsetof(thalyx_receive_result_t, payload);
+    const size_t reply_len = TH_BODY + offsetof(thalyx_reply_request_t, payload_len);
+    const size_t reply_payload = TH_BODY + offsetof(thalyx_reply_request_t, payload);
+    th_desc in;
+    th_desc out;
     for (;;) {
-        th_message message;
-        int64_t status = th_receive(endpoint, &message, 0);
-        if (status != THALYX_STATUS_OK) {
-            if (status == THALYX_STATUS_PEER_DEAD || status == THALYX_STATUS_SCOPE_CLOSED) { return; }
+        th_desc_begin(&in, THALYX_OP_ENDPOINT_RECEIVE);
+        th_result r = th_op(endpoint, THALYX_OP_ENDPOINT_RECEIVE, &in, 0);
+        if (r.status != THALYX_STATUS_OK) {
+            if (r.status == THALYX_STATUS_PEER_DEAD || r.status == THALYX_STATUS_SCOPE_CLOSED) { return; }
             continue;
         }
-        for (uint32_t i = 0; i < message.lent_count; i++) { th_close(message.lent[i]); }
-        th_payload body;
-        body.len = message.payload.len;
-        memcpy(body.bytes, message.payload.bytes, body.len);
-        th_reply(message.invocation, 0, &body);
-        th_close(message.invocation);
+        uint32_t lent = 0;
+        memcpy(&lent, in.bytes + at_count, sizeof(lent));
+        if (lent > THALYX_MAX_CAPS_PER_MESSAGE) { lent = THALYX_MAX_CAPS_PER_MESSAGE; }
+        for (uint32_t i = 0; i < lent; i++) {
+            uint64_t handle = 0;
+            memcpy(&handle, in.bytes + at_caps + i * sizeof(handle), sizeof(handle));
+            th_close(handle);
+        }
+        uint32_t len = 0;
+        memcpy(&len, in.bytes + at_len, sizeof(len));
+        if (len > THALYX_MAX_INLINE_PAYLOAD) { len = THALYX_MAX_INLINE_PAYLOAD; }
+        th_desc_begin(&out, THALYX_OP_INVOCATION_REPLY);
+        memcpy(out.bytes + reply_len, &len, sizeof(len));
+        memcpy(out.bytes + reply_payload, in.bytes + at_payload, len);
+        th_result answered = th_op_flags(r.aux, THALYX_OP_INVOCATION_REPLY, &out,
+                                         THALYX_FLAG_CLOSE_AFTER, 0);
+        if (answered.status != THALYX_STATUS_OK) { th_close(r.aux); }
     }
 }
 

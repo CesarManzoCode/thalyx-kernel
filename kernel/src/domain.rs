@@ -623,7 +623,20 @@ pub fn terminate_on_fault(frame: &TrapFrame, cr2: u64) -> ! {
         let thread_index = crate::sched::current_thread();
         let cell = thread::get(thread_index);
         let domain_index = cell.domain();
-        let mut machine = MACHINE.write();
+        // A withdrawal that has removed its entries and not yet written its
+        // record: the fault may be its doing, and it is recorded after it,
+        // not before. Waited for once -- a withdrawal that starts after the
+        // wait removed nothing this fault ran into.
+        let mut waited = false;
+        let mut machine = loop {
+            let machine = MACHINE.write();
+            if waited || !crate::tlb::unrecorded() {
+                break machine;
+            }
+            drop(machine);
+            crate::tlb::await_recorded();
+            waited = true;
+        };
         // A thread that was stopped by authority while it was running, and
         // whose withdrawn mappings caught up with it before the kick did. It
         // has not done anything its program should be charged with; it leaves,

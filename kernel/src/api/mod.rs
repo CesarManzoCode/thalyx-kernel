@@ -706,6 +706,10 @@ fn validate_header(header: &DescriptorHeader, operation: u32, len: u64) -> Resul
 }
 
 /// Runs the operations that complete without waiting.
+///
+/// Not the ones [`shared`] runs: it answers every one of them but the close
+/// of a memory object, so their arms here were never reached and are gone,
+/// as the log's were.
 fn simple(
     machine: &mut Machine,
     ctx: &Ctx,
@@ -713,9 +717,6 @@ fn simple(
     operation: u32,
 ) -> Result<u64, i64> {
     match operation {
-        op::CAP_INSPECT => capops::inspect(machine, ctx, staging),
-        op::CAP_DERIVE => capops::derive(machine, ctx, staging),
-        op::CAP_COPY => capops::copy(machine, ctx),
         op::CAP_CLOSE => capops::close(machine, ctx),
         op::CAP_FENCE => capops::fence(machine, ctx),
         op::CAP_DRAIN_STATUS => capops::drain_status(machine, ctx, staging),
@@ -746,10 +747,8 @@ fn simple(
         op::MEMORY_READ => memops::read(machine, ctx, staging),
 
         op::ENDPOINT_BIND_FACET => ipcops::bind_facet(machine, ctx, staging),
-        op::ENDPOINT_SEND => ipcops::send(machine, ctx, staging),
         op::ENDPOINT_QUERY => ipcops::query_endpoint(machine, ctx, staging),
 
-        op::INVOCATION_REPLY => ipcops::reply(machine, ctx, staging),
         op::INVOCATION_BEGIN_EFFECT => ipcops::begin_effect(machine, ctx, staging),
         op::INVOCATION_RESOLVE => ipcops::resolve_invocation(machine, ctx, staging),
         op::INVOCATION_QUERY => ipcops::query_invocation(machine, ctx, staging),
@@ -981,6 +980,9 @@ pub fn invoke(domain: usize, thread: usize, frame: &mut TrapFrame) -> (i64, u64)
     if !waits(operation) && frame.r8 & flag::NONBLOCKING != 0 {
         return refuse(domain, operation, status::INVALID_ARGUMENT);
     }
+    if operation != op::INVOCATION_REPLY && frame.r8 & flag::CLOSE_AFTER != 0 {
+        return refuse(domain, operation, status::INVALID_ARGUMENT);
+    }
 
     let mut staging = Staging::new();
     let now = now_ns();
@@ -1180,7 +1182,7 @@ fn shared(
             }
             let ctx = Ctx { cap, ..*ctx_base };
             match operation {
-                op::INVOCATION_REPLY => ipcops::reply(&machine, &ctx, staging),
+                op::INVOCATION_REPLY => reply(&machine, &ctx, staging),
                 op::ENDPOINT_SEND => ipcops::send(&machine, &ctx, staging),
                 op::CAP_CLOSE => capops::close(&machine, &ctx),
                 op::CAP_DERIVE => capops::derive(&machine, &ctx, staging),
@@ -1198,6 +1200,24 @@ fn shared(
     // the reason the exclusive path gives.
     crate::sched::flush_wakes();
     Some(outcome)
+}
+
+/// Answers an invocation and, when the caller asked with `CLOSE_AFTER`, lets
+/// go of the ticket in the same entry.
+///
+/// A server's loop is receive, reply, close, and on one processor the caller
+/// it answered runs only once the server blocks again: the close was a whole
+/// kernel entry between every answer and the next call. The close is the one
+/// `CAP_CLOSE` performs, on the handle just resolved, and only after the
+/// reply succeeded -- a refused reply leaves the ticket where it was, for the
+/// server to answer or close. A close that then fails leaves the handle
+/// behind and does not unsay the reply: the caller already has its answer.
+fn reply(machine: &Machine, ctx: &Ctx, staging: &mut Staging) -> Result<u64, i64> {
+    let replied = ipcops::reply(machine, ctx, staging);
+    if replied.is_ok() && ctx.flags & flag::CLOSE_AFTER != 0 {
+        let _ = capops::close(machine, ctx);
+    }
+    replied
 }
 
 /// Fills in the response header of a descriptor the kernel is writing back.

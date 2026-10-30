@@ -31,7 +31,7 @@
 //! is a *failure to observe quiescence*, not permission to proceed: the frames
 //! stay in quarantine and the run says so.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::arch::x86_64::{cpu, lapic, trap};
 use crate::limits::MAX_CPUS;
@@ -123,6 +123,73 @@ static SPACE_MASKS: [AtomicU64; crate::limits::MAX_DOMAINS] =
 /// microsecond spent to make a processor flush nothing.
 static SPACE_LIVE: [AtomicU64; crate::limits::MAX_DOMAINS] =
     [const { AtomicU64::new(0) }; crate::limits::MAX_DOMAINS];
+
+/// Withdrawals that have left the tables and are not yet recorded.
+///
+/// An unmap and a seal remove the entries under the control lock, drop it,
+/// wait for the acknowledgements, and only then write the record that says
+/// the withdrawal happened, because the record carries what the wait
+/// observed. A thread of the space on a processor that has already flushed
+/// -- or that never cached the entry -- faults in that interval, and its
+/// fault record used to precede the withdrawal's: a fault the withdrawal
+/// caused, logged as if it came first. K3's `probe` reads exactly that order.
+/// A user fault taken while one is outstanding waits for its record (see
+/// [`unrecorded`] and [`await_recorded`]); nothing else reads this.
+///
+/// One count for the machine rather than one per space: a fault in a space
+/// no withdrawal touched waits too, for one acknowledgement wait at most, and
+/// a user fault is the end of its domain, not a path anything runs often.
+static UNRECORDED: AtomicU32 = AtomicU32::new(0);
+
+/// A withdrawal whose record is still to be written: user faults wait until
+/// this is dropped.
+///
+/// Taken under the control lock, in the hold that removes the entries it
+/// covers, and dropped once the record is written or the operation gives up.
+pub struct Unrecorded(());
+
+impl Unrecorded {
+    /// Counts one withdrawal as outstanding.
+    #[must_use]
+    pub fn hold() -> Self {
+        UNRECORDED.fetch_add(1, Ordering::AcqRel);
+        Self(())
+    }
+}
+
+impl Drop for Unrecorded {
+    fn drop(&mut self) {
+        UNRECORDED.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Whether a withdrawal has left the tables and not yet been recorded.
+///
+/// Read under the control lock it is exact: a hold is only ever taken under
+/// that lock, so a withdrawal not counted here removes nothing until the
+/// reader lets go.
+#[must_use]
+pub fn unrecorded() -> bool {
+    UNRECORDED.load(Ordering::Acquire) != 0
+}
+
+/// Waits until no withdrawal is outstanding.
+///
+/// Called by a user fault that found one, with no lock held. The withdrawal
+/// it waits for may need this processor's acknowledgement, so the wait
+/// services it, as every lock's spin does. Bounded like an acknowledgement
+/// wait: a withdrawal that never records is reported by its own wait, and the
+/// fault is recorded anyway rather than not at all.
+#[cold]
+#[inline(never)]
+pub fn await_recorded() {
+    let mut spins = 0u64;
+    while unrecorded() && spins < WAIT_SPIN_LIMIT {
+        refresh_local();
+        core::hint::spin_loop();
+        spins += 1;
+    }
+}
 
 /// Notes that `cpu` is dispatching a thread of `domain`.
 ///

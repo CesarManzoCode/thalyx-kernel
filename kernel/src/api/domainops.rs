@@ -300,7 +300,7 @@ pub fn unmap(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64
     if request.reserved0 != 0 {
         return Err(status::INVALID_ARGUMENT);
     }
-    let (target, pages, live, mask, memory) = {
+    let (target, pages, live, mask, memory, unrecorded) = {
         let mut machine = MACHINE.write();
         let cap = resolve(
             &machine,
@@ -331,9 +331,12 @@ pub fn unmap(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64
         // only the ones inside it at this instant. That is the set an
         // invalidation actually has to reach.
         let mask = crate::tlb::space_mask(target);
+        // Before the entries go: a thread of the space that faults on them
+        // from here on is recorded after the withdrawal that caused it.
+        let unrecorded = crate::tlb::Unrecorded::hold();
         let (pages, memory) =
             crate::api::memops::withdraw_map_deferring(&mut machine, record_index);
-        (target, pages, live, mask, memory)
+        (target, pages, live, mask, memory, unrecorded)
     };
 
     // Only the processors that could be holding one of this space's
@@ -356,6 +359,7 @@ pub fn unmap(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64
         ack.interrupted,
         u8::from(!ack.timed_out)
     );
+    drop(unrecorded);
     // Now that the processors that could hold a translation have acknowledged,
     // an object nothing else names goes straight back to the pool instead of
     // through the quarantine.

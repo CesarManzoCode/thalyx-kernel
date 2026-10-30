@@ -1214,6 +1214,21 @@ pub mod malformed {
         send(handle, op::MEMORY_QUERY, &desc, u64::from(len), 1 << 40)
     }
 
+    /// `CLOSE_AFTER` on an operation other than the reply it belongs to. The
+    /// handle is the caller's buffer, which it goes on using: a refusal that
+    /// had closed it would show there.
+    pub fn misplaced_close(handle: u64) -> Outcome {
+        let mut desc = Desc::new();
+        let len = desc.prepare(op::MEMORY_QUERY, 0);
+        send(
+            handle,
+            op::MEMORY_QUERY,
+            &desc,
+            u64::from(len),
+            thalyx_abi::generated::flag::CLOSE_AFTER,
+        )
+    }
+
     /// An operation code the interface does not assign.
     pub fn unassigned_operation(handle: u64) -> Outcome {
         // SAFETY: no descriptor is passed, so there is no memory precondition.

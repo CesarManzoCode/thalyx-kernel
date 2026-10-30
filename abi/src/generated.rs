@@ -10,7 +10,7 @@
 /// Major interface version.
 pub const VERSION_MAJOR: u16 = 0;
 /// Minor interface version.
-pub const VERSION_MINOR: u16 = 4;
+pub const VERSION_MINOR: u16 = 5;
 
 /// Interface limits fixed by V0. Reported by the limits query entry.
 pub mod limit {
@@ -296,8 +296,10 @@ pub mod op {
 pub mod flag {
     /// Refuse to wait: an operation that would have blocked returns WOULD_BLOCK instead. Carried in the flags register, never in the descriptor.
     pub const NONBLOCKING: u64 = 1 << 0;
+    /// Close the handle the operation was addressed to once the operation has succeeded, as CAP_CLOSE would. Accepted by INVOCATION_REPLY only and refused with INVALID_ARGUMENT elsewhere; a refused reply closes nothing.
+    pub const CLOSE_AFTER: u64 = 1 << 1;
     /// Every bit this revision defines.
-    pub const KNOWN: u64 = 0x1;
+    pub const KNOWN: u64 = 0x3;
 }
 
 /// Rights every operation requires, checked before any effect.

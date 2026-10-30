@@ -559,6 +559,23 @@ Cambiado sin medir, por la regla del mini sprint ([ADR-026](../decisions/ADR-026
 
 No atacado en esta ronda: `scale.compute:3`, la cuantización de `entry.*` y los tres `tx_*` que son ruido.
 
+### El séptimo cierre de K7
+
+Observado en `build/k7/check-20261029T172017` (kernel `a630f6b`) y en el `check_k3.py` de kiln del mismo cierre. Fallan 20 criterios. Dos son de comportamiento. `k7.behavior_gates` cae porque la primera ejecución TCG terminó con `IndexError` en la puerta K4 y en su autocomprobación. `k7.behavior_tests` da 346 contra 392, porque faltan los 46 daños de K4. Las otras dos ejecuciones pasan. El `check_k3.py` aparte dio 27/28: falla `probe`.
+
+- **`probe` y `seal` de K3 tienen una carrera en el kernel.** El retiro se registra después de los acuses, y un fallo del hilo retirado en un procesador que ya confirmó se registraba antes. La explicación está en [ADR-027](../decisions/ADR-027-faults-after-their-withdrawal-and-reply-closes-ticket.md). El registro serie de la ejecución que falló no se conservó.
+- **El `IndexError` de K4** está en `check_outbox`, que indexaba los registros `DELIVERED` de `cut-after-checkpoint/1` sin comprobar que quedara alguno. El estado que tenía el medio no se conservó.
+- **Las métricas.** `ipc.call` (0, 64, 256), `ipc.caps` (1, 4), `ipc.lineage:0` y `scale.ipc:1` están entre un 1 % y un 9 % por llamada de su umbral. `scale.ipc:3`, `engine.load`, `engine.cancel` y `entry.clock` tienen intervalos más anchos que la distancia al umbral. `scale.compute:4` y `engine.infer:4` quedan a un 1 % o menos. `entry.version` sigue cuantizado: 0,833491 [0,833474, 0,83351] contra < 0,833494. `tx_end` dio 0,02296 ms [0,0200, 0,0258] contra < 0,020163. `tx_request`, `tx_validate` y `tx_observe` dieron límites superiores de 11 a 30 veces su umbral. Siguen siendo ruido de medición del anfitrión.
+
+Cambiado sin medir, por la regla del mini sprint ([ADR-027](../decisions/ADR-027-faults-after-their-withdrawal-and-reply-closes-ticket.md)):
+
+- **Un fallo queda detrás del retiro que lo causó.** `tlb::Unrecorded` cuenta los retiros de `unmap` y `seal` que todavía no escribieron su registro. Un fallo de usuario que encuentra uno espera, una sola vez y con límite, sin cerrojo. Busca que `k7.behavior_gates` y `k7.behavior_tests` no vuelvan a caer por `probe` o `seal`.
+- **La respuesta cierra su ticket.** ABI 0.5 agrega `CLOSE_AFTER` en `INVOCATION_REPLY`. El servidor nativo de K6 hace dos entradas por llamada en lugar de tres y copia el payload una sola vez. Busca bajar `k7.k6_ipc_call_*`, `ipc_caps_*` e `ipc_lineage_0`, y subir `k7.k6_scale_ipc_1`. K2 agrega un control negativo para la bandera fuera de lugar.
+- **La puerta K4 dice qué encontró** cuando no hay outbox `DELIVERED`, en lugar de lanzar `IndexError`. El criterio sigue fallando en ese caso: la causa de fondo no se tocó.
+- Se quitaron los brazos muertos de `api::simple`. La carga del kernel sigue en 569 344 bytes.
+
+No atacado en esta ronda: `entry.*`, `engine.*`, `scale.compute:4` y los `tx_*`.
+
 ## Reanudar aquí
 
 **Último hito terminado y pusheado:** **K6 completo en su alcance** —protocolos emparejados, campaña de referencia, EXP-12, ocho cuellos medidos y corregidos, parámetros V0 revisados, inventario físico, puerta K6— en la rama `feat/k6-comparison-hardening-reference`. K5 quedó completo en `feat/k5-thalyx-port-tools`.

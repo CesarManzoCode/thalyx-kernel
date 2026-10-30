@@ -1011,7 +1011,17 @@ def check_outbox(cases: list[Case]) -> Result:
         result.detail = f"no outbox record on {where}"
         return result
     store = read_store(leg.medium)
+    statuses = [fmt.OUTBOXSTATUS_NAME.get(e["status"], e["status"]) for e in entries]
     entries = [e for e in entries if e["status"] == fmt.OUTBOXSTATUS["DELIVERED"]]
+    if not entries:
+        # Said rather than raised: an outbox the broker never confirmed is a
+        # failed criterion, and an IndexError hid which status it held.
+        recorded = note_values(holder.legs[0].records, "outbox_recorded", STORE)
+        result.detail = (
+            f"{where} holds outbox records with status {statuses} and none DELIVERED; "
+            f"the service recorded {recorded}"
+        )
+        return result
     answered = note_values(leg.records, "broker_answered", "k4broker")
     if fmt.OUTBOXSTATUS["DELIVERED"] not in answered:
         result.detail = "the broker never answered DELIVERED"
