@@ -18,18 +18,19 @@ A system that runs work on behalf of an agent — with its own budget, its own c
 
 Interpretation of intent, human policy, model behavior, and domain knowledge are explicitly **not** kernel concerns — they belong to the consumer (Thalyx) running on top. See [`vault/architecture/overview.md`](vault/architecture/overview.md) for the full derivation and the thirteen architecture contracts it links.
 
-## Status: K0–K6 complete, in their stated scope
+## Status: K0–K7 closed, in their stated scope
 
-Six phases have run on this kernel, each gated by an independent checker reading kernel logs and (from K4 on) raw medium bytes — not the program's own claims about itself:
+Seven phases have run on this kernel, each gated by an independent checker reading kernel logs and (from K4 on) raw medium bytes — not the program's own claims about itself:
 
-| Phase | What it demonstrated | Gate |
-|---|---|---|
-| K1 | Protected boot: ring-3 domains, timer preemption, illegal accesses contained | 13/13 |
-| K2 | A working capability system: 51/51 scheduled interface operations exercised, authority delegation and revocation, attributable work | 21/21, self-test 28/28 |
-| K3 | SMP (4 processors) and a real device: cross-CPU scheduling, TLB shootdown, a user-space virtio-blk driver | 28/28, self-test 57/57 |
-| K4 | Durable managed state: versioned publication over a block medium that survives a crash at every write point in the matrix | 31/31, self-test 48/48 |
-| K5 | The Thalyx port: real QuickJS, a real native validation tool, llama.cpp as a resident engine, under rivals/cancellation/crashes | 47/47, self-test 88/88 |
-| K6 | Comparison and hardening: 17 paired native/Linux benchmarks, 8 bottlenecks found and fixed by measuring, a KVM reference campaign | 19/19 + 5 regressions, self-test 27/27 |
+| Phase | What it demonstrated | Gate | Status |
+|---|---|---|---|
+| K1 | Protected boot: ring-3 domains, timer preemption, illegal accesses contained | 13/13 | Cerrada |
+| K2 | A working capability system: 51/51 scheduled interface operations exercised, authority delegation and revocation, attributable work | 21/21, self-test 28/28 | Cerrada |
+| K3 | SMP (4 processors) and a real device: cross-CPU scheduling, TLB shootdown, a user-space virtio-blk driver | 28/28, self-test 57/57 | Cerrada |
+| K4 | Durable managed state: versioned publication over a block medium that survives a crash at every write point in the matrix | 31/31, self-test 48/48 | Cerrada |
+| K5 | The Thalyx port: real QuickJS, a real native validation tool, llama.cpp as a resident engine, under rivals/cancellation/crashes | 47/47, self-test 88/88 | Cerrada |
+| K6 | Comparison and hardening: 17 paired native/Linux benchmarks, 8 bottlenecks found and fixed by measuring, a KVM reference campaign | 19/19 + 5 regressions, self-test 27/27 | Cerrada |
+| K7 | Measured optimization against a two-replica baseline: Thalyx transactions, boot, serial, K6 primitives, image size, build and gate time | 38 of 50 original criteria; K1–K5 and K6 gates pass at closure | Cerrada |
 
 Each gate also re-runs every prior gate's criteria against the same kernel binary — K1's 13 criteria still pass compiled into the K6 kernel, and so on. Every image, K1 through K6, is the same kernel binary with a different user-space package selected at boot. Full narrative and limits for each phase: [K1](vault/evidence/k1-protected-boot.md) · [K2](vault/evidence/k2-objects-authority-work.md) · [K3](vault/evidence/k3-smp-devices.md) · [K4](vault/evidence/k4-durable-state.md) · [K5](vault/evidence/k5-thalyx-port.md) · [K6](vault/evidence/k6-comparison-hardening.md). The single current-state checkpoint is [`vault/roadmap/current-state.md`](vault/roadmap/current-state.md).
 
@@ -44,6 +45,18 @@ K6 built one benchmark source (`tests/k6/bench.c`) compiled against two backends
 - **Engine inference, byte-identical output to Thalyx's Linux reference in every repetition:** native ~10% slower (1.8 ms vs. 1.63 ms for a fixed prompt/model).
 
 Full tables, confidence intervals, the eight bottlenecks found and fixed while measuring, and exactly what is and isn't claimed: [`vault/evidence/k6-comparison-hardening.md`](vault/evidence/k6-comparison-hardening.md).
+
+## K7 results: measured optimization
+
+K7 changed the kernel, the K5 link, the image and the build only where a before/after measurement could judge it, against a baseline of two replicas of the same tree. Each criterion passes only if the upper (or lower) end of its 95% confidence interval clears the baseline's interval. The final measurement is of kernel `2eca0c8` on the same KVM machine (baseline medians, replica A / B → K7 median [95% CI]):
+
+- **Thalyx transaction on this kernel (EXP-13), K1 − L1 end to end:** 26.2 / 27.2 ms → 4.447 ms [4.322, 4.932]. Phase `open`: 21.8 / 21.8 ms → 4.412 ms. K4 calls per round of the 16 cases: 992 → 739. Serial records per transaction: 6 → 1. **A transaction is still 4.4 ms slower here than on Linux.**
+- **Boot to `LINK_READY`:** 579.5 / 573.7 ms → 478.2 ms (guest clock); 1.83 / 1.81 s → 1.682 s (host clock). Serial port: 15,627 / 15,598 → 10,782 ns per byte.
+- **K6 primitives, native ÷ Linux without mitigations:** IPC call (0 bytes) 0.325 → 0.283; seal 16 pages 0.476 → 0.175; map 1 page 1.05 → 0.599; map 64 pages 0.257 → 0.201; wake a thread 0.452 → 0.407; close a unit of work 0.278 → 0.222; engine inference 1.097 → 1.044; capability derivation 3.14 → 3.07. IPC throughput with 1 / 2 / 4 pairs: 2.93 / 2.01 / 0.622 → 3.36 / 2.39 / 0.826 of Linux.
+- **Size:** kernel load 573,440 → 569,344 bytes; boot package 5.95 MB → 364,544 bytes; loader 64,000 → 56,832 bytes.
+- **Developer time:** clean release build 13.74 / 13.49 s → 11.93 s; K1–K5 TCG gates 281.1 / 295.5 s → 224.8 s.
+
+Twelve of K7's fifty original criteria were not met and were dropped from its closure. What that leaves open, and every other limit K7 exposed, is in [`LIMITATIONS.md`](LIMITATIONS.md).
 
 ## What is not demonstrated
 
@@ -158,9 +171,9 @@ This repository carries its design history in the open, as a Markdown vault unde
 
 The vault distinguishes **observed fact** (a specific execution, cited), **accepted decision** (binds the first implementation, revisable with evidence), **designed contract** (required behavior, not yet necessarily built), and **hypothesis** (needs an experiment) — a model result or a successful boot is never read as proof of the whole architecture.
 
-## Project status and what comes after K6
+## Project status and what comes after K7
 
-K0–K6 are frozen for this repository-polish work: no new kernel architecture, no attempt at the IPC lock bottleneck, no new features, no benchmark re-runs, in this pass. There is no K7 defined yet in [`vault/roadmap/phases.md`](vault/roadmap/phases.md); [`vault/roadmap/current-state.md`](vault/roadmap/current-state.md) names, in weight order, what K6's own evidence puts first: splitting the machine-wide lock ([OQ-04](vault/roadmap/open-questions.md)), booting on the inventoried physical machine ([OQ-05](vault/roadmap/open-questions.md)), and diagnosing the long tail in scope closure latency. Development after this point follows [`CONTRIBUTING.md`](CONTRIBUTING.md): short-lived branches from `main`, coherent commits, the checks above before a PR, squash merge.
+K7 is closed. The next phase, K8, aims to make a Thalyx transaction on this kernel faster than on Linux (K1 − L1 below 0 ms in EXP-13) without weakening K1's durability or changing K1–K6 behavior. [`vault/roadmap/current-state.md`](vault/roadmap/current-state.md) is the single current-state checkpoint. Development after this point follows [`CONTRIBUTING.md`](CONTRIBUTING.md): short-lived branches from `main`, coherent commits, the checks above before a PR, squash merge.
 
 ## License
 
