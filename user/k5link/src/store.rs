@@ -13,6 +13,8 @@ use thalyx_user_k4fmt::{self as k4, Pod};
 use thalyx_user_k5pkg::link::{link_addr, note};
 use thalyx_user_rt::k2;
 
+use crate::notes;
+
 /// How long a call to the state service may take before the caller stops
 /// waiting. A service that was cut mid-publication does not answer.
 pub const CALL_DEADLINE_NS: u64 = 8_000_000_000;
@@ -56,6 +58,13 @@ pub struct Store {
     pub last_status: u32,
     /// The last kernel status a call was refused with.
     pub last_code: i64,
+    /// Nanoseconds spent in calls through this client, from before the
+    /// request is sent to after its answer arrived: the service's work, its
+    /// disk's and the kernel's crossings, as the link waits for them.
+    pub ns: u64,
+    /// The part of `ns` spent in `PUBLISH`, where the medium is written and
+    /// flushed.
+    pub publish_ns: u64,
 }
 
 impl Store {
@@ -66,11 +75,24 @@ impl Store {
             calls: 0,
             last_status: 0,
             last_code: 0,
+            ns: 0,
+            publish_ns: 0,
         }
     }
 
     /// One request, optionally lending the staging buffer with `lend` rights.
     pub fn call(&mut self, request: &StoreRequest, lend: u32) -> Answer {
+        let started = k2::now_ns();
+        let answer = self.call_once(request, lend);
+        let spent = k2::now_ns().saturating_sub(started);
+        self.ns += spent;
+        if request.op == store_op::PUBLISH {
+            self.publish_ns += spent;
+        }
+        answer
+    }
+
+    fn call_once(&mut self, request: &StoreRequest, lend: u32) -> Answer {
         self.calls += 1;
         let deadline = k2::now_ns() + CALL_DEADLINE_NS;
         let result = if lend == 0 {
@@ -128,21 +150,21 @@ impl Store {
         match self.call(request, lend) {
             Answer::Reply(reply) if reply.status == store_status::OK => Some(reply),
             Answer::Reply(reply) => {
-                k2::note(
+                notes::defer(
                     note::STORE_REFUSED,
                     u64::from(reply.status) | (u64::from(request.op) << 8),
                 );
                 None
             }
             Answer::Outcome(code) => {
-                k2::note(
+                notes::defer(
                     note::STORE_REFUSED,
                     (-code) as u64 | (u64::from(request.op) << 8) | (1 << 32),
                 );
                 None
             }
             Answer::Gone(code) => {
-                k2::note(
+                notes::defer(
                     note::STORE_REFUSED,
                     (-code) as u64 | (u64::from(request.op) << 8) | (2 << 32),
                 );

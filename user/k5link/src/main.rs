@@ -33,6 +33,7 @@
 
 mod json;
 mod managed;
+mod notes;
 mod store;
 mod virtio;
 mod works;
@@ -141,6 +142,20 @@ fn send_reply(console: &mut Console, port: u32, body_len: usize) -> bool {
     console.send(port, &buffers().outgoing[..4 + body_len])
 }
 
+/// What the link counts about its own serving, for `stats`.
+#[derive(Clone, Copy, Default)]
+struct Served {
+    /// Frames received on any port, and replies sent.
+    frames_in: u64,
+    frames_out: u64,
+    /// Nanoseconds inside `Managed::serve` for worker-port requests: all the
+    /// work a consumer's request costs in this machine, the state service's
+    /// included, from a complete frame to a reply ready to send.
+    serve_ns: u64,
+    /// Times the link waited for the device to take a reply.
+    tx_waits: u64,
+}
+
 /// Handles one control-port frame. Answers a small JSON reply and says whether
 /// the run should end.
 fn control_into(
@@ -148,12 +163,12 @@ fn control_into(
     store: &mut Managed,
     works: &mut Works,
     port_line: &mut [u32],
-    tx_waits: u64,
+    served: Served,
     out: &mut [u8],
 ) -> (usize, bool) {
     let mut writer = json::Writer::new(out);
     let op = json::string(request, "op").unwrap_or(b"");
-    k2::note(note::CONTROL, u64::from(*op.first().unwrap_or(&0)));
+    notes::defer(note::CONTROL, u64::from(*op.first().unwrap_or(&0)));
     let mut shutdown = false;
     match op {
         b"bind" => {
@@ -225,12 +240,24 @@ fn control_into(
                 .raw(b",\"k4_generation\":")
                 .number(store.backing.k4_generation)
                 .raw(b",\"tx_waits\":")
-                .number(tx_waits)
+                .number(served.tx_waits)
+                .raw(b",\"frames_in\":")
+                .number(served.frames_in)
+                .raw(b",\"frames_out\":")
+                .number(served.frames_out)
+                .raw(b",\"serve_ns\":")
+                .number(served.serve_ns)
+                .raw(b",\"store_ns\":")
+                .number(store.store_ns)
+                .raw(b",\"publish_ns\":")
+                .number(store.publish_ns)
+                .raw(b",\"notes_deferred\":")
+                .number(notes::deferred())
                 .raw(b"}");
         }
         b"shutdown" => {
             shutdown = true;
-            k2::note(note::SHUTDOWN, works.opened);
+            notes::defer(note::SHUTDOWN, works.opened);
             writer.raw(b"{\"ok\":true}");
         }
         _ => {
@@ -342,6 +369,7 @@ fn run() -> ! {
     k2::note(note::LINK_READY, u64::from(console.max_ports));
 
     let mut port_line = config.port_line;
+    let mut served = Served::default();
     let mut running = true;
     while running {
         let Some(received) = console.receive(k2::now_ns() + 1_000_000_000) else {
@@ -379,21 +407,24 @@ fn run() -> ! {
                 let b = buffers();
                 let (ports, reply) = (&b.ports, &mut b.reply);
                 let request = &ports[port as usize].buffer[offset..offset + length];
+                served.frames_in += 1;
                 if port == CONTROL_PORT {
-                    let tx_waits = console.tx_waits;
+                    served.tx_waits = console.tx_waits;
                     control_into(
                         request,
                         &mut store,
                         &mut works,
                         &mut port_line,
-                        tx_waits,
+                        served,
                         reply,
                     )
                 } else {
                     let (line, principal) = mapping(&port_line, port);
+                    let started = k2::now_ns();
                     let len = store
                         .serve(line, principal, request, &mut works, reply)
                         .unwrap_or(0);
+                    served.serve_ns += k2::now_ns().saturating_sub(started);
                     (len, false)
                 }
             };
@@ -403,7 +434,9 @@ fn run() -> ! {
             }
             if len == 0 {
                 k2::note(note::LINK_UNEXPECTED, 0x9005);
-            } else if !send_reply(&mut console, port, len) {
+            } else if send_reply(&mut console, port, len) {
+                served.frames_out += 1;
+            } else {
                 running = false;
                 break;
             }
@@ -416,6 +449,8 @@ fn run() -> ! {
     // A reply is published without waiting for the device to take it; the
     // last ones are taken before the data object they are in goes away.
     console.flush();
+    // The notes held while serving, now that no reply is owed to anyone.
+    notes::write_held();
     k2::note(note::FRAMES, console.rx_frames);
     rt::exit(0)
 }

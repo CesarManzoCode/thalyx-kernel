@@ -29,6 +29,13 @@ The gates run serially. K3's criterion that a seal is published against a
 live writer depends on a real race, and a loaded host changes who wins it;
 running two gates at once would be measuring the host.
 
+A gate that fails says why where its caller can read it, and keeps what it
+read. Each criterion it failed is printed with its detail under the step, and
+the failing gate's runs, verdict and logs are copied to
+`build/gate-failures/<time>-<platform>/` before the next run overwrites them:
+kiln runs each K's checker in turn over the same tree, and a K4 `outbox` that
+failed in one of those runs had been overwritten by the next (ADR-028).
+
 Usage: tools/run_gates.py --platform kvm [--gates k1 k2 ...] [--no-self-test]
 """
 
@@ -37,6 +44,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -52,6 +60,13 @@ PLATFORMS = {
 }
 GATES = ["k1", "k2", "k3", "k4", "k5"]
 EXPECTED = {"k1": 13, "k2": 21, "k3": 28, "k4": 31, "k5": 47}
+
+# What a gate's verdict was decided from, per gate: the keys of `layout`.
+INPUTS = {"k1": ["k1_run"], "k2": ["k2_run"], "k3": ["k3_run"], "k4": ["k4_cases"],
+          "k5": ["k5_runs", "k5_cases"]}
+FAILURES = BUILD / "gate-failures"
+# Failure directories kept; older ones are removed when a new one is written.
+FAILURES_KEPT = 8
 
 
 def layout(platform: str) -> dict[str, Path]:
@@ -145,6 +160,44 @@ def summary_of(path: Path) -> dict | None:
     }
 
 
+def failed_criteria(path: Path, since: float, log: Path) -> list[str]:
+    """Each criterion a gate step failed, with its detail.
+
+    A verdict older than the step is a previous run's: the step ended before
+    writing one, and what it said is at the end of its log.
+    """
+    tail = " | ".join(log.read_text(errors="replace").strip().splitlines()[-6:])[:900]
+    if not path.exists() or path.stat().st_mtime < since:
+        return [f"no verdict from this run; the log ends: {tail}"]
+    try:
+        verdict = json.loads(path.read_text())
+    except ValueError:
+        return [f"{path.name} is not a verdict; the log ends: {tail}"]
+    return [f"{c.get('name')}: {' '.join(str(c.get('detail', '')).split())[:600]}"
+            for c in verdict.get("criteria", []) if not c.get("passed")]
+
+
+def keep_failure(platform: str, gates: list[str]) -> Path:
+    """Copies what the failed gates read, and their logs, out of the way of the next run."""
+    p = layout(platform)
+    stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+    keep = FAILURES / f"{stamp}-{platform}"
+    keep.mkdir(parents=True, exist_ok=True)
+    ignore = shutil.ignore_patterns("OVMF_VARS*.fd")
+    for gate in gates:
+        for key in INPUTS[gate]:
+            if p[key].is_dir():
+                shutil.copytree(p[key], keep / p[key].name, ignore=ignore, dirs_exist_ok=True)
+        if p[gate].exists():
+            shutil.copyfile(p[gate], keep / p[gate].name)
+    if p["logs"].is_dir():
+        shutil.copytree(p["logs"], keep / "gate-logs", dirs_exist_ok=True)
+    kept = sorted(path for path in FAILURES.iterdir() if path.is_dir())
+    for old in kept[:-FAILURES_KEPT]:
+        shutil.rmtree(old, ignore_errors=True)
+    return keep
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -172,6 +225,7 @@ def main() -> int:
     failed_steps = []
     for name, argv in steps(arguments.platform, arguments.gates, not arguments.no_self_test):
         started = time.monotonic()
+        started_wall = time.time()
         log = p["logs"] / f"{name}.log"
         with log.open("w") as handle:
             result = subprocess.run(argv, cwd=ROOT, env=environment, stdout=handle,
@@ -185,12 +239,25 @@ def main() -> int:
               f"{tail[0][:100]}", flush=True)
         if result.returncode != 0:
             failed_steps.append(name)
+            gate = name.split("-")[0]
+            if name == f"{gate}-gate":
+                for line in failed_criteria(p[gate], started_wall, log):
+                    print(f"     {line}", flush=True)
 
     record["verdicts"] = {gate: summary_of(p[gate]) for gate in arguments.gates}
     record["expected"] = {gate: EXPECTED[gate] for gate in arguments.gates}
     record["passed"] = not failed_steps and all(
         (v := record["verdicts"][g]) is not None and v["passed"] and v["met"] == EXPECTED[g]
         for g in arguments.gates)
+    failed_gates = []
+    for gate in arguments.gates:
+        verdict = record["verdicts"][gate]
+        whole = verdict is not None and verdict["passed"] and verdict["met"] == EXPECTED[gate]
+        if not whole or any(step.startswith(f"{gate}-") for step in failed_steps):
+            failed_gates.append(gate)
+    if failed_gates:
+        record["kept"] = str(keep_failure(arguments.platform, failed_gates).relative_to(ROOT))
+        print(f"kept the runs of {', '.join(failed_gates)} in {record['kept']}", flush=True)
     (p["base"] / "platform-gates.json").write_text(json.dumps(record, indent=2) + "\n")
     print(json.dumps({"platform": arguments.platform, "passed": record["passed"],
                       "verdicts": record["verdicts"], "failed_steps": failed_steps}, indent=2))

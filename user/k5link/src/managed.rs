@@ -55,6 +55,7 @@ use thalyx_user_k5pkg::link::note;
 use thalyx_user_rt::k2;
 
 use crate::json::{self, Strings, Value, Writer};
+use crate::notes;
 use crate::store::{Answer, Store};
 use crate::works::Works;
 
@@ -453,6 +454,10 @@ pub struct Managed {
     pub k4_facet: u64,
     pub stage_cap: u64,
     pub store_calls: u64,
+    /// Nanoseconds the link waited on the state service, and the part of them
+    /// in `PUBLISH` (`Store::ns`, `Store::publish_ns`).
+    pub store_ns: u64,
+    pub publish_ns: u64,
     /// `get`s and tree checks of a durable object served from the arena's
     /// copy instead of read back from K4.
     pub reads_cached: u64,
@@ -512,6 +517,8 @@ impl Managed {
             k4_facet,
             stage_cap,
             store_calls: 0,
+            store_ns: 0,
+            publish_ns: 0,
             reads_cached: 0,
             pending_used: 0,
         }
@@ -523,6 +530,8 @@ impl Managed {
 
     fn account(&mut self, store: &Store) {
         self.store_calls += store.calls;
+        self.store_ns += store.ns;
+        self.publish_ns += store.publish_ns;
     }
 
     // -- the index -----------------------------------------------------------
@@ -1327,7 +1336,7 @@ impl Managed {
                 let grant = self.k4_facet;
                 let _ = principal;
                 if let Err(status) = self.commit_root(grant) {
-                    k2::note(note::STORE_REFUSED, u64::from(status) | (0xE << 24));
+                    notes::defer(note::STORE_REFUSED, u64::from(status) | (0xE << 24));
                     return refuse(
                         &mut writer,
                         b"unwritable",
@@ -1472,7 +1481,7 @@ impl Managed {
         let grant = self.k4_facet;
         if let Err(status) = self.commit_root(grant) {
             self.lines[line].generation = 0;
-            k2::note(note::STORE_REFUSED, u64::from(status) | (0x5 << 24));
+            notes::defer(note::STORE_REFUSED, u64::from(status) | (0x5 << 24));
             self.record(line, principal, sequence, Outcome::Aborted);
             return refuse(
                 &mut writer,
@@ -1480,7 +1489,7 @@ impl Managed {
                 b"the state service refused the seed",
             );
         }
-        k2::note(note::PUBLISHED, 1);
+        notes::defer(note::PUBLISHED, 1);
         self.record(
             line,
             principal,
@@ -1588,7 +1597,7 @@ impl Managed {
         work.scope = scope;
         work.publish_grant = publish_grant;
         work.opened_ns = k2::now_ns();
-        k2::note(note::WORK_OPENED, scope_work);
+        notes::defer(note::WORK_OPENED, scope_work);
         self.record(line, principal, sequence, Outcome::Forked { generation });
         outcome_reply(&mut writer, Outcome::Forked { generation });
         writer.finish()
@@ -1686,7 +1695,7 @@ impl Managed {
         self.lines[line].receipt = receipt;
         match self.commit_root(work.publish_grant) {
             Ok(()) => {
-                k2::note(note::PUBLISHED, generation);
+                notes::defer(note::PUBLISHED, generation);
                 self.close_work(line, principal, works);
                 self.record(
                     line,
@@ -1707,14 +1716,14 @@ impl Managed {
             }
             Err(u32::MAX) => {
                 self.lines[line].generation = current;
-                k2::note(note::WORK_CLOSED, work.scope_work);
-                k2::note(note::FENCE_SEEN_NS, k2::now_ns());
+                notes::defer(note::WORK_CLOSED, work.scope_work);
+                notes::defer(note::FENCE_SEEN_NS, k2::now_ns());
                 self.record(line, principal, sequence, Outcome::Aborted);
                 return refuse(&mut writer, b"work_closed", b"the work was closed before it could publish: the kernel refused the grant it would have published through");
             }
             Err(status) => {
                 self.lines[line].generation = current;
-                k2::note(note::STORE_REFUSED, u64::from(status) | (0xB << 24));
+                notes::defer(note::STORE_REFUSED, u64::from(status) | (0xB << 24));
                 self.record(line, principal, sequence, Outcome::Aborted);
                 return refuse(
                     &mut writer,
@@ -1845,7 +1854,7 @@ fn outcome_reply(writer: &mut Writer<'_>, outcome: Outcome) {
 }
 
 fn refuse(writer: &mut Writer<'_>, word: &[u8], message: &[u8]) -> Option<usize> {
-    k2::note(
+    notes::defer(
         note::REFUSED,
         u64::from(word[0]) | (u64::from(word.get(1).copied().unwrap_or(0)) << 8),
     );

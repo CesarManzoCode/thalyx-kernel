@@ -576,6 +576,27 @@ Cambiado sin medir, por la regla del mini sprint ([ADR-027](../decisions/ADR-027
 
 No atacado en esta ronda: `entry.*`, `engine.*`, `scale.compute:4` y los `tx_*`.
 
+## K8
+
+K8 busca que una transacción de Thalyx tarde menos en K1 que en L1 en EXP-13 (`K1 − L1` < 0 con IC 95 %), sin debilitar la durabilidad de K1 y con K1–K6 en verde. La investigación de partida está en [RES-003](../research/k8-transactions.md).
+
+### El cierre 1 de K8
+
+Observado en `build/k8/check-20261030T113155` (kernel `0c866fc`, Thalyx `3ac575f`) y en los checkers de kiln de la misma verificación:
+
+- **`K1 − L1` = +4,546 ms [+4,382, +6,011].** Pasan `k8.same_experiment`, `k8.durability` y `k8.behavior`: tres corridas TCG de K1–K5 completas y las 7 pruebas de EXP-13.
+- **Casi toda la diferencia son notas serie del link.** Cada nota del link cuesta 1,886 ms de mediana bajo KVM (192 intervalos, entre 1,728 y 2,373 ms). En la ventana de la transacción hay dos en los once casos sin publicación en `settle` (`PUBLISHED` del `seed` y `WORK_OPENED`), tres en los cinco que publican y cinco en `two-transactions-in-a-row`. Esas dos notas son unos 3,7 de los 4,4 ms de `open`, y la nota de cada publicación de `settle` es unos 1,8 de sus 2,5 a 2,9 ms.
+- **El `check_k4.py` de kiln falló `outbox` (30/31)**, la misma falla que k7 vio como `IndexError` en `cut-after-checkpoint`. La corrida se sobrescribió con la del `check_k5.py` siguiente, que pasó, y kiln solo muestra «1 of 31». La causa no se conoce. Una carrera entre la respuesta de la publicación y el fin del cliente queda descartada, porque `resolve_outbox` corre antes de responder.
+- **El `check_k6.py` de kiln falló `no_loss` (23/24).** `scale.ipc:3`, en la ronda 1 nativa y después de `engine.infer:4`, rechazó 23 301 trozos con `LIMIT_EXHAUSTED`. El mismo −9 en `scale.ipc` aparece en otras seis campañas desde el 2026-10-28.
+
+Cambiado sin medir, por la regla del mini sprint ([ADR-028](../decisions/ADR-028-link-notes-after-serving-and-kept-gate-failures.md)):
+
+- **El link escribe sus notas al terminar.** Las que hace mientras atiende se retienen en orden, hasta 64, y salen después de responder a `shutdown`. Las de error salen en el momento. Busca bajar `k8.tx_e2e` unos 3,7 ms en once casos, 5,5 ms en cinco y 9 ms en `two-transactions-in-a-row`, hasta un total entre +0,5 y +1,1 ms. No se espera que cruce cero.
+- **`stats` cuenta el tiempo del link.** Los campos nuevos son `frames_in`, `frames_out`, `serve_ns`, `store_ns`, `publish_ns` y `notes_deferred`. Separan el transporte, el link y K4 para elegir el cruce siguiente.
+- **Una puerta que falla dice por qué y conserva su corrida.** `tools/run_gates.py` imprime cada criterio fallido con su detalle y copia la corrida a `build/gate-failures/`. Ningún criterio, límite ni espera cambia.
+
+No atacado en esta ronda: la causa de `outbox` de K4, el −9 de `scale.ipc` en K6 (falta saber qué reserva rechaza), el costo de K4 por publicación (H3 y H4 de RES-003) y el de `virtio-serial` por mensaje.
+
 ## Reanudar aquí
 
 **Último hito terminado y pusheado:** **K6 completo en su alcance** —protocolos emparejados, campaña de referencia, EXP-12, ocho cuellos medidos y corregidos, parámetros V0 revisados, inventario físico, puerta K6— en la rama `feat/k6-comparison-hardening-reference`. K5 quedó completo en `feat/k5-thalyx-port-tools`.
