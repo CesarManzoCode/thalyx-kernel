@@ -612,6 +612,23 @@ Cambiado sin medir, por la regla del mini sprint ([ADR-029](../decisions/ADR-029
 
 No atacado en esta ronda: juntar `PREPARE`, objetos y `COMMIT` bajo menos flushes (H3, cambia lo que la puerta K4 espera de cada corte), la configuración de QEMU del disco (H5), el despertar del vCPU (H2), las llamadas de `commit_root` que no escriben el medio (`FORK`, `WRITE`, `FREEZE`, `DISCARD`), la causa de `outbox` de K4 y el −9 de `scale.ipc` en K6.
 
+### El cierre 3 de K8
+
+Observado en `build/k8/check-20261030T150404` (kernel `7c3e7eb`, Thalyx `3ac575f`, KVM, 6 rondas × 16 casos), en la corrida conservada `build/gate-failures/20261030T213030-tcg` y en los checkers de kiln de la misma verificación:
+
+- **`K1 − L1` = +0,045 ms [−0,046, +0,101].** La corrida de objetos de ADR-029 bajó unos 0,8 ms, en el borde alto de lo esperado. Pasan `k8.same_experiment`, `k8.durability` y `k8.behavior`. Por fase, `open` da +0,077 ms y `candidate` −0,142 ms.
+- **Cada publicación cuesta unos 0,25 a 0,33 ms dentro de K4**, con 3 escrituras (`disk_writes`). Antes de ADR-029 costaba de 0,75 a 0,9 ms con 10 a 20, lo que da unos 40 a 60 µs por petición al disco. Esta cifra se infirió y no se midió. Seis peticiones en serie por publicación (tres escrituras y tres flushes) explican casi todo `publish_ns`.
+- **El `check_k4.py` de kiln falló `outbox` (30/31) por una espera perdida del kernel.** En `cut-after-checkpoint/1`, `k4store` respondió la llamada 156 de `k4pub` 1,3 ms después de admitirla, antes de que el llamador registrara su espera. La respuesta no despertó a nadie y `k4pub` durmió hasta su plazo de 8 s. Para entonces el broker ya había salido a los 4,26 s, y la publicación con outbox quedó en `UNKNOWN`. La llamada, la recepción y la respuesta toman la máquina compartida, y `call` no volvía a mirar después de registrarse.
+- **El `check_k6.py` de kiln falló `no_loss` (23/24)**, con `native r5 bench 10:3 status=[-9]`. La causa sigue sin conocerse.
+
+Cambiado sin medir, por la regla del mini sprint ([ADR-030](../decisions/ADR-030-call-rechecks-reply-and-k1-medium-iothread.md)):
+
+- **Una llamada busca su respuesta después de registrar su espera.** Si la respuesta ya está, retira la espera y no se bloquea. Si un despertador la consumió primero, se bloquea y lo recibe. Busca que `outbox` pase en las tres corridas TCG y en el `check_k4.py` de kiln. No se espera que mueva la latencia.
+- **Bajo KVM, el medio de K1 se atiende en un hilo de E/S de QEMU que sondea hasta 200 µs, con `aio=io_uring`** (H5 de RES-003, `tools/run_k5.py`). La caché sigue en `writeback` y el flush del invitado sigue llegando al archivo. Las corridas TCG no cambian. Busca bajar `k8.tx_e2e` entre 0,1 y 0,15 ms en los diez casos sin publicación en `settle`, entre 0,2 y 0,35 ms en los cinco que publican y entre 0,3 y 0,5 ms en `two-transactions-in-a-row`, hasta un total entre −0,15 y −0,05 ms. Es probable, pero no seguro, que el IC quede por debajo de cero.
+- **`stats` cuenta el disco:** `disk_flushes`, `disk_requests`, `disk_device_ns` (el tiempo del driver con el dispositivo) y `disk_call_ns` (el de `k4store` en llamadas al driver). Separan la latencia del dispositivo, los cruces hasta el driver y el trabajo del servicio. El checker de K8 corta la línea de contadores a 90 caracteres. Lo que no aparezca ahí está en `measure.json`.
+
+No atacado en esta ronda: el sondeo del anillo en `k4disk` (H2, espera a los contadores), juntar flushes (H3), las llamadas de `commit_root` que no escriben el medio y el −9 de K6. La misma carrera podría estar detrás de alguna demora en `scale.ipc`, pero un −9 es `LIMIT_EXHAUSTED` y no una espera, así que no hay base para atribuírselo.
+
 ## Reanudar aquí
 
 **Último hito terminado y pusheado:** **K6 completo en su alcance** —protocolos emparejados, campaña de referencia, EXP-12, ocho cuellos medidos y corregidos, parámetros V0 revisados, inventario físico, puerta K6— en la rama `feat/k6-comparison-hardening-reference`. K5 quedó completo en `feat/k5-thalyx-port-tools`.

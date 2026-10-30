@@ -39,7 +39,7 @@
 //! | `RELEASE` | `digest0` root | `value` retained |
 //! | `COMPACT` | — | `value` objects copied, `generation` |
 //! | `HARNESS` | — | `value` point with mode above bit 8, `sequence` scenario, `generation` leg |
-//! | `STATS` | — | counters |
+//! | `STATS` | — | counters; `digest1` is four little-endian `u64`: the driver's flushes, its device requests, its `device_ns`, and this service's `call_ns` (`disk.rs`) |
 
 #![no_std]
 #![no_main]
@@ -558,6 +558,22 @@ impl Service {
                 let medium = self.store.disk.stats();
                 let issued = medium.map(|reply| reply.writes_issued).unwrap_or(0);
                 let suppressed = medium.map(|reply| reply.writes_suppressed).unwrap_or(0);
+                // Where a publication's time goes below the service: how many
+                // flushes, how long the device took, and how long the calls
+                // to the driver took around it. These four words held the
+                // published policy, which nothing read out of `STATS`.
+                let mut timing = [0u8; 32];
+                if let Some(reply) = medium {
+                    let words = [
+                        reply.flushes,
+                        reply.device_requests,
+                        reply.device_ns,
+                        self.store.disk.call_ns,
+                    ];
+                    for (at, word) in words.iter().enumerate() {
+                        timing[at * 8..at * 8 + 8].copy_from_slice(&word.to_le_bytes());
+                    }
+                }
                 StoreReply {
                     status: store_status::OK,
                     value: self.store.publications,
@@ -569,7 +585,7 @@ impl Service {
                     digest0: self.store.published_root,
                     outcome: self.store.recovery_aborts as u32,
                     outbox_status: self.store.compactions as u32,
-                    digest1: self.store.published_policy,
+                    digest1: timing,
                     reserved0: issued | (suppressed << 32),
                 }
             }

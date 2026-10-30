@@ -32,6 +32,10 @@ CPU_MODEL = run_k1.CPU_MODEL + ",+x2apic"
 MEMORY = "1024M"
 PROCESSORS = 4
 MEDIUM_MIB = 8
+# How long the medium's I/O thread polls for the next request or completion
+# before it sleeps, under KVM (ADR-030): the 200 us the guest's own idle loop
+# polls for (`sched::IDLE_POLL_NS`) and a Linux guest's `haltpoll` default.
+IOTHREAD_POLL_NS = 200_000
 
 
 def qemu_command(
@@ -53,10 +57,21 @@ def qemu_command(
         "-drive", f"format=raw,file={image}",
     ]
     if medium is not None:
-        argv += [
-            "-drive", f"if=none,id=k5medium,format=raw,cache=writeback,file={medium}",
-            "-device", "virtio-blk-pci,drive=k5medium,disable-legacy=on,disable-modern=off",
-        ]
+        drive = f"if=none,id=k5medium,format=raw,cache=writeback,file={medium}"
+        device = "virtio-blk-pci,drive=k5medium,disable-legacy=on,disable-modern=off"
+        # Under KVM the medium's queue is served by an I/O thread of its own,
+        # which polls the queue and the completions instead of waking QEMU's
+        # main loop for each, and the file is written through io_uring rather
+        # than a pool of worker threads (ADR-030). The cache mode is the same,
+        # so a guest flush still reaches the host file. Under TCG nothing
+        # changes: a virtio-blk I/O thread needs ioeventfd, and whether this
+        # QEMU gives virtio-pci one without KVM was not established here; the
+        # gates the TCG runs decide do not time the medium either.
+        if tc.accelerator() == "kvm":
+            argv += ["-object", f"iothread,id=k5io,poll-max-ns={IOTHREAD_POLL_NS}"]
+            drive += ",aio=io_uring"
+            device += ",iothread=k5io"
+        argv += ["-drive", drive, "-device", device]
     argv += [
         "-serial", "stdio",
         "-display", "none",

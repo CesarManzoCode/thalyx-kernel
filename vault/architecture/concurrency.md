@@ -84,6 +84,18 @@ compartir; un recorrido de linaje suelta cada nodo antes de leer su padre.
 Nada espera a un usuario, a un disco, a otro servidor ni a un acuse de TLB con
 ninguno de ellos tomado.
 
+**Una espera se registra antes de la última mirada.** Quien despierta a un hilo
+solo lo despierta si lo encuentra bloqueado, así que el hilo que espera algo que
+otro procesador puede producir mientras él todavía no se bloqueó tiene que
+volver a mirar después de registrar su espera, bajo el cerrojo con el que el
+otro lado publica el hecho. Una recepción y una lectura del log registran la
+espera bajo el cerrojo del canal o del log, que el emisor también toma. Una
+llamada admite su mensaje antes de poder nombrar la espera, y la respuesta se
+publica bajo el cerrojo de la invocación desde una toma compartida de la
+máquina. Por eso la llamada vuelve a leer la invocación después de registrarse
+y retira la espera si la respuesta ya está
+([ADR-030](../decisions/ADR-030-call-rechecks-reply-and-k1-medium-iothread.md)).
+
 Los cerrojos cortos —el de un registro, el de una tabla de capacidades, el de
 un nodo— se toman con un intercambio y se sueltan con un almacenamiento, no con
 un turno. Un turno cuesta dos lecturas-modificación-escritura de la misma línea

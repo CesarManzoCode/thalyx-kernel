@@ -762,7 +762,7 @@ pub fn call(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
     }
     let request: SendRequest = staging.read(BODY);
 
-    let (invocation, generation) = {
+    let (invocation, generation, block) = {
         let machine = MACHINE.read();
         let cap = resolve(
             &machine,
@@ -782,16 +782,39 @@ pub fn call(ctx: &Ctx, spec: &OpSpec, staging: &mut Staging) -> Result<u64, i64>
         )?;
         // The buffer the reply will be laid out in, offered to the replier
         // so it can lay it out itself.
+        let wait = Wait::Reply(admitted.invocation, admitted.generation);
         thread::prepare_wait_offering(
             ctx.thread,
-            Wait::Reply(admitted.invocation, admitted.generation),
+            wait,
             ctx.deadline,
             thread::offer(staging, ctx.handle),
         );
-        (admitted.invocation, admitted.generation)
+        // The message was visible to its receiver from the admission on, and
+        // the hold this takes of the machine is shared with the receive and
+        // the reply. A receiver already running on another processor can take
+        // a queued message and answer it before the wait above exists; the
+        // reply then finds no one blocked, keeps the answer on the record and
+        // wakes nobody, and this thread would sleep until its deadline. The
+        // K4 gate's `cut-after-checkpoint` publisher slept its eight seconds
+        // that way under TCG, and the broker gave up waiting for it. So the
+        // record is read again after the registration, under the lock the
+        // reply sets `replied` in: an answer already there means the wait is
+        // withdrawn, unless a waker consumed it first and its wake is coming.
+        let answered = {
+            let slot = machine.invocations[admitted.invocation as usize].lock();
+            slot.generation != admitted.generation || slot.replied || slot.state == State::Resolved
+        };
+        let block = !answered || !thread::withdraw_wait(ctx.thread, |record| record.wait == wait);
+        (admitted.invocation, admitted.generation, block)
     };
 
-    crate::sched::block_current();
+    if block {
+        crate::sched::block_current();
+    } else {
+        // What the admission deferred goes out now, as blocking would have
+        // sent it.
+        crate::sched::flush_wakes();
+    }
 
     let (woken, delivered) = thread::take_wake_status(ctx.thread);
     if woken == status::OK && delivered != 0 {

@@ -680,6 +680,28 @@ pub fn prepare_wait_offering(index: usize, wait: Wait, deadline_ns: u64, offer: 
     }
 }
 
+/// Takes back a wait the running thread registered and nobody has consumed,
+/// and returns it to `Running`. Whether it did.
+///
+/// For a thread that registered its wait after the event it waits for may
+/// already have happened, under a lock the event does not take: it looks
+/// again after registering, and if the event is there it withdraws rather
+/// than blocks. `false` means a waker consumed the wait first -- its wake is
+/// on its way, and the thread has to block to receive it.
+pub fn withdraw_wait(index: usize, matches: impl FnOnce(&WaitRecord) -> bool) -> bool {
+    let cell = get(index);
+    let mut record = cell.wait.lock();
+    if cell.state() != ThreadState::Blocked || !matches(&record) {
+        return false;
+    }
+    record.wait = Wait::None;
+    record.deadline_ns = 0;
+    record.handoff = Handoff::NONE;
+    cell.deadline_ns.store(0, Ordering::Relaxed);
+    cell.set_state(ThreadState::Running);
+    true
+}
+
 /// An offer of `staging`, entered with `handle`, for
 /// [`prepare_wait_offering`].
 #[must_use]

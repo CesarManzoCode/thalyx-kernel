@@ -441,6 +441,35 @@ fn buffers() -> &'static mut Buffers {
     unsafe { &mut *(&raw mut BUFFERS) }
 }
 
+/// The block driver's counters, as `STATS` carries them.
+#[derive(Clone, Copy, Default)]
+pub struct DiskCounters {
+    /// Write requests issued to the device.
+    pub writes: u64,
+    /// Flushes the device acknowledged.
+    pub flushes: u64,
+    /// Requests of any kind the device completed.
+    pub requests: u64,
+    /// Time the driver waited for the device, notification to completion.
+    pub device_ns: u64,
+    /// Time the state service spent in calls to the driver that move the
+    /// medium.
+    pub call_ns: u64,
+}
+
+impl DiskCounters {
+    /// What happened between `earlier` and `self`.
+    pub fn since(&self, earlier: &Self) -> Self {
+        Self {
+            writes: self.writes.saturating_sub(earlier.writes),
+            flushes: self.flushes.saturating_sub(earlier.flushes),
+            requests: self.requests.saturating_sub(earlier.requests),
+            device_ns: self.device_ns.saturating_sub(earlier.device_ns),
+            call_ns: self.call_ns.saturating_sub(earlier.call_ns),
+        }
+    }
+}
+
 pub struct Managed {
     pub index: [Entry; MAX_INDEX],
     pub lines: [Line; MAX_LINES],
@@ -528,14 +557,26 @@ impl Managed {
         Store::new(self.k4_facet, self.stage_cap)
     }
 
-    /// Write requests the block driver has issued since it started, as the
-    /// state service reports them (`STATS`, low half of `reserved0`). Asked
-    /// through a client of its own, so it is not counted as a call the link
-    /// made for anybody.
-    pub fn disk_writes(&self) -> u64 {
-        Store::new(self.k4_facet, self.stage_cap)
-            .stats()
-            .map_or(0, |reply| reply.reserved0 & 0xFFFF_FFFF)
+    /// What the block driver has done since it started, as the state service
+    /// reports it (`STATS`: the low half of `reserved0`, and the four words of
+    /// `digest1`). Asked through a client of its own, so it is not counted as
+    /// a call the link made for anybody.
+    pub fn disk(&self) -> DiskCounters {
+        let Some(reply) = Store::new(self.k4_facet, self.stage_cap).stats() else {
+            return DiskCounters::default();
+        };
+        let word = |at: usize| {
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(&reply.digest1[at * 8..at * 8 + 8]);
+            u64::from_le_bytes(bytes)
+        };
+        DiskCounters {
+            writes: reply.reserved0 & 0xFFFF_FFFF,
+            flushes: word(0),
+            requests: word(1),
+            device_ns: word(2),
+            call_ns: word(3),
+        }
     }
 
     fn account(&mut self, store: &Store) {

@@ -167,6 +167,10 @@ struct Queue {
     used_index: u16,
     notify: u64,
     published: u32,
+    /// Requests the device completed, and the time spent waiting for them
+    /// (`DiskReply::device_requests`, `DiskReply::device_ns`).
+    requests: u64,
+    device_ns: u64,
 }
 
 impl Queue {
@@ -403,14 +407,20 @@ fn initialise(
             used_index: 0,
             notify: notify_base + u64::from(notify_off) * u64::from(multiplier),
             published: 0,
+            requests: 0,
+            device_ns: 0,
         })
     }
 }
 
 /// Issues one transfer and waits for it. Returns false on any refusal.
 fn transfer(queue: &mut Queue, irq: u64, kind: u32, block: u64, data: u64, bytes: u64) -> bool {
+    let started = k2::now_ns();
     queue.publish(kind, block * SECTORS_PER_BLOCK, data, bytes as u32);
-    match queue.complete(irq) {
+    let completed = queue.complete(irq);
+    queue.requests += 1;
+    queue.device_ns += k2::now_ns().saturating_sub(started);
+    match completed {
         Some(0) => true,
         Some(code) => {
             k2::note(report::UNEXPECTED, u64::from(code));
@@ -490,6 +500,8 @@ fn serve(queue: &mut Queue, irq: u64, faults: &mut Faults, request: &DiskRequest
     reply.writes_suppressed = faults.writes_suppressed;
     reply.flushes = faults.flushes;
     reply.sectors_written = faults.sectors_written;
+    reply.device_requests = queue.requests;
+    reply.device_ns = queue.device_ns;
     reply
 }
 

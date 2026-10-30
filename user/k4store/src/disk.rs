@@ -40,6 +40,16 @@ pub struct Disk {
     pub writes_suppressed: u64,
     pub flushes: u64,
     pub reads: u64,
+    /// The driver's own account of the device: requests completed and the
+    /// time it waited for them (`DiskReply::device_requests`, `device_ns`).
+    pub device_requests: u64,
+    pub device_ns: u64,
+    /// Nanoseconds this service spent blocked in calls that move the medium
+    /// -- reads, writes and flushes -- the driver's time and the two IPC
+    /// crossings included. Against `device_ns` it says what the crossing to
+    /// the driver costs; against the link's `publish_ns`, what the rest of a
+    /// publication does.
+    pub call_ns: u64,
 }
 
 impl Disk {
@@ -53,16 +63,20 @@ impl Disk {
             writes_suppressed: 0,
             flushes: 0,
             reads: 0,
+            device_requests: 0,
+            device_ns: 0,
+            call_ns: 0,
         }
     }
 
     fn call(&mut self, request: &DiskRequest) -> Option<DiskReply> {
+        let started = k2::now_ns();
         let result = match k2::endpoint_call(
             self.endpoint,
             0,
             request.as_bytes(),
             &[],
-            k2::now_ns() + CALL_DEADLINE_NS,
+            started + CALL_DEADLINE_NS,
             false,
         ) {
             Ok(result) => result,
@@ -79,6 +93,11 @@ impl Disk {
         self.writes_issued = reply.writes_issued;
         self.writes_suppressed = reply.writes_suppressed;
         self.flushes = reply.flushes;
+        self.device_requests = reply.device_requests;
+        self.device_ns = reply.device_ns;
+        if request.op != disk_op::STATS {
+            self.call_ns += k2::now_ns().saturating_sub(started);
+        }
         if reply.status == disk_status::LATCHED {
             self.latched = true;
         }

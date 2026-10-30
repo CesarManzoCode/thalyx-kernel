@@ -154,9 +154,9 @@ struct Served {
     serve_ns: u64,
     /// Times the link waited for the device to take a reply.
     tx_waits: u64,
-    /// The block driver's write requests when the link became ready, so that
-    /// `disk_writes` counts only the ones serving caused.
-    disk_writes_at_ready: u64,
+    /// The block driver's counters when the link became ready, so that the
+    /// `disk_*` fields count only what serving caused.
+    disk_at_ready: managed::DiskCounters,
 }
 
 /// Handles one control-port frame. Answers a small JSON reply and says whether
@@ -221,6 +221,7 @@ fn control_into(
             }
         }
         b"stats" => {
+            let disk = store.disk().since(&served.disk_at_ready);
             writer
                 .raw(b"{\"ok\":true,\"store_calls\":")
                 .number(store.store_calls)
@@ -255,11 +256,15 @@ fn control_into(
                 .raw(b",\"publish_ns\":")
                 .number(store.publish_ns)
                 .raw(b",\"disk_writes\":")
-                .number(
-                    store
-                        .disk_writes()
-                        .saturating_sub(served.disk_writes_at_ready),
-                )
+                .number(disk.writes)
+                .raw(b",\"disk_flushes\":")
+                .number(disk.flushes)
+                .raw(b",\"disk_requests\":")
+                .number(disk.requests)
+                .raw(b",\"disk_device_ns\":")
+                .number(disk.device_ns)
+                .raw(b",\"disk_call_ns\":")
+                .number(disk.call_ns)
                 .raw(b",\"notes_deferred\":")
                 .number(notes::deferred())
                 .raw(b"}");
@@ -379,7 +384,7 @@ fn run() -> ! {
 
     let mut port_line = config.port_line;
     let mut served = Served {
-        disk_writes_at_ready: store.disk_writes(),
+        disk_at_ready: store.disk(),
         ..Served::default()
     };
     let mut running = true;

@@ -201,6 +201,12 @@ pub struct DiskReply {
     pub flushes: u64,
     /// Sectors written, which is what a torn write is measured in.
     pub sectors_written: u64,
+    /// Requests of any kind the device completed since the driver started.
+    pub device_requests: u64,
+    /// Nanoseconds the driver spent between notifying the device of those
+    /// requests and taking their completions: the device's latency as this
+    /// guest sees it, the interrupt and the driver's own wake included.
+    pub device_ns: u64,
 }
 
 // SAFETY: both are `repr(C)` integer structures with no implicit padding: the
@@ -210,7 +216,7 @@ unsafe impl Pod for DiskRequest {}
 unsafe impl Pod for DiskReply {}
 
 const _: () = assert!(core::mem::size_of::<DiskRequest>() == 32);
-const _: () = assert!(core::mem::size_of::<DiskReply>() == 48);
+const _: () = assert!(core::mem::size_of::<DiskReply>() == 64);
 
 impl DiskRequest {
     /// Encoded size in bytes.
