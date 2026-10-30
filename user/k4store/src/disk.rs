@@ -127,6 +127,29 @@ impl Disk {
         }
     }
 
+    /// Writes `count` consecutive blocks from `count` consecutive slots, in
+    /// one request and with no fault mode.
+    ///
+    /// Between two flushes the device may keep any subset of what it was
+    /// asked to write, in any order, whether the blocks went in one request or
+    /// in several (virtio 1.2, 5.2.6.2). One request is the same promise with
+    /// fewer round trips; a write the harness has to do something to is never
+    /// part of one.
+    pub fn write_run(&mut self, block: u64, slot: u32, count: u32) -> bool {
+        let request = DiskRequest {
+            op: disk_op::WRITE,
+            fault_mode: fault_mode::NONE,
+            block,
+            count,
+            buffer_block: slot,
+            fault_arg: 0,
+        };
+        match self.call(&request) {
+            Some(reply) => reply.status == disk_status::OK,
+            None => false,
+        }
+    }
+
     /// Asks the device to make everything it has acknowledged durable.
     pub fn flush(&mut self) -> bool {
         let request = DiskRequest {

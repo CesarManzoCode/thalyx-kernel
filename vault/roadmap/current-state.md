@@ -597,6 +597,21 @@ Cambiado sin medir, por la regla del mini sprint ([ADR-028](../decisions/ADR-028
 
 No atacado en esta ronda: la causa de `outbox` de K4, el −9 de `scale.ipc` en K6 (falta saber qué reserva rechaza), el costo de K4 por publicación (H3 y H4 de RES-003) y el de `virtio-serial` por mensaje.
 
+### El cierre 2 de K8
+
+Observado en `build/k8/check-20261030T122541` (kernel `979363c`, Thalyx `3ac575f`, KVM, 6 rondas × 16 casos):
+
+- **`K1 − L1` = +0,861 ms [+0,702, +0,972].** Las notas retenidas de ADR-028 bajaron 3,7 ms, dentro de lo esperado. Pasan `k8.same_experiment`, `k8.durability` y `k8.behavior`: tres corridas TCG de K1–K5 completas, con autocomprobaciones, y las 7 pruebas de EXP-13. La puerta K4 dio 31 de 31 criterios en las tres corridas, y kiln no informó fallos de otros checkers.
+- **El transporte ya no pierde.** Por fase, `open` da +0,689 ms y `candidate` −0,125 ms, y las demás fases difieren en centésimas. En los diez casos sin publicación en `settle`, esa fase es más rápida en K1 en nueve. Fuera de `PUBLISH`, el link pasa de 17 a 24 µs por trama dentro de `serve`.
+- **Lo que queda es `PUBLISH` de K4.** `publish_ns` es de 1,48 a 1,87 ms con dos publicaciones del link y de 2,14 a 2,79 ms con tres. La del `seed` (en `open`) cuesta en K4 unos 1,1 a 1,3 ms, y cada una de `settle` entre 0,45 y 0,9 ms. La publicación de la evidencia queda fuera de `whole_ns`. Cada objeto que falta es su propia petición a `k4disk` y a `virtio-blk`. El número de peticiones por publicación se infirió del código y no se midió.
+
+Cambiado sin medir, por la regla del mini sprint ([ADR-029](../decisions/ADR-029-publication-objects-written-as-one-run.md)):
+
+- **Los objetos de una publicación van al medio en una sola petición** (H4 de RES-003). K4 enmarca cada registro de objeto, recibo incluido, en una ranura del búfer compartido y los escribe como una corrida de bloques consecutivos antes del flush del grupo. Los puntos de flush y el formato del medio no cambian. Un registro que el arnés corta sale solo, y antes sale la corrida que tenía delante, así que cada corte deja el mismo medio. El búfer compartido pasa de 4 a 20 páginas. Busca bajar `k8.tx_e2e` unos 0,7 ms en los diez casos, 1,0 ms en los cinco que publican en `settle` y 1,3 ms en `two-transactions-in-a-row`, hasta un total entre −0,1 y +0,3 ms. Puede que el IC no quede por debajo de cero.
+- **`stats` cuenta `disk_writes`.** Son las peticiones de escritura del driver desde que el link quedó listo. Dice si la corrida se forma y, junto con `publish_ns`, cuánto cuesta cada petición.
+
+No atacado en esta ronda: juntar `PREPARE`, objetos y `COMMIT` bajo menos flushes (H3, cambia lo que la puerta K4 espera de cada corte), la configuración de QEMU del disco (H5), el despertar del vCPU (H2), las llamadas de `commit_root` que no escriben el medio (`FORK`, `WRITE`, `FREEZE`, `DISCARD`), la causa de `outbox` de K4 y el −9 de `scale.ipc` en K6.
+
 ## Reanudar aquí
 
 **Último hito terminado y pusheado:** **K6 completo en su alcance** —protocolos emparejados, campaña de referencia, EXP-12, ocho cuellos medidos y corregidos, parámetros V0 revisados, inventario físico, puerta K6— en la rama `feat/k6-comparison-hardening-reference`. K5 quedó completo en `feat/k5-thalyx-port-tools`.

@@ -63,7 +63,7 @@ Se elige un log append-only de registros enmarcados y objetos inmutables, sobre 
 
 1. Reservar espacio para objetos, metadatos, registros de cierre y recuperación. Verificar CAS y admisión de efecto.
 2. Escribir `PREPARE` con identidad/digest de petición, generación esperada, candidato y política; hacer flush. A partir de aquí recuperación sabe que existe una petición aceptada.
-3. Escribir los objetos y dependencias faltantes de la nueva raíz; hacer flush de todas sus dependencias.
+3. Escribir los objetos y dependencias faltantes de la nueva raíz; hacer flush de todas sus dependencias. Esos registros pueden ir en una sola petición de bloques consecutivos: entre dos flushes el medio no promete orden ni atomicidad, sea una petición o varias ([ADR-029](../decisions/ADR-029-publication-objects-written-as-one-run.md)).
 4. Escribir un `COMMIT` que incluya generación siguiente, raíz, política y recibo, referenciando el `PREPARE`; hacer flush.
 5. Publicar la nueva raíz en la memoria del servicio y responder `COMMITTED_DURABLE`.
 

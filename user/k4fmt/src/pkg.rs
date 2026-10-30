@@ -89,8 +89,12 @@ pub const RING_PAGES: u64 = 4;
 pub const RING_GRANTED_PAGES: u64 = 3;
 /// Where the driver and the service both find the shared buffer.
 pub const IOBUF_VADDR: u64 = 0x5100_0000;
-/// Pages of that buffer, each one block.
-pub const IOBUF_PAGES: u64 = 4;
+/// Pages of that buffer, each one block. The first four are the service's
+/// read and write slots and the supervisors' directive slot (3); the rest are
+/// the run of object records the service writes as one request (ADR-029).
+pub const IOBUF_PAGES: u64 = 20;
+/// First slot of that run.
+pub const IOBUF_RUN_SLOT: u32 = 4;
 /// Where a client finds its role, read-only.
 pub const CONFIG_VADDR: u64 = 0x2000_0000;
 /// Where a client finds its staging buffer.

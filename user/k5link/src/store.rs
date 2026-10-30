@@ -324,6 +324,17 @@ impl Store {
         )
     }
 
+    /// The service's counters, the driver's write requests among them.
+    pub fn stats(&mut self) -> Option<StoreReply> {
+        self.ok(
+            &StoreRequest {
+                op: store_op::STATS,
+                ..StoreRequest::zeroed()
+            },
+            0,
+        )
+    }
+
     /// Maintenance: copies the reachable set to the other arena.
     pub fn compact(&mut self) -> Option<StoreReply> {
         self.ok(

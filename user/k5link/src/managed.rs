@@ -528,6 +528,16 @@ impl Managed {
         Store::new(self.k4_facet, self.stage_cap)
     }
 
+    /// Write requests the block driver has issued since it started, as the
+    /// state service reports them (`STATS`, low half of `reserved0`). Asked
+    /// through a client of its own, so it is not counted as a call the link
+    /// made for anybody.
+    pub fn disk_writes(&self) -> u64 {
+        Store::new(self.k4_facet, self.stage_cap)
+            .stats()
+            .map_or(0, |reply| reply.reserved0 & 0xFFFF_FFFF)
+    }
+
     fn account(&mut self, store: &Store) {
         self.store_calls += store.calls;
         self.store_ns += store.ns;

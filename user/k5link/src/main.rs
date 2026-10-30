@@ -154,6 +154,9 @@ struct Served {
     serve_ns: u64,
     /// Times the link waited for the device to take a reply.
     tx_waits: u64,
+    /// The block driver's write requests when the link became ready, so that
+    /// `disk_writes` counts only the ones serving caused.
+    disk_writes_at_ready: u64,
 }
 
 /// Handles one control-port frame. Answers a small JSON reply and says whether
@@ -251,6 +254,12 @@ fn control_into(
                 .number(store.store_ns)
                 .raw(b",\"publish_ns\":")
                 .number(store.publish_ns)
+                .raw(b",\"disk_writes\":")
+                .number(
+                    store
+                        .disk_writes()
+                        .saturating_sub(served.disk_writes_at_ready),
+                )
                 .raw(b",\"notes_deferred\":")
                 .number(notes::deferred())
                 .raw(b"}");
@@ -369,7 +378,10 @@ fn run() -> ! {
     k2::note(note::LINK_READY, u64::from(console.max_ports));
 
     let mut port_line = config.port_line;
-    let mut served = Served::default();
+    let mut served = Served {
+        disk_writes_at_ready: store.disk_writes(),
+        ..Served::default()
+    };
     let mut running = true;
     while running {
         let Some(received) = console.receive(k2::now_ns() + 1_000_000_000) else {

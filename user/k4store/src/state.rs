@@ -21,7 +21,7 @@
 use thalyx_abi::generated::receipt_kind;
 use thalyx_user_k4fmt as k4;
 use thalyx_user_k4fmt::Pod;
-use thalyx_user_k4fmt::pkg::note;
+use thalyx_user_k4fmt::pkg::{IOBUF_PAGES, IOBUF_RUN_SLOT, note};
 use thalyx_user_k4fmt::{
     AbortRecord, Binding, CheckpointRecord, CommitRecord, Manifest, ObjectRecordHeader,
     OutboxRecord, Policy, PrepareRecord, PrincipalEntry, RecordFrame, ResultEntry, RetainedEntry,
@@ -77,6 +77,42 @@ pub const MAX_BINDINGS: usize = geometry::MAX_TREE_ENTRIES as usize;
 const READ_SLOT: u32 = 0;
 /// Buffer slot the service frames records in.
 const WRITE_SLOT: u32 = 1;
+/// Object records one request may carry: the slots past the read, write and
+/// directive slots.
+const RUN_MAX: usize = (IOBUF_PAGES - IOBUF_RUN_SLOT as u64) as usize;
+
+/// Object records framed in the run slots and not yet written.
+///
+/// A publication's objects and its receipt go to the medium between the
+/// prepare's flush and the commit's, and nothing reads them before that
+/// second flush. Written one request per record, each paid a round trip to
+/// the driver and the device; written as one run of consecutive blocks they
+/// pay one (ADR-029). The log position has already moved past them, so a run
+/// the medium refused puts it back to where the run began.
+#[derive(Clone, Copy)]
+pub struct Run {
+    count: usize,
+    first_block: u64,
+    first_sequence: u64,
+    prev_digest: [u8; 32],
+    objects: [usize; RUN_MAX],
+    notes: [u64; RUN_MAX],
+}
+
+impl Run {
+    const EMPTY: Run = Run {
+        count: 0,
+        first_block: 0,
+        first_sequence: 0,
+        prev_digest: [0u8; 32],
+        objects: [0; RUN_MAX],
+        notes: [0; RUN_MAX],
+    };
+
+    fn holds(&self, index: usize) -> bool {
+        self.objects[..self.count].contains(&index)
+    }
+}
 
 /// Staged object content. In `.bss`, because a service with no allocator still
 /// has to hold what a client handed it until the publication that uses it.
@@ -272,6 +308,7 @@ pub struct Store {
     pub retained: [RetainedEntry; MAX_RETAINED],
     pub retained_count: usize,
     pub pending: Pending,
+    pub run: Run,
 
     pub ready: bool,
     pub integrity_failed: bool,
@@ -331,6 +368,7 @@ impl Store {
             retained: [RetainedEntry::zeroed(); MAX_RETAINED],
             retained_count: 0,
             pending: Pending::default(),
+            run: Run::EMPTY,
             ready: false,
             integrity_failed: false,
             scanned: 0,
@@ -375,6 +413,24 @@ impl Store {
                 | (u64::from(directive.leg) << 16)
                 | (directive.scenario << 24),
         );
+    }
+
+    /// Whether [`fault_at`](Self::fault_at) would apply the directive at
+    /// `point`, without applying it.
+    ///
+    /// The run of object records is written before a directive applies, so
+    /// the device has seen exactly the writes it saw when every record was its
+    /// own request by the time the harness does anything: drop, tear, refuse,
+    /// hold, stop, or fill the control plane.
+    fn fault_due(&self, point: u32, ordinal: u64) -> bool {
+        self.harness.present
+            && !self.harness.applied
+            && self.harness.point == point
+            && if point == fault_point::BEFORE_OBJECT {
+                self.harness.arg == ordinal
+            } else {
+                self.harness.arg == 0
+            }
     }
 
     /// Decides what the harness wants done at `point`.
@@ -666,15 +722,14 @@ impl Store {
         Some((self.objects[index].object_type, length))
     }
 
-    /// Writes one object as a record. Returns false when the medium refused.
-    fn write_object(&mut self, index: usize, mode: u32) -> bool {
+    /// Builds one object's record body in the payload buffer. Returns its
+    /// length, or `None` when the object's bytes are not all there.
+    fn object_record(&mut self, index: usize) -> Option<usize> {
         let entry = self.objects[index];
         let length = entry.length as usize;
-        let Some(read) = self.load(index) else {
-            return false;
-        };
+        let read = self.load(index)?;
         if read != length {
-            return false;
+            return None;
         }
         let head = ObjectRecordHeader {
             object_type: entry.object_type,
@@ -683,24 +738,109 @@ impl Store {
             content_digest: entry.digest,
         };
         let body = payload();
-        if head.write_to(body, 0).is_err() {
-            return false;
-        }
+        head.write_to(body, 0).ok()?;
         body[ObjectRecordHeader::SIZE..ObjectRecordHeader::SIZE + length]
             .copy_from_slice(&content()[..length]);
+        Some(ObjectRecordHeader::SIZE + length)
+    }
+
+    /// An object's record reached the device at `block`: the object is
+    /// durable once the next flush is, and its staging slot is free.
+    fn object_written(&mut self, index: usize, block: u64) {
+        let stage = self.objects[index].stage;
+        self.objects[index].durable = true;
+        self.objects[index].block = block;
+        if stage != u32::MAX {
+            self.stage_used[stage as usize] = false;
+            self.objects[index].stage = u32::MAX;
+        }
+    }
+
+    /// Writes one object as a record. Returns false when the medium refused.
+    fn write_object(&mut self, index: usize, mode: u32) -> bool {
+        let Some(total) = self.object_record(index) else {
+            return false;
+        };
         let block = self.next_block;
-        let total = ObjectRecordHeader::SIZE + length;
         if self
-            .append(record_kind::OBJECT, &body[..total], mode)
+            .append(record_kind::OBJECT, &payload()[..total], mode)
             .is_none()
         {
             return false;
         }
-        self.objects[index].durable = true;
-        self.objects[index].block = block;
-        if entry.stage != u32::MAX {
-            self.stage_used[entry.stage as usize] = false;
-            self.objects[index].stage = u32::MAX;
+        self.object_written(index, block);
+        true
+    }
+
+    /// Frames one object's record in the next run slot without writing it.
+    ///
+    /// The log moves past it now, exactly as [`append`](Self::append) would
+    /// have; [`write_run`](Self::write_run) writes the run, and puts the log
+    /// back if the medium refuses it. A full run is written first.
+    fn queue_object(&mut self, index: usize) -> bool {
+        if self.run.count == RUN_MAX && !self.write_run() {
+            return false;
+        }
+        if self.next_block >= self.arena_start + self.arena_blocks {
+            return false;
+        }
+        let Some(total) = self.object_record(index) else {
+            return false;
+        };
+        let frame = RecordFrame {
+            kind: record_kind::OBJECT,
+            sequence: self.next_sequence,
+            store_epoch: self.store_epoch,
+            arena: self.arena as u32,
+            prev_digest: self.prev_digest,
+        };
+        let slot = IOBUF_RUN_SLOT + self.run.count as u32;
+        let Ok((blocks, digest)) = k4::frame_record(slot_bytes(slot), &frame, &payload()[..total])
+        else {
+            return false;
+        };
+        if blocks != 1 {
+            return false;
+        }
+        let at = self.run.count;
+        if at == 0 {
+            self.run.first_block = self.next_block;
+            self.run.first_sequence = self.next_sequence;
+            self.run.prev_digest = self.prev_digest;
+        }
+        self.run.objects[at] = index;
+        self.run.notes[at] = self.next_sequence | (u64::from(record_kind::OBJECT) << 32);
+        self.run.count = at + 1;
+        self.next_block += 1;
+        self.next_sequence += 1;
+        self.prev_digest = digest;
+        true
+    }
+
+    /// Writes the queued run of object records as one request.
+    ///
+    /// Refused, the log goes back to where the run began, so that the next
+    /// record is written where the first of the run would have been and the
+    /// chain on the medium has no gap the service believes is filled: what
+    /// [`append`](Self::append) does for one record that was refused.
+    fn write_run(&mut self) -> bool {
+        let run = self.run;
+        if run.count == 0 {
+            return true;
+        }
+        self.run.count = 0;
+        if !self
+            .disk
+            .write_run(run.first_block, IOBUF_RUN_SLOT, run.count as u32)
+        {
+            self.next_block = run.first_block;
+            self.next_sequence = run.first_sequence;
+            self.prev_digest = run.prev_digest;
+            return false;
+        }
+        for at in 0..run.count {
+            record_note(note::RECORD_WRITTEN, run.notes[at]);
+            self.object_written(run.objects[at], run.first_block + at as u64);
         }
         true
     }
@@ -1636,32 +1776,40 @@ impl Store {
         if !self.closure(&candidate_root, &mut reachable, &mut count) {
             return Err(store_status::NOT_FOUND);
         }
+        // The receipt goes last, after every object of the root. Each record
+        // the harness has nothing to do to joins the run, which is written as
+        // one request before the flush; a record the harness acts on is
+        // written alone, after the run before it (`fault_due`).
+        let receipt_index = self.find(&receipt_digest).ok_or(store_status::NOT_FOUND)?;
         let mut ordinal = 0u64;
-        for index in reachable.iter().copied().take(count) {
-            if self.objects[index].durable {
+        let writes = reachable.iter().copied().take(count);
+        for index in writes.chain(core::iter::once(receipt_index)) {
+            if self.objects[index].durable || self.run.holds(index) {
                 continue;
             }
             ordinal += 1;
+            if self.fault_due(fault_point::BEFORE_OBJECT, ordinal) && !self.write_run() {
+                return Err(self.write_failure());
+            }
             let mode = match self.fault_at(fault_point::BEFORE_OBJECT, ordinal) {
                 Fault::Write(mode) => mode,
                 Fault::Stop | Fault::Kill => return Err(store_status::UNAVAILABLE),
                 _ => fault_mode::NONE,
             };
-            if !self.write_object(index, mode) {
+            let written = if mode == fault_mode::NONE {
+                self.queue_object(index)
+            } else {
+                self.write_object(index, mode)
+            };
+            if !written {
+                // What was queued before this record reaches the device, as it
+                // would have one record at a time.
+                let _ = self.write_run();
                 return Err(self.write_failure());
             }
         }
-        let receipt_index = self.find(&receipt_digest).ok_or(store_status::NOT_FOUND)?;
-        if !self.objects[receipt_index].durable {
-            ordinal += 1;
-            let mode = match self.fault_at(fault_point::BEFORE_OBJECT, ordinal) {
-                Fault::Write(mode) => mode,
-                Fault::Stop | Fault::Kill => return Err(store_status::UNAVAILABLE),
-                _ => fault_mode::NONE,
-            };
-            if !self.write_object(receipt_index, mode) {
-                return Err(self.write_failure());
-            }
+        if !self.write_run() {
+            return Err(self.write_failure());
         }
         if !self.flush() {
             return Err(store_status::UNAVAILABLE);
