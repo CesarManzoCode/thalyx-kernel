@@ -67,6 +67,8 @@ Se elige un log append-only de registros enmarcados y objetos inmutables, sobre 
 4. Escribir un `COMMIT` que incluya generación siguiente, raíz, política y recibo, referenciando el `PREPARE`; hacer flush.
 5. Publicar la nueva raíz en la memoria del servicio y responder `COMMITTED_DURABLE`.
 
+Los pasos 2 a 4 pueden compartir un solo flush: `PREPARE`, objetos y `COMMIT` en una corrida de bloques consecutivos, con la respuesta después del flush ([ADR-031](../decisions/ADR-031-publication-grouped-under-one-flush.md)). Es correcto porque la recuperación solo adopta un `COMMIT` al final de una cadena que enlaza, registro a registro, desde el checkpoint, y el primer bloque que no enlaza termina el log. De una corrida cortada antes del flush, la recuperación ve un prefijo: nada, un `PREPARE` que aborta, o la versión entera. Nunca un `COMMIT` sin sus dependencias. La implementación usa los tres flushes cuando una directiva del arnés espera en un punto interior de la publicación, para que cada corte de la matriz se haga sobre el protocolo contra el que se escribió.
+
 Si falla antes de commit, se registra `ABORT` durable cuando sea posible. Si se pierde comunicación con el disco durante un flush, el servicio no continúa publicando sobre un estado que supone conocido: entra en recuperación. Un commit completo puede haber llegado al medio aunque el flush no haya respondido.
 
 Los lectores vivos solo ven la nueva raíz después de confirmación durable. La recuperación puede encontrar un commit válido cuya respuesta nunca llegó. Por ello el cliente no interpreta un timeout como aborto y consulta `result`.
@@ -77,7 +79,7 @@ Se reconstruye el prefijo válido del log y el último commit cuyas dependencias
 
 Cada principal mantiene una secuencia estricta y como máximo una publicación pendiente en V0. Se conserva un high-water mark durable de peticiones resueltas, además de resultados recientes. Secuencias por debajo de ese límite nunca se ejecutan como nuevas: si se expulsó el resultado, se devuelve `RESULT_EXPIRED`, que no afirma commit ni aborto. Una secuencia siguiente solo se acepta cuando la anterior se resolvió. Un checkpoint preserva esos límites aunque elimine detalles antiguos.
 
-Antes de hacer durable `PREPARE`, una caída puede no dejar rastro; no hay efecto publicado y reintentar la misma secuencia es seguro. Después, recuperación conserva identidad y resultado. Este coste de serialización por principal se acepta inicialmente; ventanas de múltiples peticiones necesitan un protocolo adicional de dedupe, no una caché volátil.
+Antes de hacer durable `PREPARE` (en una publicación agrupada, antes de su único flush), una caída puede no dejar rastro; no hay efecto publicado y reintentar la misma secuencia es seguro. Después, recuperación conserva identidad y resultado. Este coste de serialización por principal se acepta inicialmente; ventanas de múltiples peticiones necesitan un protocolo adicional de dedupe, no una caché volátil.
 
 La raíz recuperada, la política y el recibo proceden del mismo commit. Un índice SQLite, grafo o memoria de conocimiento se reconstruye o comprueba contra esa raíz; su propia transacción no se confunde con la transacción del almacén.
 

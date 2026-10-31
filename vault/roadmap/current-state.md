@@ -629,6 +629,22 @@ Cambiado sin medir, por la regla del mini sprint ([ADR-030](../decisions/ADR-030
 
 No atacado en esta ronda: el sondeo del anillo en `k4disk` (H2, espera a los contadores), juntar flushes (H3), las llamadas de `commit_root` que no escriben el medio y el −9 de K6. La misma carrera podría estar detrás de alguna demora en `scale.ipc`, pero un −9 es `LIMIT_EXHAUSTED` y no una espera, así que no hay base para atribuírselo.
 
+### El cierre 4 de K8
+
+Observado en `build/k8/check-20261030T155358` (kernel `1212ea6`, Thalyx `3ac575f`, KVM, 6 rondas × 16 casos):
+
+- **`K1 − L1` = +0,118 ms [−0,025, +0,188].** Pasan `k8.same_experiment`, `k8.durability` y `k8.behavior`: tres corridas TCG de K1–K5 completas, con K4 en 31 de 31 en las tres, y las 7 pruebas de EXP-13. kiln no informó fallos de otros checkers. Por fase, `open` da +0,151 ms, `candidate` −0,128 ms y `program` −0,074 ms.
+- **La hipótesis de la ronda 3 no se confirmó.** ADR-030 esperaba un total entre −0,15 y −0,05 ms con el hilo de E/S y `aio=io_uring`. El total pasó de +0,045 a +0,118 ms, dentro del ancho de los dos intervalos. Queda como resultado negativo: la configuración del emulador no movió `K1 − L1` de forma visible.
+- **Una petición al disco cuesta unos 27 µs**, de 20 a 27 µs con el dispositivo y de 2,6 a 3,7 µs de cruce entre `k4store` y `k4disk`. Una publicación son 3 escrituras y 3 flushes en serie, más lecturas: 3 con dos publicaciones del link, 6 con tres y 16 con cinco. `disk_call_ns` es el 80 % de `publish_ns`.
+- **K1 pierde en las publicaciones.** `settle` es 0,15 a 0,31 ms más lento que en L1 en los cinco casos que publican en esa fase, y 0,46 ms en `two-transactions-in-a-row`. En los que no publican, K1 es más rápido en nueve de diez. `open`, con la publicación del `seed`, es más lento en K1 en los dieciséis casos.
+
+Cambiado sin medir, por la regla del mini sprint ([ADR-031](../decisions/ADR-031-publication-grouped-under-one-flush.md)):
+
+- **Una publicación sin directiva del arnés en sus puntos interiores va al medio como una corrida y un flush** (H3 de RES-003). `PREPARE`, objetos, recibo y `COMMIT` se escriben en una sola petición de bloques consecutivos, seguida de un solo flush, y la respuesta sale después de ese flush. La recuperación solo adopta un `COMMIT` al final de una cadena que enlaza, así que un corte deja nada, un prepare que se aborta o la versión entera. Cada corte de K4 y K5 en `BEFORE_PREPARE`, `AFTER_PREPARE`, `BEFORE_OBJECT`, `AFTER_OBJECTS` o `BEFORE_COMMIT` usa el protocolo de tres flushes. Busca bajar `k8.tx_e2e` unos 0,11 ms en los diez casos que solo publican el `seed` en la ventana, 0,22 ms en los cinco que publican también en `settle` y 0,45 ms en `two-transactions-in-a-row`, hasta un total cerca de −0,02 ms. Que el límite superior del IC quede por debajo de cero no es seguro.
+- **Lo que debería verse en `stats`:** `disk_writes` y `disk_flushes` iguales a una por publicación del link, con las lecturas igual que antes.
+
+No se compiló ni se probó dentro de la ronda. Ninguna puerta corta una corrida agrupada antes de su flush, y MODEL-02 no modela la variante agrupada (ADR-031 dice qué haría falta). No atacado en esta ronda: las relecturas de objetos durables en la admisión y en `closure`, las llamadas de `commit_root` que no escriben el medio, el sondeo del anillo en `k4disk` (H2), el flush propio del outbox y el −9 de `scale.ipc` en K6.
+
 ## Reanudar aquí
 
 **Último hito terminado y pusheado:** **K6 completo en su alcance** —protocolos emparejados, campaña de referencia, EXP-12, ocho cuellos medidos y corregidos, parámetros V0 revisados, inventario físico, puerta K6— en la rama `feat/k6-comparison-hardening-reference`. K5 quedó completo en `feat/k5-thalyx-port-tools`.

@@ -81,14 +81,16 @@ const WRITE_SLOT: u32 = 1;
 /// directive slots.
 const RUN_MAX: usize = (IOBUF_PAGES - IOBUF_RUN_SLOT as u64) as usize;
 
-/// Object records framed in the run slots and not yet written.
+/// Records framed in the run slots and not yet written.
 ///
 /// A publication's objects and its receipt go to the medium between the
 /// prepare's flush and the commit's, and nothing reads them before that
 /// second flush. Written one request per record, each paid a round trip to
 /// the driver and the device; written as one run of consecutive blocks they
-/// pay one (ADR-029). The log position has already moved past them, so a run
-/// the medium refused puts it back to where the run began.
+/// pay one (ADR-029). A publication the harness does nothing to puts its
+/// prepare and its commit in the same run, under one flush (ADR-031). The log
+/// position has already moved past them, so a run the medium refused puts it
+/// back to where the run began.
 #[derive(Clone, Copy)]
 pub struct Run {
     count: usize,
@@ -113,6 +115,10 @@ impl Run {
         self.objects[..self.count].contains(&index)
     }
 }
+
+/// What a run slot holds in place of an object index when its record is not
+/// an object's: a prepare or a commit (ADR-031).
+const NOT_AN_OBJECT: usize = usize::MAX;
 
 /// Staged object content. In `.bss`, because a service with no allocator still
 /// has to hold what a client handed it until the publication that uses it.
@@ -431,6 +437,38 @@ impl Store {
             } else {
                 self.harness.arg == 0
             }
+    }
+
+    /// Whether a publication may put its prepare, its objects and its commit
+    /// in one run under one flush (ADR-031).
+    ///
+    /// Not when a directive is still waiting at a point inside the
+    /// publication, counted down or not: the harness cuts at the flushes the
+    /// ungrouped protocol has, and every cut the K4 and K5 matrices make is
+    /// then made on the medium they were written against. Not when an applied
+    /// directive armed the next flush to end the run either, because which
+    /// flush that is moves with the grouping. Not on a medium that already
+    /// failed, latched or could not be reached, where the publication is
+    /// refused at its first request and the ungrouped one says `ABORTED`
+    /// before anything reached the device. Every other publication, which is
+    /// every one a consumer makes, is grouped; `fault_at` at the points the
+    /// grouped publication still passes finds nothing to do there.
+    fn group_allowed(&self) -> bool {
+        let waiting = self.harness.present
+            && !self.harness.applied
+            && matches!(
+                self.harness.point,
+                fault_point::BEFORE_PREPARE
+                    | fault_point::AFTER_PREPARE
+                    | fault_point::BEFORE_OBJECT
+                    | fault_point::AFTER_OBJECTS
+                    | fault_point::BEFORE_COMMIT
+            );
+        !waiting
+            && !self.harness.armed
+            && !self.disk.failed
+            && !self.disk.latched
+            && !self.disk.unreachable
     }
 
     /// Decides what the harness wants done at `point`.
@@ -773,34 +811,39 @@ impl Store {
     }
 
     /// Frames one object's record in the next run slot without writing it.
+    fn queue_object(&mut self, index: usize) -> bool {
+        let Some(total) = self.object_record(index) else {
+            return false;
+        };
+        self.queue_record(record_kind::OBJECT, &payload()[..total], index)
+            .is_some()
+    }
+
+    /// Frames one record in the next run slot without writing it, and returns
+    /// its digest. `object` is the index the record makes durable, or
+    /// [`NOT_AN_OBJECT`].
     ///
     /// The log moves past it now, exactly as [`append`](Self::append) would
     /// have; [`write_run`](Self::write_run) writes the run, and puts the log
     /// back if the medium refuses it. A full run is written first.
-    fn queue_object(&mut self, index: usize) -> bool {
+    fn queue_record(&mut self, kind: u32, body: &[u8], object: usize) -> Option<[u8; 32]> {
         if self.run.count == RUN_MAX && !self.write_run() {
-            return false;
+            return None;
         }
         if self.next_block >= self.arena_start + self.arena_blocks {
-            return false;
+            return None;
         }
-        let Some(total) = self.object_record(index) else {
-            return false;
-        };
         let frame = RecordFrame {
-            kind: record_kind::OBJECT,
+            kind,
             sequence: self.next_sequence,
             store_epoch: self.store_epoch,
             arena: self.arena as u32,
             prev_digest: self.prev_digest,
         };
         let slot = IOBUF_RUN_SLOT + self.run.count as u32;
-        let Ok((blocks, digest)) = k4::frame_record(slot_bytes(slot), &frame, &payload()[..total])
-        else {
-            return false;
-        };
+        let (blocks, digest) = k4::frame_record(slot_bytes(slot), &frame, body).ok()?;
         if blocks != 1 {
-            return false;
+            return None;
         }
         let at = self.run.count;
         if at == 0 {
@@ -808,13 +851,13 @@ impl Store {
             self.run.first_sequence = self.next_sequence;
             self.run.prev_digest = self.prev_digest;
         }
-        self.run.objects[at] = index;
-        self.run.notes[at] = self.next_sequence | (u64::from(record_kind::OBJECT) << 32);
+        self.run.objects[at] = object;
+        self.run.notes[at] = self.next_sequence | (u64::from(kind) << 32);
         self.run.count = at + 1;
         self.next_block += 1;
         self.next_sequence += 1;
         self.prev_digest = digest;
-        true
+        Some(digest)
     }
 
     /// Writes the queued run of object records as one request.
@@ -840,9 +883,21 @@ impl Store {
         }
         for at in 0..run.count {
             record_note(note::RECORD_WRITTEN, run.notes[at]);
-            self.object_written(run.objects[at], run.first_block + at as u64);
+            if run.objects[at] != NOT_AN_OBJECT {
+                self.object_written(run.objects[at], run.first_block + at as u64);
+            }
         }
         true
+    }
+
+    /// Writes what is queued and flushes it, whatever the medium does with
+    /// either. A grouped publication that stops before its commit leaves its
+    /// prepare where the ungrouped one would have: on the medium, flushed when
+    /// the medium allows (ADR-031).
+    fn settle_group(&mut self) {
+        if self.write_run() {
+            let _ = self.flush();
+        }
     }
 
     /// Drops every pin, so the next request's sweep can see what this one left.
@@ -1687,9 +1742,55 @@ impl Store {
     }
 
     /// Carries out an admitted publication. Returns the new generation.
+    ///
+    /// Grouped (ADR-031), the prepare, the objects, the receipt and the commit
+    /// go to the device as one run and one flush makes them durable. Recovery
+    /// adopts a commit only at the end of an unbroken chain from the
+    /// checkpoint (`replay`), so a medium that kept any subset of the run
+    /// before the flush shows a prefix of it: nothing, a prepare that recovery
+    /// aborts, or the whole version. A grouped publication that fails leaves
+    /// what it queued written and flushed, as the ungrouped one leaves its
+    /// prepare, and its caller is told `UNKNOWN` by the prepare it holds.
     #[allow(clippy::too_many_arguments)]
     pub fn publish(
         &mut self,
+        principal: u64,
+        sequence: u64,
+        expected_generation: u64,
+        candidate_root: [u8; 32],
+        policy_digest: [u8; 32],
+        validation_digest: [u8; 32],
+        request: [u8; 32],
+        outbox_target: u64,
+        outbox_payload: [u8; 32],
+        invocation_id: u64,
+    ) -> Result<(u64, Fault), u32> {
+        let grouped = self.group_allowed();
+        let published = self.publish_records(
+            grouped,
+            principal,
+            sequence,
+            expected_generation,
+            candidate_root,
+            policy_digest,
+            validation_digest,
+            request,
+            outbox_target,
+            outbox_payload,
+            invocation_id,
+        );
+        if grouped && published.is_err() && (self.run.count > 0 || self.pending.live) {
+            self.settle_group();
+        }
+        published
+    }
+
+    /// The publication itself, grouped or with a flush after the prepare, the
+    /// objects and the commit.
+    #[allow(clippy::too_many_arguments)]
+    fn publish_records(
+        &mut self,
+        grouped: bool,
         principal: u64,
         sequence: u64,
         expected_generation: u64,
@@ -1745,12 +1846,19 @@ impl Store {
             invocation_id,
         };
         let prepare_sequence = self.next_sequence;
-        let Some(prepare_digest) =
+        // Grouped, the prepare is the first record of the run and is not
+        // flushed alone. From here on it may reach the medium, so the caller
+        // of a publication that fails is owed `UNKNOWN`, as it is once an
+        // ungrouped prepare is durable.
+        let prepare_digest = if grouped {
+            self.queue_record(record_kind::PREPARE, prepare.as_bytes(), NOT_AN_OBJECT)
+        } else {
             self.append(record_kind::PREPARE, prepare.as_bytes(), prepare_mode)
-        else {
+        };
+        let Some(prepare_digest) = prepare_digest else {
             return Err(self.write_failure());
         };
-        if !self.flush() {
+        if !grouped && !self.flush() {
             return Err(store_status::UNAVAILABLE);
         }
         self.pending = Pending {
@@ -1808,11 +1916,15 @@ impl Store {
                 return Err(self.write_failure());
             }
         }
-        if !self.write_run() {
-            return Err(self.write_failure());
-        }
-        if !self.flush() {
-            return Err(store_status::UNAVAILABLE);
+        // Grouped, the objects stay queued behind the prepare and go with the
+        // commit.
+        if !grouped {
+            if !self.write_run() {
+                return Err(self.write_failure());
+            }
+            if !self.flush() {
+                return Err(store_status::UNAVAILABLE);
+            }
         }
         if let Fault::Stop | Fault::Kill = self.fault_at(fault_point::AFTER_OBJECTS, 0) {
             return Err(store_status::UNAVAILABLE);
@@ -1830,7 +1942,9 @@ impl Store {
         // its log would have to guess. If the plane cannot cover both, nothing
         // is written; what the caller is told is then what the preparation's
         // own state says, which is `UNKNOWN` while a preparation is durable
-        // and unresolved.
+        // and unresolved. Grouped, the two are the run's write and its flush,
+        // and a refusal here leaves the prepare and the objects written and
+        // flushed, without the commit (`publish`).
         if self.control_log != 0 {
             let room = k2::log_query(self.control_log).map_or(0, |info| {
                 info.capacity
@@ -1854,10 +1968,18 @@ impl Store {
             committed_ns: k2::now_ns(),
             object_count: ordinal,
         };
-        if self
-            .append(record_kind::COMMIT, commit.as_bytes(), commit_mode)
-            .is_none()
-        {
+        let commit_written = if grouped {
+            // The whole publication in one request: what is still queued of
+            // it, which is all of it unless more records than the run holds
+            // sent the first ones ahead.
+            self.queue_record(record_kind::COMMIT, commit.as_bytes(), NOT_AN_OBJECT)
+                .is_some()
+                && self.write_run()
+        } else {
+            self.append(record_kind::COMMIT, commit.as_bytes(), commit_mode)
+                .is_some()
+        };
+        if !commit_written {
             // The commit did not happen. Nothing is published, and the prepare
             // stays durable and unresolved: what happened to this request is
             // not something this run may assert. Whether the medium refused it
