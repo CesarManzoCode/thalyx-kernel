@@ -1046,6 +1046,24 @@ fn scheduling_summary() {
         crate::sched::QUANTUM_NS,
         crate::sched::TICK_HZ
     );
+    // Which reservation every `LIMIT_EXHAUSTED` of an admission ran out of,
+    // traced or not: under the measuring image a refused K6 entry was a −9 and
+    // nothing else (ADR-032).
+    let [
+        cap_slots,
+        messages,
+        invocations,
+        queue_bytes,
+        receipts,
+        effect_receipts,
+        after,
+    ] = crate::api::ipcops::refusals();
+    event!(
+        "k2.admission_refusals",
+        "receiver_cap_slots={cap_slots} messages={messages} invocations={invocations} \
+         queue_bytes={queue_bytes} receipt_cells={receipts} \
+         effect_receipt_cells={effect_receipts} after_reservation={after}"
+    );
     // What each kind of lock actually cost, so "the lock was the limit" stays
     // an argument about a number, and about which lock.
     for (name, class) in [

@@ -422,7 +422,7 @@ def main() -> int:
     cargo_build("thalyx-kernel", KERNEL_TARGET, arguments.profile)
     program_features: dict[str, list[str]] = {}
     if phase == "k5" and arguments.stage == "thalyx":
-        program_features["k4store"] = ["large-index"]
+        program_features["k4store"] = ["large-index", "verified-cache"]
         if arguments.k4_io_notes == "off":
             program_features["k4store"].append("quiet-io")
             program_features["k4disk"] = ["quiet-io"]

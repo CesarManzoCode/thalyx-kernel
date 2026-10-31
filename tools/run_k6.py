@@ -115,7 +115,8 @@ ARMS = {
 }
 
 SUMMARY_RE = re.compile(r"^THLX1 kernel \d+ \S+ (scope\.accounting|sched\.cpu_summary|"
-                        r"sched\.summary|diag\.summary|k1\.summary|k1\.terminal) (.*)$")
+                        r"sched\.summary|diag\.summary|k1\.summary|k1\.terminal|"
+                        r"k2\.admission_refusals) (.*)$")
 KV_RE = re.compile(r"(\w+)=(\S+)")
 
 

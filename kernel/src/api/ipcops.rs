@@ -46,12 +46,70 @@ const MESSAGE_OVERHEAD_BYTES: u64 = 64;
 /// only that something bounded was full, and the five have nothing in common:
 /// one is the receiver's fault, one the sender's, and three are the machine's.
 /// Naming the table and what it held is what turns the refusal into evidence.
-fn exhausted(resource: &str, used: u64, capacity: u64) -> i64 {
+fn exhausted(resource: Refusal, used: u64, capacity: u64) -> i64 {
+    count_refusal(resource);
     trace!(
         "k2.admission_exhausted",
-        "resource={resource} used={used} capacity={capacity}"
+        "resource={} used={used} capacity={capacity}",
+        resource.name()
     );
     status::LIMIT_EXHAUSTED
+}
+
+/// The reservation a refusal ran out of.
+///
+/// Counted whether tracing is on or not. The image that measures withholds
+/// `k2.admission_exhausted`, so a K6 entry refused with `LIMIT_EXHAUSTED` under
+/// it said only that something bounded was full: the same −9 in `scale.ipc`
+/// across campaigns, with nothing to say which of these it was (ADR-014,
+/// ADR-032). The totals go out once, at the end, in `k2.admission_refusals`.
+#[derive(Clone, Copy)]
+enum Refusal {
+    ReceiverCapSlots,
+    Messages,
+    Invocations,
+    QueueBytes,
+    ReceiptCells,
+    /// An effect admission's receipt cell (`begin_effect`), traced under the
+    /// same name as an admission's.
+    EffectReceiptCells,
+    /// What admission refuses after every reservation was made: a capability
+    /// the receiver's table would not take, or no identity left.
+    AfterReservation,
+}
+
+impl Refusal {
+    /// The name the trace record has always used.
+    const fn name(self) -> &'static str {
+        match self {
+            Refusal::ReceiverCapSlots => "receiver_cap_slots",
+            Refusal::Messages => "messages",
+            Refusal::Invocations => "invocations",
+            Refusal::QueueBytes => "queue_bytes",
+            Refusal::ReceiptCells | Refusal::EffectReceiptCells => "receipt_cells",
+            Refusal::AfterReservation => "after_reservation",
+        }
+    }
+}
+
+const REFUSAL_KINDS: usize = 7;
+
+static REFUSALS: [core::sync::atomic::AtomicU64; REFUSAL_KINDS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; REFUSAL_KINDS];
+
+fn count_refusal(resource: Refusal) {
+    REFUSALS[resource as usize].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Refusals since boot, in the order of [`Refusal`]: receiver capability
+/// slots, messages, invocations, queue bytes, admission receipt cells, effect
+/// receipt cells, and refusals after every reservation was made.
+pub fn refusals() -> [u64; REFUSAL_KINDS] {
+    let mut out = [0u64; REFUSAL_KINDS];
+    for (slot, counter) in out.iter_mut().zip(REFUSALS.iter()) {
+        *slot = counter.load(core::sync::atomic::Ordering::Relaxed);
+    }
+    out
 }
 
 /// Rights an invocation capability carries when a receiver takes the message.
@@ -299,7 +357,7 @@ fn admit(
     let free_slots = machine.domains[receiver].caps.lock().free_slots();
     if free_slots < count {
         return Err(exhausted(
-            "receiver_cap_slots",
+            Refusal::ReceiverCapSlots,
             count as u64,
             free_slots as u64,
         ));
@@ -310,7 +368,7 @@ fn admit(
     // receiver.
     let Some(message_index) = machine.claim_message() else {
         return Err(exhausted(
-            "messages",
+            Refusal::Messages,
             machine.messages_used(),
             machine.messages.len() as u64,
         ));
@@ -318,7 +376,7 @@ fn admit(
     let Some(invocation_index) = machine.claim_invocation() else {
         machine.release_message(message_index);
         return Err(exhausted(
-            "invocations",
+            Refusal::Invocations,
             machine.invocations_used(),
             machine.invocations.len() as u64,
         ));
@@ -332,7 +390,7 @@ fn admit(
             machine.release_message(message_index);
             let scope = &scope::table()[origin_scope as usize];
             return Err(exhausted(
-                "queue_bytes",
+                Refusal::QueueBytes,
                 scope.used(Resource::QueueBytes).saturating_add(bytes),
                 scope.limits.load().queue_bytes,
             ));
@@ -358,7 +416,7 @@ fn admit(
             }
             None => (0, 0),
         };
-        return Err(exhausted("receipt_cells", used, capacity));
+        return Err(exhausted(Refusal::ReceiptCells, used, capacity));
     }
 
     // Everything is reserved. From here the transfer either completes or is
@@ -397,6 +455,7 @@ fn admit(
         if charged != 0 {
             scope::release(origin_scope, Resource::QueueBytes, charged);
         }
+        count_refusal(Refusal::AfterReservation);
         return Err(status::LIMIT_EXHAUSTED);
     }
 
@@ -409,6 +468,7 @@ fn admit(
     }
 
     let Some(id) = machine.next_id() else {
+        count_refusal(Refusal::AfterReservation);
         return Err(status::LIMIT_EXHAUSTED);
     };
     let generation = machine.invocations[invocation_index].lock().generation + 1;
@@ -1395,7 +1455,7 @@ pub fn begin_effect(machine: &mut Machine, ctx: &Ctx, staging: &mut Staging) -> 
             }
             None => (0, 0),
         };
-        return Err(exhausted("receipt_cells", used, capacity));
+        return Err(exhausted(Refusal::EffectReceiptCells, used, capacity));
     }
 
     node.closure_reserved_ns

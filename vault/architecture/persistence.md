@@ -33,6 +33,8 @@ Los tipos lógicos iniciales son bytes, árbol, manifiesto, política y recibo. 
 
 Paths solo existen en el adaptador de archivos: se resuelven desde una raíz autorizada y no pueden escapar mediante componentes o enlaces. V0 puede rechazar symlinks/hardlinks no soportados; no puede seguirlos fuera de la raíz ni anunciar compatibilidad POSIX completa. Timestamps de compatibilidad son metadatos explícitos, nunca el criterio de identidad.
 
+Leer un objeto durable recalcula su digest sobre los bytes. El servicio puede servirlo, en cambio, desde bytes que ya verificó en la misma ejecución: los que hasheó al prepararlo y escribió, o los que leyó del medio y verificó. Un objeto es inmutable y se nombra por su contenido, así que esos bytes son los suyos. Lo que se deja de notar dentro de la ejecución es un medio que perdió lo que esa ejecución escribió; la recuperación lee siempre del medio ([ADR-032](../decisions/ADR-032-verified-objects-kept-reply-before-repost-refusals-counted.md)).
+
 Un digest conocido no autoriza leer su contenido. La capacidad de endpoint lleva una faceta que delimita raíces/objetos y operaciones; el servicio comprueba accesibilidad desde ellas. La deduplicación física no mezcla los permisos de dos consumidores sobre bytes iguales.
 
 ## API de servicio V0

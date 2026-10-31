@@ -170,6 +170,66 @@ fn content() -> &'static mut [u8; OBJECT_MAX] {
     unsafe { &mut *(&raw mut CONTENT) }
 }
 
+/// Objects whose bytes this run already holds verified (ADR-032).
+///
+/// A durable object used to be read back from the medium every time it was
+/// loaded. Every publication of a Thalyx transaction loads three that the
+/// service itself had just written: the published manifest and its tree, to
+/// fork it, and the policy, to admit the next root. At about 35 µs a read
+/// through `virtio-blk`, that was a fifth of what a publication cost.
+///
+/// What is kept is bytes whose content digest is the digest they are kept
+/// under: staged bytes, which `stage` hashed to name them, written to the
+/// medium; or bytes read back and verified by `load`. Objects are immutable
+/// and named by content, so a kept copy can never be the wrong bytes for its
+/// name. What it gives up is noticing, while the same run lasts, that the
+/// medium has lost an object the run wrote and verified; recovery reads every
+/// record off the medium with an empty cache, and that is where the format
+/// says a damaged prefix is found. Opaque content (`BYTES`) is not kept: the
+/// link holds the file bytes it serves, and this keeps the room for the
+/// small objects every publication walks.
+#[cfg(feature = "verified-cache")]
+const VERIFIED_SLOTS: usize = 64;
+#[cfg(not(feature = "verified-cache"))]
+const VERIFIED_SLOTS: usize = 0;
+
+static mut VERIFIED: [[u8; OBJECT_MAX]; VERIFIED_SLOTS] = [[0u8; OBJECT_MAX]; VERIFIED_SLOTS];
+
+/// What each slot of [`VERIFIED`] holds.
+#[derive(Clone, Copy)]
+struct Verified {
+    digest: [u8; 32],
+    length: u32,
+    live: bool,
+}
+
+static mut VERIFIED_INDEX: [Verified; VERIFIED_SLOTS] = [Verified {
+    digest: [0u8; 32],
+    length: 0,
+    live: false,
+}; VERIFIED_SLOTS];
+
+/// The slot the next kept object takes, round robin.
+static mut VERIFIED_NEXT: usize = 0;
+
+#[allow(clippy::deref_addrof)]
+fn verified(index: usize) -> &'static mut [u8; OBJECT_MAX] {
+    // SAFETY: as `staged`.
+    unsafe { &mut (*(&raw mut VERIFIED))[index] }
+}
+
+#[allow(clippy::deref_addrof)]
+fn verified_index() -> &'static mut [Verified; VERIFIED_SLOTS] {
+    // SAFETY: as `staged`.
+    unsafe { &mut *(&raw mut VERIFIED_INDEX) }
+}
+
+#[allow(clippy::deref_addrof)]
+fn verified_next() -> &'static mut usize {
+    // SAFETY: as `staged`.
+    unsafe { &mut *(&raw mut VERIFIED_NEXT) }
+}
+
 /// One object the service knows about.
 #[derive(Clone, Copy)]
 pub struct ObjectEntry {
@@ -711,7 +771,9 @@ impl Store {
     ///
     /// A durable object is read back from the medium and its content digest is
     /// recomputed: an index entry is a memory of what was written, and this is
-    /// the service checking that memory against the bytes.
+    /// the service checking that memory against the bytes. With
+    /// `verified-cache`, an object whose bytes this run already verified is
+    /// copied from them instead (ADR-032).
     pub fn load(&mut self, index: usize) -> Option<usize> {
         let entry = self.objects[index];
         if !entry.live {
@@ -723,7 +785,13 @@ impl Store {
             content()[..length].copy_from_slice(&bytes[..length]);
             return Some(length);
         }
-        if !entry.durable || !self.disk.read(entry.block, READ_SLOT) {
+        if !entry.durable {
+            return None;
+        }
+        if self.recall(&entry) {
+            return Some(length);
+        }
+        if !self.disk.read(entry.block, READ_SLOT) {
             return None;
         }
         let span = slot_bytes(READ_SLOT);
@@ -742,7 +810,67 @@ impl Store {
             return None;
         }
         content()[..length].copy_from_slice(bytes);
+        self.keep(&entry, &content()[..length]);
         Some(length)
+    }
+
+    /// Whether a kept copy may stand in for reading the medium now.
+    ///
+    /// Only while a read would have been made and answered: a medium that
+    /// failed, was latched or cannot be reached answers a read with a refusal,
+    /// and a kept copy must not turn that refusal into bytes. A run the harness
+    /// directs keeps nothing, so every cut of K4 and K5 reads the medium as it
+    /// always did.
+    fn may_keep(&self) -> bool {
+        VERIFIED_SLOTS != 0
+            && !self.harness.present
+            && !self.disk.failed
+            && !self.disk.latched
+            && !self.disk.unreachable
+    }
+
+    /// Copies the kept bytes of `entry` into `content()`, if there are any.
+    fn recall(&self, entry: &ObjectEntry) -> bool {
+        if !self.may_keep() {
+            return false;
+        }
+        let length = entry.length as usize;
+        let Some(slot) = verified_index().iter().position(|kept| {
+            kept.live && kept.digest == entry.digest && kept.length == entry.length
+        }) else {
+            return false;
+        };
+        content()[..length].copy_from_slice(&verified(slot)[..length]);
+        true
+    }
+
+    /// Keeps `bytes`, which hash to `entry`'s digest, for [`recall`](Self::recall).
+    fn keep(&self, entry: &ObjectEntry, bytes: &[u8]) {
+        if !self.may_keep()
+            || entry.object_type == object_type::BYTES
+            || bytes.len() != entry.length as usize
+            || bytes.len() > OBJECT_MAX
+        {
+            return;
+        }
+        let index = verified_index();
+        if index
+            .iter()
+            .any(|kept| kept.live && kept.digest == entry.digest)
+        {
+            return;
+        }
+        // `max(1)`: without the feature there are no slots, `may_keep` has
+        // already answered, and a remainder by zero would not compile.
+        let slots = VERIFIED_SLOTS.max(1);
+        let slot = *verified_next() % slots;
+        *verified_next() = (slot + 1) % slots;
+        verified(slot)[..bytes.len()].copy_from_slice(bytes);
+        index[slot] = Verified {
+            digest: entry.digest,
+            length: entry.length,
+            live: true,
+        };
     }
 
     /// Copies one object's canonical bytes out, verified against its digest.
@@ -789,6 +917,10 @@ impl Store {
         self.objects[index].durable = true;
         self.objects[index].block = block;
         if stage != u32::MAX {
+            // The staged bytes are what `stage` hashed to name this object,
+            // so they are verified bytes for it: kept before the slot goes.
+            let entry = self.objects[index];
+            self.keep(&entry, &staged(stage as usize)[..entry.length as usize]);
             self.stage_used[stage as usize] = false;
             self.objects[index].stage = u32::MAX;
         }

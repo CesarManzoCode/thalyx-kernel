@@ -17,3 +17,8 @@
 - **EXP-13 necesita `/mnt/exp13` montado, y el montaje loop se pierde en cada reinicio.** Montarlo requiere root.
 - **El cierre usa 6 rondas de K6; la campaña recomienda 57** (`{"rounds_recommended": 57}` en la salida de `check_k6.py`).
 - **El build del workspace da dos advertencias:** la feature `quiet-io` no está declarada en `thalyx-user-k6super`, que compila `k5super/src/audit.rs` (`unexpected_cfgs`), y `rust-lld` no encuentra `_start` al enlazar `bootx64` para `x86_64-unknown-none`.
+
+## Desde K8
+
+- **En la etapa `thalyx`, `k4store` no relee del medio lo que ya verificó en la misma ejecución** (ADR-032). Un medio que pierde o daña durante la ejecución un árbol, manifiesto, política, validación o recibo que esa ejecución escribió se ve al recuperar, no en la lectura. Las imágenes de las puertas K4 y K5 no tienen la caché.
+- **El −9 de K6 sigue sin causa conocida.** Desde ADR-032 el kernel cuenta cada rechazo de admisión por recurso (`k2.admission_refusals`), pero ninguna campaña lo ha leído todavía.

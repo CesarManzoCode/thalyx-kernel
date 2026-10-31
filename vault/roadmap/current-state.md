@@ -645,6 +645,25 @@ Cambiado sin medir, por la regla del mini sprint ([ADR-031](../decisions/ADR-031
 
 No se compiló ni se probó dentro de la ronda. Ninguna puerta corta una corrida agrupada antes de su flush, y MODEL-02 no modela la variante agrupada (ADR-031 dice qué haría falta). No atacado en esta ronda: las relecturas de objetos durables en la admisión y en `closure`, las llamadas de `commit_root` que no escriben el medio, el sondeo del anillo en `k4disk` (H2), el flush propio del outbox y el −9 de `scale.ipc` en K6.
 
+### El cierre 5 de K8
+
+Observado en `build/k8/check-20261030T200213` (kernel `0c8005f`, Thalyx `3ac575f`, KVM, 6 rondas × 16 casos) y en la campaña `build/k6/campaigns/kiln-k6` de la misma verificación:
+
+- **`K1 − L1` = +0,028 ms [−0,145, +0,169].** Pasan `k8.same_experiment`, `k8.durability` y `k8.behavior`. Por fase, `candidate` da −0,115 ms, `open` +0,045 ms y `end` +0,020 ms.
+- **ADR-031 se cumplió.** `disk_flushes` es igual al número de publicaciones del link (2, 3 y 5), y `disk_writes` es una más. El total bajó unos 0,09 ms, cerca de los 0,11 esperados y dentro del ancho de los intervalos.
+- **Las lecturas que quedan son relecturas de lo que K4 acaba de escribir.** Son 3 con dos publicaciones, 6 con tres y 16 en `two-transactions-in-a-row`, a 32–34 µs por petición. Por el código, cada publicación después de la primera relee el manifiesto y el árbol publicados (`FORK`) y la política (`PUBLISH`). Las tres de los diez casos son de la evidencia, fuera de `whole_ns`; cada publicación en `settle` suma tres dentro de la ventana. La atribución por tipo se infirió y no se contó.
+- **K1 gana en nueve de dieciséis casos.** Pierden los cinco que publican en `settle`, `two-transactions-in-a-row` y `the-program-asks-for-the-model`. En este último la diferencia (+1,25 ms) está en `context`, una inferencia en el anfitrión que no pasa por el link. `end_state` tarda 48 µs en K1 y 26 µs en L1 en los dieciséis casos.
+- **El `check_k6.py` de kiln falló `no_loss` (23/24)** en las rondas nativas 1 y 2, en `scale.ipc` con 1 a 4 pares, con `lost` = 0. Las rondas 3 a 6 no tuvieron rechazos. La reserva que rechazó no está en la medida.
+
+Cambiado sin medir, por la regla del mini sprint ([ADR-032](../decisions/ADR-032-verified-objects-kept-reply-before-repost-refusals-counted.md)). Hipótesis H1 de RES-003: lo que K1 paga de más son cruces en el camino de la respuesta.
+
+- **En la etapa `thalyx`, `k4store` sirve desde memoria los objetos que ya verificó en la ejecución** (feature `verified-cache`): los bytes en staging de lo que escribió y los que leyó y verificó, salvo el contenido opaco. No guarda ni sirve nada con una directiva del arnés ni con el medio fallido, sellado o inalcanzable. Las imágenes de las puertas K4 y K5 no la tienen. La recuperación arranca con la caché vacía y nada de lo que se escribe cambia. Busca que `disk_requests` baje de 8 a 5, de 13 a 7 y de 27 a 11, y que `K1 − L1` baje unos 0,11 ms en los cinco casos que publican en `settle` y de 0,3 a 0,45 ms en `two-transactions-in-a-row`.
+- **El link devuelve la página de recepción después de responder.** Antes la devolvía, con su notificación al dispositivo, antes de atender cada trama. Busca de −2 a −6 µs por trama, de −0,06 a −0,2 ms en los dieciséis casos.
+- **Total esperado:** mediana entre −0,12 y −0,25 ms, con el límite superior del IC entre +0,06 y −0,08 ms. Que pase de cero no es seguro.
+- **El kernel cuenta cada rechazo de admisión por recurso** y lo escribe al final en `k2.admission_refusals`, que la imagen de medida no retiene. `tools/run_k6.py` lo copia a `extra.kernel`. No arregla el −9 de K6: dice cuál de las siete reservas lo produce.
+
+No se compiló ni se probó dentro de la ronda. No atacado: la escritura de más del `seed` (agrandar `IOBUF_PAGES` toca el ámbito del supervisor de K4), SHA-256 en software sobre `qemu64`, `context` en `the-program-asks-for-the-model`, el sondeo del anillo en `k4disk` (H2), el flush propio del outbox y la causa del −9 de K6.
+
 ## Reanudar aquí
 
 **Último hito terminado y pusheado:** **K6 completo en su alcance** —protocolos emparejados, campaña de referencia, EXP-12, ocho cuellos medidos y corregidos, parámetros V0 revisados, inventario físico, puerta K6— en la rama `feat/k6-comparison-hardening-reference`. K5 quedó completo en `feat/k5-thalyx-port-tools`.

@@ -21,6 +21,11 @@ every-principal-publishes = []
 # publication, as k4disk's `quiet-io` does for its per-operation notes. Only the
 # measurement image (`--k4-io-notes off`) has it. See `state.rs`.
 quiet-io = []
+# Keeps the bytes of the trees, manifests, policies, validations and receipts
+# this run wrote or read back and verified, so that reading one again does not
+# go back to the medium (ADR-032). Only the Thalyx stage has it, with
+# `large-index`; every K4 and K5 gate image reads the medium as before.
+verified-cache = []
 
 [dependencies]
 thalyx-abi.workspace = true

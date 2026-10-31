@@ -407,8 +407,8 @@ fn run() -> ! {
             let bytes = console.rx_bytes(port, received.buffer, received.len);
             !buffers().ports[port as usize].push(bytes)
         };
-        console.repost(port, received.buffer);
         if overflowed {
+            console.repost(port, received.buffer);
             k2::note(note::LINK_UNEXPECTED, 0x9004);
             buffers().ports[port as usize].have = 0;
             continue;
@@ -461,6 +461,14 @@ fn run() -> ! {
                 break;
             }
         }
+        // The page goes back to the device after the replies it completed,
+        // not before them. Its bytes are already in the port's assembly, and
+        // the device holds the port's other receive pages meanwhile. Giving it
+        // back is a notification: an exit from the guest, which QEMU handles
+        // in the loop that also takes the reply. Made first, it put both
+        // between every request and its answer (ADR-032). A page that
+        // completes no frame goes back at once, as before.
+        console.repost(port, received.buffer);
     }
 
     // A reply is published without waiting for the device to take it; the
